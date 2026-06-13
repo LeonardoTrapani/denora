@@ -111,11 +111,15 @@ const upsertUser = Effect.fn("UserSync.upsertUser")(function* (
   return toDenoraUser(row);
 });
 
-const isStaleActiveProjection = (existing: UserRow, workosUser: WorkOsUser) =>
+export const isStaleActiveProjection = (existing: UserRow, workosUser: WorkOsUser) =>
   existing.workosUpdatedAt > workosUser.updatedAt ||
   (existing.workosDeletedAt !== null && existing.workosDeletedAt >= workosUser.updatedAt);
 
-const isStaleDeletedProjection = (existing: UserRow, workosUser: WorkOsUser, deletedAt: string) =>
+export const isStaleDeletedProjection = (
+  existing: UserRow,
+  workosUser: WorkOsUser,
+  deletedAt: string,
+) =>
   existing.workosUpdatedAt > workosUser.updatedAt ||
   (existing.workosDeletedAt !== null && existing.workosDeletedAt >= deletedAt);
 

@@ -11,14 +11,17 @@ import { Authorization } from "../../auth/Authorization.ts";
 import { WorkOsAuth } from "../../auth/WorkOsAuth.ts";
 import { DefaultWebOrigin, ServerConfig } from "../../config/ServerConfig.ts";
 
-const CsrfTokenTtlMs = 10 * 60 * 1000;
+export const CsrfTokenTtlMs = 10 * 60 * 1000;
 const CsrfHeaderName = "x-csrf-token";
 const CsrfFormFieldName = "csrfToken";
 
-const firstSearchParam = (value: string | ReadonlyArray<string> | undefined) =>
+export const firstSearchParam = (value: string | ReadonlyArray<string> | undefined) =>
   Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 
-const redirectToAllowedWebOrigin = (options: ServerConfig.Auth, candidate: string | null) => {
+export const redirectToAllowedWebOrigin = (
+  options: ServerConfig.Auth,
+  candidate: string | null,
+) => {
   const fallback = options.webOrigins[0] ?? DefaultWebOrigin;
   if (!candidate) return fallback;
 
@@ -35,7 +38,7 @@ const redirectToAllowedWebOrigin = (options: ServerConfig.Auth, candidate: strin
   return fallback;
 };
 
-const withAuthError = (destination: string, code: string) => {
+export const withAuthError = (destination: string, code: string) => {
   if (!URL.canParse(destination)) return destination;
 
   const url = new URL(destination);
@@ -58,7 +61,7 @@ const getCsrfSigningPayload = (
   sessionCookie: string | undefined,
 ) => `${issuedAt}.${nonce}.${sessionCookie ?? ""}`;
 
-const signCsrfToken = (
+export const signCsrfToken = (
   secret: Redacted.Redacted<string>,
   issuedAt: string,
   nonce: string,
@@ -68,7 +71,7 @@ const signCsrfToken = (
     .update(getCsrfSigningPayload(issuedAt, nonce, sessionCookie))
     .digest("base64url");
 
-const createCsrfToken = (options: ServerConfig.Auth, sessionCookie: string | undefined) => {
+export const createCsrfToken = (options: ServerConfig.Auth, sessionCookie: string | undefined) => {
   const issuedAt = Date.now().toString(36);
   const nonce = randomBytes(16).toString("base64url");
   const signature = signCsrfToken(options.csrfSecret, issuedAt, nonce, sessionCookie);
@@ -84,7 +87,7 @@ const isEqualSignature = (actual: string, expected: string) => {
   );
 };
 
-const isValidCsrfToken = (
+export const isValidCsrfToken = (
   options: ServerConfig.Auth,
   token: string | null,
   sessionCookie: string | undefined,

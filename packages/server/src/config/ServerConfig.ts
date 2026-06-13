@@ -10,6 +10,7 @@ export const DefaultWebOrigin = "http://localhost:3000";
 export interface Auth {
   readonly apiKey: Redacted.Redacted<string>;
   readonly clientId: string;
+  readonly csrfSecret: Redacted.Redacted<string>;
   readonly cookiePassword: Redacted.Redacted<string>;
   readonly cookieDomain: string | undefined;
   readonly webOrigins: ReadonlyArray<string>;
@@ -33,11 +34,19 @@ const webOrigins = Config.schema(Config.Array(Schema.Trim), "DENORA_WEB_ORIGINS"
   Config.withDefault([DefaultWebOrigin]),
 );
 
+const csrfSecret = Config.schema(Schema.Redacted(Schema.NonEmptyString), "CSRF_SECRET");
+
+const workOsCookiePassword = Config.schema(
+  Schema.Redacted(Schema.String.check(Schema.isLengthBetween(32, 32))),
+  "WORKOS_COOKIE_PASSWORD",
+);
+
 export const load: Config.Config<Values> = Config.all({
   auth: Config.all({
     apiKey: Config.redacted("WORKOS_API_KEY"),
     clientId: Config.nonEmptyString("WORKOS_CLIENT_ID"),
-    cookiePassword: Config.redacted("WORKOS_COOKIE_PASSWORD"),
+    csrfSecret,
+    cookiePassword: workOsCookiePassword,
     cookieDomain,
     webOrigins,
   }),

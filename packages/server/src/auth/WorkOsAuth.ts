@@ -1,5 +1,4 @@
 import { WorkOS } from "@workos-inc/node";
-import type { User as WorkOsUser } from "@workos-inc/node";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,10 +6,8 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Db } from "../persistence/Db.ts";
-import { schema } from "../persistence/schema.ts";
+import { UserSync, UserSyncError } from "./UserSync.ts";
 import { AuthUser } from "./User.ts";
-
-declare const crypto: { randomUUID(): string };
 
 type Options = ServerConfig.Auth;
 type SealedSession = ReturnType<WorkOS["userManagement"]["loadSealedSession"]>;
@@ -69,7 +66,7 @@ export const layer = Layer.effect(
       authenticateWithCode: ({ code, metadata }) =>
         Effect.gen(function* () {
           const auth = yield* authenticateWorkOsCode(client, options, code, metadata);
-          const user = yield* syncUser(db.client, auth.user);
+          const user = yield* UserSync.syncUser(db.client, auth.user);
           if (!auth.sealedSession) return { user };
           return { user, sealedSession: auth.sealedSession };
         }),
@@ -96,76 +93,6 @@ export class WorkOsSessionError extends Schema.TaggedErrorClass<WorkOsSessionErr
     cause: Schema.Defect(),
   },
 ) {}
-
-export class UserSyncError extends Schema.TaggedErrorClass<UserSyncError>()("UserSyncError", {
-  workosUserId: Schema.String,
-  cause: Schema.Defect(),
-}) {}
-
-const syncUser = Effect.fn("WorkOsAuth.syncUser")(function* (
-  client: Db.Client,
-  workosUser: WorkOsUser,
-) {
-  const now = new Date().toISOString();
-  const rows = yield* client
-    .insert(schema.users)
-    .values({
-      id: crypto.randomUUID(),
-      workosUserId: workosUser.id,
-      email: workosUser.email,
-      emailVerified: workosUser.emailVerified,
-      name: workosUser.name,
-      firstName: workosUser.firstName,
-      lastName: workosUser.lastName,
-      profilePictureUrl: workosUser.profilePictureUrl,
-      locale: workosUser.locale,
-      lastSignInAt: workosUser.lastSignInAt,
-      workosCreatedAt: workosUser.createdAt,
-      workosUpdatedAt: workosUser.updatedAt,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: schema.users.workosUserId,
-      set: {
-        email: workosUser.email,
-        emailVerified: workosUser.emailVerified,
-        name: workosUser.name,
-        firstName: workosUser.firstName,
-        lastName: workosUser.lastName,
-        profilePictureUrl: workosUser.profilePictureUrl,
-        locale: workosUser.locale,
-        lastSignInAt: workosUser.lastSignInAt,
-        workosCreatedAt: workosUser.createdAt,
-        workosUpdatedAt: workosUser.updatedAt,
-        updatedAt: now,
-      },
-    })
-    .returning()
-    .pipe(Effect.mapError((cause) => new UserSyncError({ workosUserId: workosUser.id, cause })));
-
-  const row = rows[0];
-  if (!row) {
-    return yield* new UserSyncError({
-      workosUserId: workosUser.id,
-      cause: new Error("User upsert did not return a row"),
-    });
-  }
-
-  return new AuthUser.DenoraUser({
-    id: row.id,
-    workosUserId: row.workosUserId,
-    email: row.email,
-    emailVerified: row.emailVerified,
-    name: row.name,
-    firstName: row.firstName,
-    lastName: row.lastName,
-    profilePictureUrl: row.profilePictureUrl,
-    locale: row.locale,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  });
-});
 
 const getWorkOsAuthorizationUrl = Effect.fn("WorkOsAuth.getWorkOsAuthorizationUrl")(
   (client: WorkOS, options: Options, redirectUri: string, returnTo: string) =>
@@ -244,7 +171,7 @@ const authenticateCredential = Effect.fn("WorkOsAuth.authenticateCredential")(fu
   const authenticateResult = yield* authenticateSealedSession(session);
 
   if (authenticateResult.authenticated) {
-    const user = yield* syncUser(db, authenticateResult.user);
+    const user = yield* UserSync.syncUser(db, authenticateResult.user);
     return { user };
   }
 
@@ -255,9 +182,11 @@ const authenticateCredential = Effect.fn("WorkOsAuth.authenticateCredential")(fu
     });
   }
 
-  const user = yield* syncUser(db, refreshResult.user);
+  const user = yield* UserSync.syncUser(db, refreshResult.user);
   if (!refreshResult.sealedSession) return { user };
   return { user, sealedSession: refreshResult.sealedSession };
 });
+
+export { UserSyncError } from "./UserSync.ts";
 
 export * as WorkOsAuth from "./WorkOsAuth.ts";

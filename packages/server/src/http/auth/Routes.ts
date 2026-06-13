@@ -1,11 +1,19 @@
+import { Buffer } from "node:buffer";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import * as UrlParams from "effect/unstable/http/UrlParams";
 import { Authorization } from "../../auth/Authorization.ts";
 import { WorkOsAuth } from "../../auth/WorkOsAuth.ts";
 import { DefaultWebOrigin, ServerConfig } from "../../config/ServerConfig.ts";
+
+const CsrfTokenTtlMs = 10 * 60 * 1000;
+const CsrfHeaderName = "x-csrf-token";
+const CsrfFormFieldName = "csrfToken";
 
 const firstSearchParam = (value: string | ReadonlyArray<string> | undefined) =>
   Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
@@ -27,8 +35,80 @@ const redirectToAllowedWebOrigin = (options: ServerConfig.Auth, candidate: strin
   return fallback;
 };
 
-const redirectToFallback = (destination: string) =>
-  Effect.succeed(HttpServerResponse.redirect(destination));
+const withAuthError = (destination: string, code: string) => {
+  if (!URL.canParse(destination)) return destination;
+
+  const url = new URL(destination);
+  url.searchParams.set("authError", code);
+  return url.toString();
+};
+
+const redirectWithAuthError = (destination: string, code: string) =>
+  Effect.succeed(HttpServerResponse.redirect(withAuthError(destination, code)));
+
+const parseFormBody = (request: HttpServerRequest.HttpServerRequest) =>
+  request.urlParamsBody.pipe(Effect.catch(() => Effect.succeed(UrlParams.empty)));
+
+const firstUrlParam = (params: UrlParams.UrlParams, key: string) =>
+  Option.getOrNull(UrlParams.getFirst(params, key));
+
+const getCsrfSigningPayload = (
+  issuedAt: string,
+  nonce: string,
+  sessionCookie: string | undefined,
+) => `${issuedAt}.${nonce}.${sessionCookie ?? ""}`;
+
+const signCsrfToken = (
+  secret: Redacted.Redacted<string>,
+  issuedAt: string,
+  nonce: string,
+  sessionCookie: string | undefined,
+) =>
+  createHmac("sha256", Redacted.value(secret))
+    .update(getCsrfSigningPayload(issuedAt, nonce, sessionCookie))
+    .digest("base64url");
+
+const createCsrfToken = (options: ServerConfig.Auth, sessionCookie: string | undefined) => {
+  const issuedAt = Date.now().toString(36);
+  const nonce = randomBytes(16).toString("base64url");
+  const signature = signCsrfToken(options.csrfSecret, issuedAt, nonce, sessionCookie);
+  return `${issuedAt}.${nonce}.${signature}`;
+};
+
+const isEqualSignature = (actual: string, expected: string) => {
+  const actualBytes = Buffer.from(actual, "base64url");
+  const expectedBytes = Buffer.from(expected, "base64url");
+  return (
+    actualBytes.byteLength === expectedBytes.byteLength &&
+    timingSafeEqual(actualBytes, expectedBytes)
+  );
+};
+
+const isValidCsrfToken = (
+  options: ServerConfig.Auth,
+  token: string | null,
+  sessionCookie: string | undefined,
+) => {
+  if (!token) return false;
+
+  const [issuedAt, nonce, signature, extra] = token.split(".");
+  if (!issuedAt || !nonce || !signature || extra !== undefined) return false;
+
+  const issuedAtMs = Number.parseInt(issuedAt, 36);
+  if (!Number.isFinite(issuedAtMs)) return false;
+
+  const age = Date.now() - issuedAtMs;
+  if (age < 0 || age > CsrfTokenTtlMs) return false;
+
+  try {
+    return isEqualSignature(
+      signature,
+      signCsrfToken(options.csrfSecret, issuedAt, nonce, sessionCookie),
+    );
+  } catch {
+    return false;
+  }
+};
 
 export const routes = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -41,7 +121,9 @@ export const routes = HttpRouter.use((router) =>
         const params = yield* HttpServerRequest.ParsedSearchParams;
         const destination = redirectToAllowedWebOrigin(options, firstSearchParam(params.returnTo));
 
-        if (!URL.canParse(request.url)) return HttpServerResponse.redirect(destination);
+        if (!URL.canParse(request.url)) {
+          return HttpServerResponse.redirect(withAuthError(destination, "login_failed"));
+        }
 
         return yield* Effect.gen(function* () {
           const requestUrl = new URL(request.url);
@@ -51,7 +133,11 @@ export const routes = HttpRouter.use((router) =>
           });
 
           return HttpServerResponse.redirect(authorizationUrl);
-        }).pipe(Effect.catchTag("WorkOsAuthError", () => redirectToFallback(destination)));
+        }).pipe(
+          Effect.catchTag("WorkOsAuthError", () =>
+            redirectWithAuthError(destination, "login_failed"),
+          ),
+        );
       }),
     );
 
@@ -61,7 +147,9 @@ export const routes = HttpRouter.use((router) =>
         const destination = redirectToAllowedWebOrigin(options, firstSearchParam(params.state));
         const callbackCode = firstSearchParam(params.code);
 
-        if (!callbackCode) return HttpServerResponse.redirect(destination);
+        if (!callbackCode) {
+          return HttpServerResponse.redirect(withAuthError(destination, "callback_missing_code"));
+        }
 
         return yield* Effect.gen(function* () {
           const forwardedFor = request.headers["x-forwarded-for"]?.split(",")[0]?.trim();
@@ -86,25 +174,57 @@ export const routes = HttpRouter.use((router) =>
             response,
             session.sealedSession,
             options,
-          ).pipe(Effect.orDie);
+          ).pipe(
+            Effect.catchTag("CookieError", () =>
+              Effect.succeed(
+                HttpServerResponse.redirect(withAuthError(destination, "session_cookie_failed")),
+              ),
+            ),
+          );
         }).pipe(
           Effect.catchTags({
-            WorkOsAuthError: () => redirectToFallback(destination),
-            UserSyncError: () => redirectToFallback(destination),
+            WorkOsAuthError: () => redirectWithAuthError(destination, "callback_failed"),
+            UserSyncError: () => redirectWithAuthError(destination, "user_sync_failed"),
           }),
         );
       }),
     );
 
+    yield* router.add("GET", "/auth/csrf-token", (request) => {
+      const csrfToken = createCsrfToken(options, request.cookies[Authorization.SessionCookieName]);
+      return Effect.succeed(
+        HttpServerResponse.text(JSON.stringify({ csrfToken }), {
+          contentType: "application/json",
+          headers: {
+            "cache-control": "no-store",
+          },
+        }),
+      );
+    });
+
     yield* router.add("POST", "/auth/logout", (request) =>
       Effect.gen(function* () {
         const params = yield* HttpServerRequest.ParsedSearchParams;
-        const fallback = redirectToAllowedWebOrigin(options, firstSearchParam(params.returnTo));
+        const body = yield* parseFormBody(request);
+        const fallback = redirectToAllowedWebOrigin(
+          options,
+          firstSearchParam(params.returnTo) ?? firstUrlParam(body, "returnTo"),
+        );
         const cookie = request.cookies[Authorization.SessionCookieName];
+
+        const csrfToken = request.headers[CsrfHeaderName] ?? firstUrlParam(body, CsrfFormFieldName);
+        if (!isValidCsrfToken(options, csrfToken, cookie)) {
+          return HttpServerResponse.text("Invalid CSRF token", { status: 403 });
+        }
+
         const logoutUrl = cookie
           ? yield* auth
               .getLogoutUrl({ sealedSession: cookie, returnTo: fallback })
-              .pipe(Effect.catchTag("WorkOsSessionError", () => Effect.succeed(fallback)))
+              .pipe(
+                Effect.catchTag("WorkOsSessionError", () =>
+                  Effect.succeed(withAuthError(fallback, "logout_failed")),
+                ),
+              )
           : fallback;
 
         const response = HttpServerResponse.redirect(logoutUrl);

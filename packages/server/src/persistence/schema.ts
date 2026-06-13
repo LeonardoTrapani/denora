@@ -20,10 +20,25 @@ export const users = pgTable(
     lastSignInAt: text("last_sign_in_at"),
     workosCreatedAt: text("workos_created_at").notNull(),
     workosUpdatedAt: text("workos_updated_at").notNull(),
+    deletedAt: text("deleted_at"),
+    workosDeletedAt: text("workos_deleted_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
   (table) => [uniqueIndex("users_workos_user_id_unique").on(table.workosUserId)],
 );
+
+export const workosEventCursors = pgTable("workos_event_cursors", {
+  name: text("name").primaryKey(),
+  lastEventId: text("last_event_id"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const workosEventSyncLocks = pgTable("workos_event_sync_locks", {
+  name: text("name").primaryKey(),
+  owner: text("owner").notNull(),
+  leasedUntil: text("leased_until").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
 
 export * as schema from "./schema.ts";

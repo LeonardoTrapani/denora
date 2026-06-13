@@ -4,6 +4,7 @@ import * as Drizzle from "alchemy/Drizzle";
 import * as Neon from "alchemy/Neon";
 import { AlchemyDb } from "@denora/server/persistence/AlchemyDb";
 import { ServerResource } from "@denora/server/server/Resource";
+import { WorkOsEventsResource } from "@denora/server/server/WorkOsEventsResource";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -19,6 +20,7 @@ export default Alchemy.Stack(
     const { branch } = yield* AlchemyDb.DenoraDb;
     const hyperdrive = yield* AlchemyDb.DenoraHyperdrive;
     const server = yield* ServerResource.Resource;
+    const workosEvents = yield* WorkOsEventsResource.Resource;
     const serverUrl = server.url.as<string>();
 
     const web = yield* Cloudflare.Vite("Web", {
@@ -35,6 +37,7 @@ export default Alchemy.Stack(
       databaseName: branch.databaseName,
       hyperdriveId: hyperdrive.hyperdriveId,
       serverUrl,
+      workosEventsWorkerName: workosEvents.workerName,
       webUrl: web.url.as<string>(),
     };
   }),

@@ -27,6 +27,12 @@
       "bun": "./src/server/Resource.ts",
       "import": "./src/server/Resource.ts",
       "default": "./src/server/Resource.ts"
+    },
+    "./server/WorkOsEventsResource": {
+      "types": "./src/server/WorkOsEventsResource.ts",
+      "bun": "./src/server/WorkOsEventsResource.ts",
+      "import": "./src/server/WorkOsEventsResource.ts",
+      "default": "./src/server/WorkOsEventsResource.ts"
     }
   },
   "scripts": {

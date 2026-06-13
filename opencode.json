@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "effect-v4": {
+      "repository": "Effect-TS/effect-smol",
+      "branch": "main",
+      "description": "Use for Effect v4 beta APIs, patterns, migration guidance, source, tests, and ai-docs."
+    }
+  }
+}

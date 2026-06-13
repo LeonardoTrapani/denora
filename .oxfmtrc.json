@@ -1,0 +1,10 @@
+{
+  "ignorePatterns": [
+    "dist/**",
+    "node_modules/**",
+    ".output/**",
+    ".tanstack/**",
+    ".turbo/**",
+    "**/*/routeTree.gen.ts"
+  ]
+}

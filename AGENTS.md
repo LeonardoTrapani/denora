@@ -8,9 +8,9 @@ Agents should prioritize improving the overall design and quality of the system 
 - Run the relevant available checks before considering tasks completed. In the current skeleton this usually means `bun fmt`, `bun lint`, `bun check-types`, and `bun run build`.
 - When a test script exists, use `bun run test`. NEVER run `bun test`. You are not required to run all the tests if it's not needed to the task.
 
-## Daenya
+## Denora
 
-`daenya` is a Bun Turborepo monorepo for a secure personal agent product with explicit agent identity, understandable controls, permissions, approvals, and a chat-first mobile/web interface.
+`denora` is a Bun Turborepo monorepo for a secure personal agent product with explicit agent identity, understandable controls, permissions, approvals, and a chat-first mobile/web interface.
 
 - Use `bun`; root workspaces `packages/*`.
 - No app framework or package layout has been selected yet. Do not create apps or packages without asking when the stack is unclear.

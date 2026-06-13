@@ -1,0 +1,43 @@
+{
+  "name": "@denora/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./Api": {
+      "types": "./src/Api.ts",
+      "bun": "./src/Api.ts",
+      "import": "./src/Api.ts",
+      "default": "./src/Api.ts"
+    },
+    "./Client": {
+      "types": "./src/Client.ts",
+      "bun": "./src/Client.ts",
+      "import": "./src/Client.ts",
+      "default": "./src/Client.ts"
+    },
+    "./Db": {
+      "types": "./src/Db.ts",
+      "bun": "./src/Db.ts",
+      "import": "./src/Db.ts",
+      "default": "./src/Db.ts"
+    },
+    "./Server": {
+      "types": "./src/Server.ts",
+      "bun": "./src/Server.ts",
+      "import": "./src/Server.ts",
+      "default": "./src/Server.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/sql-pg": "^4.0.0-beta.83",
+    "alchemy": "^2.0.0-beta.55",
+    "drizzle-orm": "1.0.0-rc.1",
+    "effect": "^4.0.0-beta.83",
+    "pg": "^8.13.0"
+  }
+}

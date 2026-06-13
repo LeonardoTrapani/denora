@@ -5,6 +5,11 @@
       "repository": "Effect-TS/effect-smol",
       "branch": "main",
       "description": "Use for Effect v4 beta APIs, patterns, migration guidance, source, tests, and ai-docs."
+    },
+    "alchemy-effect": {
+      "repository": "alchemy-run/alchemy-effect",
+      "branch": "main",
+      "description": "Use for Alchemy Effect v2 APIs, patterns, migration guidance, source, tests, and ai-docs. Also about doubts regarding anything about deploys."
     }
   }
 }

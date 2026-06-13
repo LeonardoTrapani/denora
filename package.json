@@ -1,25 +1,40 @@
 {
-  "name": "daenya",
+  "name": "denora",
   "private": true,
   "workspaces": [
-    "apps/*",
     "packages/*"
   ],
+  "type": "module",
   "scripts": {
     "init": "bunx effect-language-service patch",
     "codegen": "turbo run codegen",
-    "build": "turbo run build",
-    "dev": "turbo run dev",
+    "build": "tsc --noEmit && turbo run build",
+    "dev": "alchemy dev",
+    "dev:web": "turbo run dev --filter=@denora/web",
+    "deploy": "alchemy deploy",
+    "destroy": "alchemy destroy",
     "test": "turbo run test test-types",
     "lint": "oxlint . --no-error-on-unmatched-pattern",
     "lint:fix": "oxlint --fix . --no-error-on-unmatched-pattern",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
     "format": "bun fmt",
-    "check-types": "turbo run check-types"
+    "check-types": "tsc --noEmit && turbo run check-types"
+  },
+  "dependencies": {
+    "@denora/server": "workspace:*",
+    "@effect/platform-bun": "^4.0.0-beta.83",
+    "@effect/platform-node": "^4.0.0-beta.83",
+    "@effect/sql-pg": "^4.0.0-beta.83",
+    "alchemy": "^2.0.0-beta.55",
+    "drizzle-orm": "1.0.0-rc.1",
+    "effect": "^4.0.0-beta.83",
+    "pg": "^8.13.0"
   },
   "devDependencies": {
     "@effect/language-service": "^0.86.2",
+    "@types/pg": "^8.11.0",
+    "drizzle-kit": "1.0.0-rc.1",
     "oxfmt": "^0.54.0",
     "oxlint": "^1.69.0",
     "turbo": "^2.9.18",

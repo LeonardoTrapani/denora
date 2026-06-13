@@ -7,7 +7,7 @@ Use flat top-level exports combined with a self-reexport at the bottom of the fi
 ```ts
 // src/foo/Foo.ts
 export interface Interface { ... }
-export class Service extends Context.Service<Service, Interface>()("@daenya/Foo") {}
+export class Service extends Context.Service<Service, Interface>()("@denora/Foo") {}
 export const layer = Layer.effect(Service, ...)
 export const defaultLayer = layer.pipe(...)
 

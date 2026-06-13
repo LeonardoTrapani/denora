@@ -4,29 +4,29 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./Api": {
-      "types": "./src/Api.ts",
-      "bun": "./src/Api.ts",
-      "import": "./src/Api.ts",
-      "default": "./src/Api.ts"
-    },
     "./Client": {
       "types": "./src/Client.ts",
       "bun": "./src/Client.ts",
       "import": "./src/Client.ts",
       "default": "./src/Client.ts"
     },
-    "./Db": {
-      "types": "./src/Db.ts",
-      "bun": "./src/Db.ts",
-      "import": "./src/Db.ts",
-      "default": "./src/Db.ts"
+    "./http/Api": {
+      "types": "./src/http/Api.ts",
+      "bun": "./src/http/Api.ts",
+      "import": "./src/http/Api.ts",
+      "default": "./src/http/Api.ts"
     },
-    "./Server": {
-      "types": "./src/Server.ts",
-      "bun": "./src/Server.ts",
-      "import": "./src/Server.ts",
-      "default": "./src/Server.ts"
+    "./persistence/AlchemyDb": {
+      "types": "./src/persistence/AlchemyDb.ts",
+      "bun": "./src/persistence/AlchemyDb.ts",
+      "import": "./src/persistence/AlchemyDb.ts",
+      "default": "./src/persistence/AlchemyDb.ts"
+    },
+    "./server/Resource": {
+      "types": "./src/server/Resource.ts",
+      "bun": "./src/server/Resource.ts",
+      "import": "./src/server/Resource.ts",
+      "default": "./src/server/Resource.ts"
     }
   },
   "scripts": {
@@ -35,6 +35,7 @@
   },
   "dependencies": {
     "@effect/sql-pg": "^4.0.0-beta.83",
+    "@workos-inc/node": "^10.2.0",
     "alchemy": "^2.0.0-beta.55",
     "drizzle-orm": "1.0.0-rc.1",
     "effect": "^4.0.0-beta.83",

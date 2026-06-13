@@ -8,7 +8,7 @@ const MigrationsTable = "denora_migrations";
 
 export const DenoraDb = Effect.gen(function* () {
   const schema = yield* Drizzle.Schema("denora-schema", {
-    schema: "./packages/server/src/schema.ts",
+    schema: "./packages/server/src/persistence/schema.ts",
     out: MigrationsDir,
   });
 
@@ -33,4 +33,4 @@ export const DenoraHyperdrive = Effect.gen(function* () {
   });
 });
 
-export * as Db from "./Db.ts";
+export * as AlchemyDb from "./AlchemyDb.ts";

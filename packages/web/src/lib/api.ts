@@ -16,11 +16,8 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
+import { WebConfig } from "./WebConfig.ts";
 import { withAuthForwardingHeaders } from "./request-auth-headers";
-
-const rawApiUrl = import.meta.env.VITE_API_URL;
-
-const apiUrl = rawApiUrl?.replace(/\/+$/, "") ?? "";
 
 const withRequestHeaders = HttpClient.mapRequestEffect((request) =>
   Effect.promise(async () => {
@@ -34,9 +31,9 @@ const FetchClientLive = FetchHttpClient.layer.pipe(
 );
 
 const apiRuntime =
-  apiUrl.length > 0
+  WebConfig.apiUrl.length > 0
     ? ManagedRuntime.make(
-        Client.DenoraClient.layer(apiUrl, {
+        Client.layer(WebConfig.apiUrl, {
           httpClientLayer: FetchClientLive,
           transformClient: (client) => client.pipe(withRequestHeaders),
         }),
@@ -74,14 +71,12 @@ export async function runApi<A, E>(
   effect: Effect.Effect<A, E, Client.DenoraClient>,
   options: ApiRunOptions = {},
 ): Promise<A> {
-  if (!apiRuntime) {
-    throw new Error("VITE_API_URL is not configured");
-  }
+  const runtime = apiRuntime ?? WebConfig.missingApiUrl();
 
   const runnable = Effect.scoped(
     effect.pipe(Effect.withSpan(options.span ?? "api"), Effect.tapCause(Effect.logError)),
   );
-  const exit = await apiRuntime.runPromiseExit(runnable, {
+  const exit = await runtime.runPromiseExit(runnable, {
     signal: options.signal,
   });
 

@@ -25,4 +25,6 @@ export class Resource extends Cloudflare.Worker<Resource>()(
   }),
 ) {}
 
+export default Resource;
+
 export * as ServerResource from "./Resource.ts";

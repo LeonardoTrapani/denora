@@ -35,4 +35,6 @@ export class Resource extends Cloudflare.Worker<Resource>()(
   }).pipe(Effect.provide(Cloudflare.CronEventSourceLive)),
 ) {}
 
+export default Resource;
+
 export * as WorkOsEventsResource from "./WorkOsEventsResource.ts";

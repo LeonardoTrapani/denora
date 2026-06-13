@@ -6,9 +6,9 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import { WorkOsAuth } from "../auth/WorkOsAuth.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Routes } from "../http/Routes.ts";
+import { Db } from "../persistence/Db.ts";
 
 export interface Options {
-  readonly db: Routes.DbClient;
   readonly config: ServerConfig.Values;
 }
 
@@ -18,8 +18,9 @@ const configMiddleware = (config: ServerConfig.Values) =>
   ).layer;
 
 export const webHandlerLayer = (options: Options) =>
-  Routes.layer(options.db).pipe(
+  Routes.layer.pipe(
     Layer.provide(WorkOsAuth.layer(options.config.auth)),
+    Layer.provide(Db.hyperdriveLayer),
     Layer.provide(configMiddleware(options.config)),
     Layer.provide([HttpPlatform.layer, Etag.layer]),
     Layer.provide(

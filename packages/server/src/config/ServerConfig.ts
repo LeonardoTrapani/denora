@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import type * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 
 export const DefaultWebOrigin = "http://localhost:3000";
 
@@ -11,7 +12,7 @@ export interface Auth {
   readonly clientId: string;
   readonly cookiePassword: Redacted.Redacted<string>;
   readonly cookieDomain: string | undefined;
-  readonly webOrigins: readonly [string, ...Array<string>];
+  readonly webOrigins: ReadonlyArray<string>;
 }
 
 export interface Values {
@@ -23,40 +24,23 @@ export class Service extends Context.Service<Service, Values>()("@denora/server/
 export const layer = (values: Values): Layer.Layer<Service> =>
   Layer.succeed(Service, Service.of(values));
 
-const parseWebOrigins = (value: string): readonly [string, ...Array<string>] => {
-  const origins = value
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter((origin) => origin.length > 0);
+const cookieDomain = Config.schema(Schema.Trim, "DENORA_COOKIE_DOMAIN").pipe(
+  Config.map((value) => (value.length > 0 ? value : undefined)),
+  Config.withDefault(undefined),
+);
 
-  return origins.length > 0 ? [origins[0]!, ...origins.slice(1)] : [DefaultWebOrigin];
-};
+const webOrigins = Config.schema(Config.Array(Schema.Trim), "DENORA_WEB_ORIGINS").pipe(
+  Config.withDefault([DefaultWebOrigin]),
+);
 
-const optionalString = (value: string) => {
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-};
-
-export const load = Effect.gen(function* () {
-  const apiKey = yield* Config.redacted("WORKOS_API_KEY");
-  const clientId = yield* Config.nonEmptyString("WORKOS_CLIENT_ID");
-  const cookiePassword = yield* Config.redacted("WORKOS_COOKIE_PASSWORD");
-  const cookieDomain = optionalString(
-    yield* Config.string("DENORA_COOKIE_DOMAIN").pipe(Config.withDefault("")),
-  );
-  const webOrigins = parseWebOrigins(
-    yield* Config.string("DENORA_WEB_ORIGINS").pipe(Config.withDefault(DefaultWebOrigin)),
-  );
-
-  return {
-    auth: {
-      apiKey,
-      clientId,
-      cookiePassword,
-      cookieDomain,
-      webOrigins,
-    },
-  } satisfies Values;
+export const load: Config.Config<Values> = Config.all({
+  auth: Config.all({
+    apiKey: Config.redacted("WORKOS_API_KEY"),
+    clientId: Config.nonEmptyString("WORKOS_CLIENT_ID"),
+    cookiePassword: Config.redacted("WORKOS_COOKIE_PASSWORD"),
+    cookieDomain,
+    webOrigins,
+  }),
 });
 
 export const defaultLayer = Layer.effect(

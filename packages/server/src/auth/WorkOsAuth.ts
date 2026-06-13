@@ -9,7 +9,7 @@ import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import type * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import { DefaultWebOrigin } from "../config/ServerConfig.ts";
+import { DefaultWebOrigin, ServerConfig } from "../config/ServerConfig.ts";
 import { Db } from "../persistence/Db.ts";
 import { schema } from "../persistence/schema.ts";
 import { AuthUser } from "./User.ts";
@@ -20,13 +20,7 @@ type UserRow = typeof schema.users.$inferSelect;
 
 export const SessionCookieName = "wos-session";
 
-export interface Options {
-  readonly apiKey: Redacted.Redacted<string>;
-  readonly clientId: string;
-  readonly cookiePassword: Redacted.Redacted<string>;
-  readonly cookieDomain: string | undefined;
-  readonly webOrigins: ReadonlyArray<string>;
-}
+type Options = ServerConfig.Auth;
 
 export interface Runtime {
   readonly options: Options;
@@ -155,128 +149,128 @@ const makeRuntime = (options: Options): Runtime => ({
   workos: new WorkOS(Redacted.value(options.apiKey), { clientId: options.clientId }),
 });
 
-export const layer = (options: Options): Layer.Layer<Service, never, Db.Service> =>
-  Layer.effect(
-    Service,
-    Effect.gen(function* () {
-      const runtime = makeRuntime(options);
-      const db = yield* Db.Service;
+export const layer = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.Service;
+    const runtime = makeRuntime(config.auth);
+    const db = yield* Db.Service;
 
-      return Service.of({
-        runtime,
-        login: (request) =>
-          Effect.sync(() => {
-            const url = new URL(request.url);
-            const redirectUri = new URL("/auth/callback", url.origin).toString();
-            const returnTo = redirectToAllowedWebOrigin(runtime.options, getReturnTo(request));
-            const authorizationUrl = runtime.workos.userManagement.getAuthorizationUrl({
-              provider: "authkit",
-              clientId: runtime.options.clientId,
-              redirectUri,
-              state: returnTo,
-            });
+    return Service.of({
+      runtime,
+      login: (request) =>
+        Effect.sync(() => {
+          const url = new URL(request.url);
+          const redirectUri = new URL("/auth/callback", url.origin).toString();
+          const returnTo = redirectToAllowedWebOrigin(runtime.options, getReturnTo(request));
+          const authorizationUrl = runtime.workos.userManagement.getAuthorizationUrl({
+            provider: "authkit",
+            clientId: runtime.options.clientId,
+            redirectUri,
+            state: returnTo,
+          });
 
-            return HttpServerResponse.redirect(authorizationUrl);
-          }).pipe(Effect.orDie),
-        callback: (request) =>
-          Effect.gen(function* () {
-            const url = new URL(request.url);
-            const code = url.searchParams.get("code");
-            if (!code) {
-              return HttpServerResponse.redirect(redirectToAllowedWebOrigin(runtime.options, null));
-            }
+          return HttpServerResponse.redirect(authorizationUrl);
+        }).pipe(Effect.orDie),
+      callback: (request) =>
+        Effect.gen(function* () {
+          const url = new URL(request.url);
+          const code = url.searchParams.get("code");
+          if (!code) {
+            return HttpServerResponse.redirect(redirectToAllowedWebOrigin(runtime.options, null));
+          }
 
-            const auth = yield* Effect.tryPromise({
-              try: () =>
-                runtime.workos.userManagement.authenticateWithCode({
-                  clientId: runtime.options.clientId,
-                  code,
-                  session: {
-                    sealSession: true,
-                    cookiePassword: Redacted.value(runtime.options.cookiePassword),
-                  },
-                }),
-              catch: () =>
-                new AuthUser.Unauthorized({ message: "Unable to authenticate WorkOS callback" }),
-            });
+          const auth = yield* Effect.tryPromise({
+            try: () =>
+              runtime.workos.userManagement.authenticateWithCode({
+                clientId: runtime.options.clientId,
+                code,
+                session: {
+                  sealSession: true,
+                  cookiePassword: Redacted.value(runtime.options.cookiePassword),
+                },
+              }),
+            catch: () =>
+              new AuthUser.Unauthorized({ message: "Unable to authenticate WorkOS callback" }),
+          });
 
-            yield* syncUser(db.client, auth.user);
-            const response = HttpServerResponse.redirect(
-              redirectToAllowedWebOrigin(runtime.options, url.searchParams.get("state")),
-            );
+          yield* syncUser(db.client, auth.user);
+          const response = HttpServerResponse.redirect(
+            redirectToAllowedWebOrigin(runtime.options, url.searchParams.get("state")),
+          );
 
-            if (!auth.sealedSession) return response;
-            return yield* setSessionCookie(response, auth.sealedSession, runtime.options).pipe(
-              Effect.orDie,
-            );
-          }).pipe(Effect.orDie),
-        logout: (request) =>
-          Effect.gen(function* () {
-            const cookie = request.cookies[SessionCookieName];
-            const fallback = redirectToAllowedWebOrigin(runtime.options, getReturnTo(request));
+          if (!auth.sealedSession) return response;
+          return yield* setSessionCookie(response, auth.sealedSession, runtime.options).pipe(
+            Effect.orDie,
+          );
+        }).pipe(Effect.orDie),
+      logout: (request) =>
+        Effect.gen(function* () {
+          const cookie = request.cookies[SessionCookieName];
+          const fallback = redirectToAllowedWebOrigin(runtime.options, getReturnTo(request));
 
-            if (!cookie) {
-              return yield* clearSessionCookie(
-                HttpServerResponse.redirect(fallback),
-                runtime.options,
-              ).pipe(Effect.orDie);
-            }
-
-            const session = runtime.workos.userManagement.loadSealedSession({
-              sessionData: cookie,
-              cookiePassword: Redacted.value(runtime.options.cookiePassword),
-            });
-            const logoutUrl = yield* Effect.tryPromise({
-              try: () => session.getLogoutUrl({ returnTo: fallback }),
-              catch: () => new AuthUser.Unauthorized({ message: "Unable to build logout URL" }),
-            }).pipe(Effect.catch(() => Effect.succeed(fallback)));
-
+          if (!cookie) {
             return yield* clearSessionCookie(
-              HttpServerResponse.redirect(logoutUrl),
+              HttpServerResponse.redirect(fallback),
               runtime.options,
             ).pipe(Effect.orDie);
-          }).pipe(Effect.orDie),
-        authenticateSession: (httpEffect, credential) =>
-          Effect.gen(function* () {
-            const sessionData = Redacted.value(credential);
-            const session = runtime.workos.userManagement.loadSealedSession({
-              sessionData,
-              cookiePassword: Redacted.value(runtime.options.cookiePassword),
-            });
+          }
 
-            const authenticateResult = yield* Effect.tryPromise({
-              try: () => session.authenticate(),
-              catch: () => new AuthUser.Unauthorized({ message: "Missing or invalid session" }),
-            });
-            if (authenticateResult.authenticated) {
-              const user = yield* syncUser(db.client, authenticateResult.user);
-              return yield* Effect.provideService(httpEffect, AuthUser.CurrentUser, user);
-            }
+          const session = runtime.workos.userManagement.loadSealedSession({
+            sessionData: cookie,
+            cookiePassword: Redacted.value(runtime.options.cookiePassword),
+          });
+          const logoutUrl = yield* Effect.tryPromise({
+            try: () => session.getLogoutUrl({ returnTo: fallback }),
+            catch: () => new AuthUser.Unauthorized({ message: "Unable to build logout URL" }),
+          }).pipe(Effect.catch(() => Effect.succeed(fallback)));
 
-            const refreshResult = yield* Effect.tryPromise({
-              try: () => session.refresh(),
-              catch: () => new AuthUser.Unauthorized({ message: "Missing or invalid session" }),
-            });
+          return yield* clearSessionCookie(
+            HttpServerResponse.redirect(logoutUrl),
+            runtime.options,
+          ).pipe(Effect.orDie);
+        }).pipe(Effect.orDie),
+      authenticateSession: (httpEffect, credential) =>
+        Effect.gen(function* () {
+          const sessionData = Redacted.value(credential);
+          const session = runtime.workos.userManagement.loadSealedSession({
+            sessionData,
+            cookiePassword: Redacted.value(runtime.options.cookiePassword),
+          });
 
-            if (!refreshResult.authenticated) {
-              return yield* new AuthUser.Unauthorized({
-                message: "Missing or invalid session",
-              });
-            }
-
-            if (refreshResult.sealedSession) {
-              yield* HttpEffect.appendPreResponseHandler((_, response) =>
-                setSessionCookie(response, refreshResult.sealedSession!, runtime.options).pipe(
-                  Effect.orDie,
-                ),
-              );
-            }
-
-            const user = yield* syncUser(db.client, refreshResult.user);
+          const authenticateResult = yield* Effect.tryPromise({
+            try: () => session.authenticate(),
+            catch: () => new AuthUser.Unauthorized({ message: "Missing or invalid session" }),
+          });
+          if (authenticateResult.authenticated) {
+            const user = yield* syncUser(db.client, authenticateResult.user);
             return yield* Effect.provideService(httpEffect, AuthUser.CurrentUser, user);
-          }),
-      });
-    }),
-  );
+          }
+
+          const refreshResult = yield* Effect.tryPromise({
+            try: () => session.refresh(),
+            catch: () => new AuthUser.Unauthorized({ message: "Missing or invalid session" }),
+          });
+
+          if (!refreshResult.authenticated) {
+            return yield* new AuthUser.Unauthorized({
+              message: "Missing or invalid session",
+            });
+          }
+
+          if (refreshResult.sealedSession) {
+            yield* HttpEffect.appendPreResponseHandler((_, response) =>
+              setSessionCookie(response, refreshResult.sealedSession!, runtime.options).pipe(
+                Effect.orDie,
+              ),
+            );
+          }
+
+          const user = yield* syncUser(db.client, refreshResult.user);
+          return yield* Effect.provideService(httpEffect, AuthUser.CurrentUser, user);
+        }),
+    });
+  }),
+);
 
 export * as WorkOsAuth from "./WorkOsAuth.ts";

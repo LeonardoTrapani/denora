@@ -1,6 +1,7 @@
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as Layer from "effect/Layer";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { ServerLayers } from "./Layers.ts";
 
@@ -16,7 +17,10 @@ export class Resource extends Cloudflare.Worker<Resource>()(
     const config = yield* ServerConfig.load;
 
     return {
-      fetch: ServerLayers.webHandlerLayer({ config }).pipe(HttpRouter.toHttpEffect),
+      fetch: ServerLayers.webHandlerLayer.pipe(
+        Layer.provide(ServerConfig.layer(config)),
+        HttpRouter.toHttpEffect,
+      ),
     };
   }),
 ) {}

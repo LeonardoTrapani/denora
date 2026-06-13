@@ -8,29 +8,24 @@ import { ServerConfig } from "../config/ServerConfig.ts";
 import { Routes } from "../http/Routes.ts";
 import { Db } from "../persistence/Db.ts";
 
-export interface Options {
-  readonly config: ServerConfig.Values;
-}
+const corsLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.Service;
 
-const configMiddleware = (config: ServerConfig.Values) =>
-  HttpRouter.middleware<{ provides: ServerConfig.Service }>()(
-    Effect.succeed((httpEffect) => Effect.provideService(httpEffect, ServerConfig.Service, config)),
-  ).layer;
+    return HttpRouter.cors({
+      allowedOrigins: config.auth.webOrigins,
+      allowedMethods: ["GET", "POST", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization"],
+      credentials: true,
+    });
+  }),
+);
 
-export const webHandlerLayer = (options: Options) =>
-  Routes.layer.pipe(
-    Layer.provide(WorkOsAuth.layer(options.config.auth)),
-    Layer.provide(Db.hyperdriveLayer),
-    Layer.provide(configMiddleware(options.config)),
-    Layer.provide([HttpPlatform.layer, Etag.layer]),
-    Layer.provide(
-      HttpRouter.cors({
-        allowedOrigins: options.config.auth.webOrigins,
-        allowedMethods: ["GET", "POST", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization"],
-        credentials: true,
-      }),
-    ),
-  );
+export const webHandlerLayer = Routes.layer.pipe(
+  Layer.provide(WorkOsAuth.layer),
+  Layer.provide(Db.hyperdriveLayer),
+  Layer.provide([HttpPlatform.layer, Etag.layer]),
+  Layer.provide(corsLayer),
+);
 
 export * as ServerLayers from "./Layers.ts";

@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
@@ -11,9 +12,15 @@ export interface Options {
   readonly config: ServerConfig.Values;
 }
 
+const configMiddleware = (config: ServerConfig.Values) =>
+  HttpRouter.middleware<{ provides: ServerConfig.Service }>()(
+    Effect.succeed((httpEffect) => Effect.provideService(httpEffect, ServerConfig.Service, config)),
+  ).layer;
+
 export const webHandlerLayer = (options: Options) =>
   Routes.layer(options.db).pipe(
     Layer.provide(WorkOsAuth.layer(options.config.auth)),
+    Layer.provide(configMiddleware(options.config)),
     Layer.provide([HttpPlatform.layer, Etag.layer]),
     Layer.provide(
       HttpRouter.cors({

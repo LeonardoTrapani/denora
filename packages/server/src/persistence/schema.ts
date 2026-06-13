@@ -26,16 +26,4 @@ export const users = pgTable(
   (table) => [uniqueIndex("users_workos_user_id_unique").on(table.workosUserId)],
 );
 
-export const agents = pgTable(
-  "agents",
-  {
-    id: text("id").primaryKey(),
-    userId: text("user_id").notNull(),
-    name: text("name").notNull(),
-    handle: text("handle").notNull(),
-    createdAt: text("created_at").notNull(),
-  },
-  (table) => [uniqueIndex("agents_user_handle_unique").on(table.userId, table.handle)],
-);
-
 export * as schema from "./schema.ts";

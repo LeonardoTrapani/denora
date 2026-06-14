@@ -1,9 +1,9 @@
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
-import { Authorization } from "../../auth/Authorization.ts";
+import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
 import { DenoraApi } from "../Api.ts";
 
 export const layer = HttpApiBuilder.group(DenoraApi, "Account", (handlers) =>
-  handlers.handle("me", () => Authorization.CurrentUser),
+  handlers.handle("me", () => AuthorizationApi.CurrentUser),
 );
 
 export * as AccountHandlers from "./Handlers.ts";

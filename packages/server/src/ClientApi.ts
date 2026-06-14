@@ -3,9 +3,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
-import { Api } from "./http/Api.ts";
+import { DenoraPublicApi } from "./http/PublicApi.ts";
 
-export { SessionCookieName } from "./auth/AuthorizationApi.ts";
+export { DenoraPublicApi } from "./http/PublicApi.ts";
+export { SessionCookieName } from "./auth/Session.ts";
 
 export interface DenoraClientOptions {
   readonly transformClient?: ((client: HttpClient.HttpClient) => HttpClient.HttpClient) | undefined;
@@ -13,13 +14,13 @@ export interface DenoraClientOptions {
 }
 
 export const makeDenoraClient = (baseUrl: string | URL, options: DenoraClientOptions = {}) =>
-  HttpApiClient.make(Api.DenoraApi, {
+  HttpApiClient.make(DenoraPublicApi, {
     baseUrl,
     transformClient: options.transformClient,
   }).pipe(Effect.provide(options.httpClientLayer ?? FetchHttpClient.layer));
 
 export const makeDenoraUrlBuilder = (baseUrl: string | URL) =>
-  HttpApiClient.urlBuilder(Api.DenoraApi, { baseUrl });
+  HttpApiClient.urlBuilder(DenoraPublicApi, { baseUrl });
 
 export const makeDenoraAuthUrls = (baseUrl: string | URL) => {
   const root = baseUrl.toString().replace(/\/+$/, "");
@@ -32,10 +33,8 @@ export const makeDenoraAuthUrls = (baseUrl: string | URL) => {
 
 export class DenoraClient extends Context.Service<
   DenoraClient,
-  HttpApiClient.ForApi<typeof Api.DenoraApi>
->()("@denora/server/Client") {}
+  HttpApiClient.ForApi<typeof DenoraPublicApi>
+>()("@denora/server/ClientApi") {}
 
 export const layer = (baseUrl: string | URL, options: DenoraClientOptions = {}) =>
   Layer.effect(DenoraClient, makeDenoraClient(baseUrl, options));
-
-export * as Client from "./Client.ts";

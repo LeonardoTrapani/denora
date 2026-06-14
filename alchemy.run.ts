@@ -37,6 +37,7 @@ export default Alchemy.Stack(
       databaseName: branch.databaseName,
       hyperdriveId: hyperdrive.hyperdriveId,
       serverUrl,
+      mobileApiUrl: serverUrl,
       workosEventsWorkerName: workosEvents.workerName,
       webUrl: web.url.as<string>(),
     };

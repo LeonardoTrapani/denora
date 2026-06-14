@@ -7,12 +7,12 @@ import * as Schema from "effect/Schema";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Db } from "../persistence/Db.ts";
 import { UserSync, UserSyncError } from "./UserSync.ts";
-import { AuthUser } from "./User.ts";
+import { DenoraUser, Unauthorized } from "./User.ts";
 
 type Options = ServerConfig.Auth;
 type SealedSession = ReturnType<WorkOS["userManagement"]["loadSealedSession"]>;
 
-export const SessionCookieName = "wos-session";
+export { SessionCookieName } from "./Session.ts";
 
 export interface AuthRequestMetadata {
   readonly ipAddress?: string;
@@ -20,7 +20,7 @@ export interface AuthRequestMetadata {
 }
 
 export interface AuthenticatedSession {
-  readonly user: AuthUser.DenoraUser;
+  readonly user: DenoraUser;
   readonly sealedSession?: string;
 }
 
@@ -40,10 +40,7 @@ export interface Interface {
   }) => Effect.Effect<string, WorkOsSessionError>;
   readonly authenticateSession: (
     credential: Redacted.Redacted<string>,
-  ) => Effect.Effect<
-    AuthenticatedSession,
-    AuthUser.Unauthorized | WorkOsSessionError | UserSyncError
-  >;
+  ) => Effect.Effect<AuthenticatedSession, Unauthorized | WorkOsSessionError | UserSyncError>;
 }
 
 export class Service extends Context.Service<Service, Interface>()("@denora/server/WorkOsAuth") {}
@@ -177,7 +174,7 @@ const authenticateCredential = Effect.fn("WorkOsAuth.authenticateCredential")(fu
 
   const refreshResult = yield* refreshSealedSession(session);
   if (!refreshResult.authenticated) {
-    return yield* new AuthUser.Unauthorized({
+    return yield* new Unauthorized({
       message: "Missing or invalid session",
     });
   }

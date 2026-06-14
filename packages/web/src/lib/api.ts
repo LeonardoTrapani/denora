@@ -1,4 +1,4 @@
-import { Client } from "@denora/server/Client";
+import * as ClientApi from "@denora/server/client-api";
 import {
   mutationOptions,
   queryOptions,
@@ -33,14 +33,14 @@ const FetchClientLive = FetchHttpClient.layer.pipe(
 const apiRuntime =
   WebConfig.apiUrl.length > 0
     ? ManagedRuntime.make(
-        Client.layer(WebConfig.apiUrl, {
+        ClientApi.layer(WebConfig.apiUrl, {
           httpClientLayer: FetchClientLive,
           transformClient: (client) => client.pipe(withRequestHeaders),
         }),
       )
     : undefined;
 
-export type DenoraApiClient = Client.DenoraClient["Service"];
+export type DenoraApiClient = ClientApi.DenoraClient["Service"];
 
 export type ApiRunOptions = {
   readonly signal?: AbortSignal | undefined;
@@ -63,12 +63,12 @@ export interface HealthResponse {
 
 export function apiEffect<A, E>(
   makeEffect: (client: DenoraApiClient) => Effect.Effect<A, E, never>,
-): Effect.Effect<A, E, Client.DenoraClient> {
-  return Effect.flatMap(Client.DenoraClient, makeEffect);
+): Effect.Effect<A, E, ClientApi.DenoraClient> {
+  return Effect.flatMap(ClientApi.DenoraClient, makeEffect);
 }
 
 export async function runApi<A, E>(
-  effect: Effect.Effect<A, E, Client.DenoraClient>,
+  effect: Effect.Effect<A, E, ClientApi.DenoraClient>,
   options: ApiRunOptions = {},
 ): Promise<A> {
   const runtime = apiRuntime ?? WebConfig.missingApiUrl();

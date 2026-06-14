@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { Db } from "../persistence/Db.ts";
 import { schema } from "../persistence/schema.ts";
-import { AuthUser } from "./User.ts";
+import { DenoraUser } from "./User.ts";
 
 declare const crypto: { randomUUID(): string };
 
@@ -120,7 +120,7 @@ const isStaleDeletedProjection = (existing: UserRow, workosUser: WorkOsUser, del
   (existing.workosDeletedAt !== null && existing.workosDeletedAt >= deletedAt);
 
 const toDenoraUser = (row: UserRow) =>
-  new AuthUser.DenoraUser({
+  new DenoraUser({
     id: row.id,
     workosUserId: row.workosUserId,
     email: row.email,

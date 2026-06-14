@@ -62,7 +62,7 @@ export class WorkOsEventsError extends Schema.TaggedErrorClass<WorkOsEventsError
   },
 ) {}
 
-const runOnceWithClient = Effect.fn("WorkOsEvents.runOnceWithClient")(function* (
+export const runOnceWithClient = Effect.fn("WorkOsEvents.runOnceWithClient")(function* (
   client: Db.Client,
   workos: WorkOsAuth.Interface["client"],
 ): Effect.fn.Return<RunResult, WorkOsEventsError | UserSync.UserSyncError> {
@@ -96,7 +96,7 @@ const runOnceWithClient = Effect.fn("WorkOsEvents.runOnceWithClient")(function* 
   );
 });
 
-const acquireLease = Effect.fn("WorkOsEvents.acquireLease")(function* (client: Db.Client) {
+export const acquireLease = Effect.fn("WorkOsEvents.acquireLease")(function* (client: Db.Client) {
   const now = new Date();
   const nowIso = now.toISOString();
   const owner = crypto.randomUUID();
@@ -127,7 +127,7 @@ const acquireLease = Effect.fn("WorkOsEvents.acquireLease")(function* (client: D
   return { owner };
 });
 
-const releaseLease = Effect.fn("WorkOsEvents.releaseLease")(function* (
+export const releaseLease = Effect.fn("WorkOsEvents.releaseLease")(function* (
   client: Db.Client,
   lease: { readonly owner: string },
 ) {
@@ -142,7 +142,7 @@ const releaseLease = Effect.fn("WorkOsEvents.releaseLease")(function* (
     .pipe(Effect.mapError((cause) => new WorkOsEventsError({ operation: "releaseLease", cause })));
 });
 
-const readCursor = Effect.fn("WorkOsEvents.readCursor")(function* (client: Db.Client) {
+export const readCursor = Effect.fn("WorkOsEvents.readCursor")(function* (client: Db.Client) {
   const rows = yield* client
     .select()
     .from(schema.workosEventCursors)
@@ -153,7 +153,7 @@ const readCursor = Effect.fn("WorkOsEvents.readCursor")(function* (client: Db.Cl
   return rows[0]?.lastEventId ?? null;
 });
 
-const writeCursor = Effect.fn("WorkOsEvents.writeCursor")(function* (
+export const writeCursor = Effect.fn("WorkOsEvents.writeCursor")(function* (
   client: Db.Client,
   lastEventId: string,
 ) {

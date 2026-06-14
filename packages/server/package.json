@@ -49,7 +49,9 @@
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "test-types": "tsc --noEmit"
   },
   "dependencies": {
     "@effect/sql-pg": "^4.0.0-beta.83",
@@ -58,5 +60,11 @@
     "drizzle-orm": "1.0.0-rc.1",
     "effect": "^4.0.0-beta.83",
     "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "^4.0.0-beta.83",
+    "@effect/vitest": "4.0.0-beta.83",
+    "@testcontainers/postgresql": "^12.0.2",
+    "vitest": "^4.1.8"
   }
 }

@@ -24,5 +24,3 @@ export class Unauthorized extends Schema.TaggedErrorClass<Unauthorized>()(
   { message: Schema.String },
   { httpApiStatus: 401 },
 ) {}
-
-export * as AuthUser from "./User.ts";

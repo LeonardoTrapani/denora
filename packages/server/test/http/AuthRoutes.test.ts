@@ -390,3 +390,55 @@ describe("AuthRoutes", () => {
     ); // getLogoutUrl intentionally NOT stubbed: must not be reached.
   });
 });
+
+// Mobile returns from auth via a custom-scheme deep link (e.g. denora://...).
+// Unlike /auth/login (which needs an absolute request.url), /auth/callback
+// derives its destination from the `state` param, so the app-scheme behavior IS
+// exercisable under the Node test server.
+describe("AuthRoutes mobile deep-link (app-scheme returnTo)", () => {
+  const AppReturnTo = "denora://auth/callback";
+
+  it.effect("callback delivers the sealed session in the deep-link fragment", () =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const res = yield* client.get(
+        `/auth/callback?code=abc&state=${encodeURIComponent(AppReturnTo)}`,
+      );
+
+      assert.strictEqual(res.status, 302);
+      assert.isDefined(res.headers.location);
+      const url = new URL(res.headers.location!);
+      assert.strictEqual(url.protocol, "denora:");
+      // Session is delivered in the fragment (apps read the hash; some OS link
+      // handlers drop the query string).
+      const fragment = new URLSearchParams(url.hash.slice(1));
+      assert.strictEqual(fragment.get("authStatus"), "signed_in");
+      assert.strictEqual(fragment.get("session"), "sealed");
+      // The cookie is still set (harmless for the app; used by the web client).
+      const cookie = getSetCookie(res, SessionCookieName);
+      assert.isDefined(cookie);
+      assert.strictEqual(cookie!.value, "sealed");
+    }).pipe(
+      Effect.provide(
+        serve({
+          authenticateWithCode: () =>
+            Effect.succeed({ user: makeDenoraUser(), sealedSession: "sealed" }),
+        }),
+      ),
+    ),
+  );
+
+  it.effect("callback errors land in the deep-link fragment, not the query", () =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const res = yield* client.get(`/auth/callback?state=${encodeURIComponent(AppReturnTo)}`);
+
+      assert.strictEqual(res.status, 302);
+      const url = new URL(res.headers.location!);
+      assert.strictEqual(url.protocol, "denora:");
+      assert.strictEqual(url.search, "");
+      const fragment = new URLSearchParams(url.hash.slice(1));
+      assert.strictEqual(fragment.get("authError"), "callback_missing_code");
+    }).pipe(Effect.provide(serve({}))),
+  );
+});

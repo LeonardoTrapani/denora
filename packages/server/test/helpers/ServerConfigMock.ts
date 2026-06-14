@@ -10,6 +10,7 @@ export const testAuth: ServerConfig.Auth = {
   csrfSecret: Redacted.make("test-csrf-secret-value"),
   cookiePassword: Redacted.make("0123456789abcdef0123456789abcdef"),
   cookieDomain: undefined,
+  appRedirectSchemes: ["denora"],
   webOrigins: ["http://localhost:3000", "https://app.denora.me"],
 };
 

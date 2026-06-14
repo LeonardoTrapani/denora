@@ -2,36 +2,23 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import * as HttpApiMiddleware from "effect/unstable/httpapi/HttpApiMiddleware";
-import * as HttpApiSecurity from "effect/unstable/httpapi/HttpApiSecurity";
 import { ServerConfig } from "../config/ServerConfig.ts";
+import { AuthorizationApi, Service } from "./AuthorizationApi.ts";
 import { WorkOsAuth } from "./WorkOsAuth.ts";
 import { CurrentUser, Unauthorized } from "./User.ts";
 
-export { CurrentUser, DenoraUser, Unauthorized } from "./User.ts";
-
-export const SessionCookieName = WorkOsAuth.SessionCookieName;
-
-export const sessionCookie = HttpApiSecurity.apiKey({
-  in: "cookie",
-  key: SessionCookieName,
-});
-
-export class Service extends HttpApiMiddleware.Service<
+export {
+  CurrentUser,
+  DenoraUser,
   Service,
-  {
-    provides: CurrentUser;
-  }
->()("@denora/server/Authorization", {
-  security: {
-    session: sessionCookie,
-  },
-  error: Unauthorized,
-}) {}
+  SessionCookieName,
+  Unauthorized,
+  sessionCookie,
+} from "./AuthorizationApi.ts";
 
 export const setSessionCookie = Effect.fn("Authorization.setSessionCookie")(
   (response: HttpServerResponse.HttpServerResponse, value: string, options: ServerConfig.Auth) =>
-    HttpServerResponse.setCookie(response, SessionCookieName, value, {
+    HttpServerResponse.setCookie(response, AuthorizationApi.SessionCookieName, value, {
       domain: options.cookieDomain,
       path: "/",
       httpOnly: true,
@@ -42,7 +29,7 @@ export const setSessionCookie = Effect.fn("Authorization.setSessionCookie")(
 
 export const clearSessionCookie = Effect.fn("Authorization.clearSessionCookie")(
   (response: HttpServerResponse.HttpServerResponse, options: ServerConfig.Auth) =>
-    HttpServerResponse.expireCookie(response, SessionCookieName, {
+    HttpServerResponse.expireCookie(response, AuthorizationApi.SessionCookieName, {
       domain: options.cookieDomain,
       path: "/",
       httpOnly: true,

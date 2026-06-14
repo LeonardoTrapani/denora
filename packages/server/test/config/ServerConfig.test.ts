@@ -35,11 +35,21 @@ describe("ServerConfig.load", () => {
   );
 
   describe("webOrigins (DENORA_WEB_ORIGINS)", () => {
-    it.effect("defaults to [DefaultWebOrigin] when unset", () =>
+    it.effect("defaults to DefaultWebOrigins when unset", () =>
       Effect.gen(function* () {
         const { auth } = yield* load(baseEnv);
-        assert.deepStrictEqual(auth.webOrigins, [ServerConfig.DefaultWebOrigin]);
-        assert.strictEqual(ServerConfig.DefaultWebOrigin, "http://localhost:3000");
+        assert.deepStrictEqual(auth.webOrigins, [...ServerConfig.DefaultWebOrigins]);
+        assert.deepStrictEqual(
+          [...ServerConfig.DefaultWebOrigins],
+          ["http://localhost:3000", "http://localhost:8081"],
+        );
+      }),
+    );
+
+    it.effect("falls back to the defaults when set but blank", () =>
+      Effect.gen(function* () {
+        const { auth } = yield* load({ ...baseEnv, DENORA_WEB_ORIGINS: "   " });
+        assert.deepStrictEqual(auth.webOrigins, [...ServerConfig.DefaultWebOrigins]);
       }),
     );
 
@@ -50,13 +60,33 @@ describe("ServerConfig.load", () => {
       }),
     );
 
-    it.effect("parses a comma-separated list and trims each entry (Schema.Trim)", () =>
+    it.effect("parses a comma-separated list, trims each entry, and drops blanks", () =>
       Effect.gen(function* () {
         const { auth } = yield* load({
           ...baseEnv,
-          DENORA_WEB_ORIGINS: " http://localhost:3000 ,  https://app.denora.me ",
+          DENORA_WEB_ORIGINS: " http://localhost:3000 , , https://app.denora.me ",
         });
         assert.deepStrictEqual(auth.webOrigins, ["http://localhost:3000", "https://app.denora.me"]);
+      }),
+    );
+  });
+
+  describe("appRedirectSchemes (DENORA_APP_REDIRECT_SCHEMES)", () => {
+    it.effect("defaults to [DefaultAppRedirectScheme] when unset", () =>
+      Effect.gen(function* () {
+        const { auth } = yield* load(baseEnv);
+        assert.deepStrictEqual(auth.appRedirectSchemes, [ServerConfig.DefaultAppRedirectScheme]);
+        assert.strictEqual(ServerConfig.DefaultAppRedirectScheme, "denora");
+      }),
+    );
+
+    it.effect("parses a comma-separated list and trims each entry", () =>
+      Effect.gen(function* () {
+        const { auth } = yield* load({
+          ...baseEnv,
+          DENORA_APP_REDIRECT_SCHEMES: " denora , denora-staging ",
+        });
+        assert.deepStrictEqual(auth.appRedirectSchemes, ["denora", "denora-staging"]);
       }),
     );
   });

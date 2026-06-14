@@ -1,5 +1,5 @@
 import type { User as WorkOsUser } from "@workos-inc/node";
-import { AuthUser } from "../../src/auth/User.ts";
+import { DenoraUser } from "../../src/auth/User.ts";
 
 // A fully-populated WorkOS user. Tests override only the fields they assert on.
 export const makeWorkOsUser = (overrides: Partial<WorkOsUser> = {}): WorkOsUser =>
@@ -19,8 +19,8 @@ export const makeWorkOsUser = (overrides: Partial<WorkOsUser> = {}): WorkOsUser 
     ...overrides,
   }) as WorkOsUser;
 
-export const makeDenoraUser = (overrides: Partial<AuthUser.DenoraUser> = {}): AuthUser.DenoraUser =>
-  new AuthUser.DenoraUser({
+export const makeDenoraUser = (overrides: Partial<DenoraUser> = {}): DenoraUser =>
+  new DenoraUser({
     id: "00000000-0000-0000-0000-000000000001",
     workosUserId: "user_01HZX",
     email: "ada@example.com",

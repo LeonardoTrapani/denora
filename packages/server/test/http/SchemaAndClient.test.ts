@@ -6,7 +6,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpServer from "effect/unstable/http/HttpServer";
-import { AuthUser } from "../../src/auth/User.ts";
+import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 import { Client } from "../../src/Client.ts";
 import { Health } from "../../src/http/system/Schema.ts";
 import { Routes } from "../../src/http/Routes.ts";
@@ -59,11 +59,11 @@ describe("schema: DenoraUser", () => {
   };
 
   it("round-trips a fully-populated user (decode then encode)", () => {
-    const user = Schema.decodeSync(AuthUser.DenoraUser)(fullEncoded);
-    assert.instanceOf(user, AuthUser.DenoraUser);
+    const user = Schema.decodeSync(DenoraUser)(fullEncoded);
+    assert.instanceOf(user, DenoraUser);
     assert.strictEqual(user.email, "ada@example.com");
     assert.strictEqual(user.emailVerified, true);
-    const encoded = Schema.encodeSync(AuthUser.DenoraUser)(user);
+    const encoded = Schema.encodeSync(DenoraUser)(user);
     assert.deepStrictEqual(encoded, fullEncoded);
   });
 
@@ -76,52 +76,52 @@ describe("schema: DenoraUser", () => {
       profilePictureUrl: null,
       locale: null,
     };
-    const user = Schema.decodeSync(AuthUser.DenoraUser)(encoded);
+    const user = Schema.decodeSync(DenoraUser)(encoded);
     assert.strictEqual(user.name, null);
     assert.strictEqual(user.firstName, null);
     assert.strictEqual(user.lastName, null);
     assert.strictEqual(user.profilePictureUrl, null);
     assert.strictEqual(user.locale, null);
-    assert.deepStrictEqual(Schema.encodeSync(AuthUser.DenoraUser)(user), encoded);
+    assert.deepStrictEqual(Schema.encodeSync(DenoraUser)(user), encoded);
   });
 
   it("rejects a missing required field", () => {
     const { email, ...withoutEmail } = fullEncoded;
     void email;
-    assert.isTrue(Option.isNone(Schema.decodeUnknownOption(AuthUser.DenoraUser)(withoutEmail)));
+    assert.isTrue(Option.isNone(Schema.decodeUnknownOption(DenoraUser)(withoutEmail)));
   });
 
   it("rejects a wrong-typed field (emailVerified as string)", () => {
     const bad = { ...fullEncoded, emailVerified: "yes" };
-    assert.isTrue(Option.isNone(Schema.decodeUnknownOption(AuthUser.DenoraUser)(bad)));
+    assert.isTrue(Option.isNone(Schema.decodeUnknownOption(DenoraUser)(bad)));
   });
 
   // Generated instances encode-then-decode back to an equal value: the schema
   // has no transformations, so this exercises structural stability of the
   // class shape across the codec boundary.
-  it.effect.prop("encode then decode is identity", [AuthUser.DenoraUser], ([user]) =>
+  it.effect.prop("encode then decode is identity", [DenoraUser], ([user]) =>
     Effect.sync(() => {
-      const encoded = Schema.encodeSync(AuthUser.DenoraUser)(user);
-      const decoded = Schema.decodeSync(AuthUser.DenoraUser)(encoded);
-      assert.deepStrictEqual(Schema.encodeSync(AuthUser.DenoraUser)(decoded), encoded);
+      const encoded = Schema.encodeSync(DenoraUser)(user);
+      const decoded = Schema.decodeSync(DenoraUser)(encoded);
+      assert.deepStrictEqual(Schema.encodeSync(DenoraUser)(decoded), encoded);
     }),
   );
 });
 
 describe("schema: Unauthorized", () => {
   it("constructs with _tag and message", () => {
-    const err = new AuthUser.Unauthorized({ message: "Missing or invalid session" });
+    const err = new Unauthorized({ message: "Missing or invalid session" });
     assert.strictEqual(err._tag, "Unauthorized");
     assert.strictEqual(err.message, "Missing or invalid session");
-    assert.instanceOf(err, AuthUser.Unauthorized);
+    assert.instanceOf(err, Unauthorized);
   });
 
   it("round-trips through its own schema", () => {
-    const err = new AuthUser.Unauthorized({ message: "nope" });
-    const encoded = Schema.encodeSync(AuthUser.Unauthorized)(err);
+    const err = new Unauthorized({ message: "nope" });
+    const encoded = Schema.encodeSync(Unauthorized)(err);
     assert.strictEqual(encoded._tag, "Unauthorized");
     assert.strictEqual(encoded.message, "nope");
-    const decoded = Schema.decodeSync(AuthUser.Unauthorized)(encoded);
+    const decoded = Schema.decodeSync(Unauthorized)(encoded);
     assert.strictEqual(decoded._tag, "Unauthorized");
     assert.strictEqual(decoded.message, "nope");
   });
@@ -152,13 +152,31 @@ describe("client: makeDenoraUrlBuilder", () => {
   });
 });
 
+describe("client: makeDenoraAuthUrls", () => {
+  // The auth routes are plain HttpRouter routes (not part of the HttpApi), so
+  // the client exposes them as hand-built urls. returnTo is url-encoded so app
+  // deep links (denora://...) survive intact.
+  it("builds the auth endpoint urls and encodes returnTo, normalizing the base", () => {
+    const urls = Client.makeDenoraAuthUrls("http://api.test/");
+    assert.strictEqual(urls.csrfToken(), "http://api.test/auth/csrf-token");
+    assert.strictEqual(
+      urls.login("denora://auth/callback"),
+      `http://api.test/auth/login?returnTo=${encodeURIComponent("denora://auth/callback")}`,
+    );
+    assert.strictEqual(
+      urls.logout("https://app.denora.me/"),
+      `http://api.test/auth/logout?returnTo=${encodeURIComponent("https://app.denora.me/")}`,
+    );
+  });
+});
+
 const appLayer = Routes.layer.pipe(
   Layer.provide(
     WorkOsAuthMock.layer({
       authenticateSession: (credential) =>
         Redacted.value(credential) === "valid-session"
           ? Effect.succeed({ user: makeDenoraUser() })
-          : Effect.fail(new AuthUser.Unauthorized({ message: "Missing or invalid session" })),
+          : Effect.fail(new Unauthorized({ message: "Missing or invalid session" })),
     }),
   ),
   Layer.provide(ServerConfigMock.layer()),

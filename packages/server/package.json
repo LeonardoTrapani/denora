@@ -10,11 +10,23 @@
       "import": "./src/Client.ts",
       "default": "./src/Client.ts"
     },
+    "./client-api": {
+      "types": "./src/ClientApi.ts",
+      "bun": "./src/ClientApi.ts",
+      "import": "./src/ClientApi.ts",
+      "default": "./src/ClientApi.ts"
+    },
     "./http/Api": {
       "types": "./src/http/Api.ts",
       "bun": "./src/http/Api.ts",
       "import": "./src/http/Api.ts",
       "default": "./src/http/Api.ts"
+    },
+    "./http-api": {
+      "types": "./src/http/PublicApi.ts",
+      "bun": "./src/http/PublicApi.ts",
+      "import": "./src/http/PublicApi.ts",
+      "default": "./src/http/PublicApi.ts"
     },
     "./persistence/AlchemyDb": {
       "types": "./src/persistence/AlchemyDb.ts",

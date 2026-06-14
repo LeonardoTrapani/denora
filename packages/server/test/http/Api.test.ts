@@ -4,7 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
-import { AuthUser } from "../../src/auth/User.ts";
+import { Unauthorized } from "../../src/auth/User.ts";
 import type { WorkOsAuth } from "../../src/auth/WorkOsAuth.ts";
 import { Api } from "../../src/http/Api.ts";
 import { Routes } from "../../src/http/Routes.ts";
@@ -30,13 +30,13 @@ const validUser = makeDenoraUser();
 const validSessionLayer = serveWith((credential) =>
   Redacted.value(credential) === "valid"
     ? Effect.succeed({ user: validUser })
-    : Effect.fail(new AuthUser.Unauthorized({ message: "Missing or invalid session" })),
+    : Effect.fail(new Unauthorized({ message: "Missing or invalid session" })),
 );
 
 const rotatingSessionLayer = serveWith((credential) =>
   Redacted.value(credential) === "valid"
     ? Effect.succeed({ user: validUser, sealedSession: "rotated" })
-    : Effect.fail(new AuthUser.Unauthorized({ message: "Missing or invalid session" })),
+    : Effect.fail(new Unauthorized({ message: "Missing or invalid session" })),
 );
 
 describe("Api http surface", () => {

@@ -9,6 +9,7 @@ Denora uses WorkOS AuthKit with sealed sessions. Keep these values in sync betwe
 - `WORKOS_COOKIE_PASSWORD`: exactly 32 characters. WorkOS requires this length for sealed session cookies, and the server fails config loading if it is wrong.
 - `CSRF_SECRET`: non-empty secret used to sign logout CSRF tokens.
 - `DENORA_WEB_ORIGINS`: comma-separated allowed web origins. Defaults to `http://localhost:3000`.
+- `DENORA_APP_REDIRECT_SCHEMES`: comma-separated native app schemes that may receive auth redirects. Defaults to `denora`. Add `exp` only for local Expo Go testing.
 - `DENORA_COOKIE_DOMAIN`: optional cookie domain. Leave empty locally unless testing across subdomains.
 
 ## Dashboard
@@ -16,6 +17,7 @@ Denora uses WorkOS AuthKit with sealed sessions. Keep these values in sync betwe
 - Redirect URI: add the server callback URL, for example `http://localhost:3000/auth/callback` or the deployed API origin plus `/auth/callback`.
 - Sign-in endpoint: set this to the server login URL, `/auth/login` on the deployed API origin.
 - Sign-out redirects: allow every destination Denora may pass as `returnTo`, usually each configured web origin.
+- Native app redirects: the server still uses the same WorkOS callback URL, then redirects to allowed app schemes such as `denora://auth`. Expo Go uses `exp://...`, which should only be allowed in local development.
 - Session settings: review session lifetime, access token duration, and inactivity timeout for the environment before deploying.
 
 ## Logout CSRF

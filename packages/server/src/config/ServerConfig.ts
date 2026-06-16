@@ -3,19 +3,21 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import type * as Redacted from "effect/Redacted";
-import * as Schema from "effect/Schema";
 
-export const DefaultWebOrigins = ["http://localhost:3000", "http://localhost:8081"] as const;
-export const DefaultAppRedirectScheme = "denora";
+export const DefaultWebOrigins = [
+  "http://localhost:3000",
+  "http://localhost:1338",
+  "http://localhost:8081",
+] as const;
 
 export interface Auth {
-  readonly apiKey: Redacted.Redacted<string>;
-  readonly clientId: string;
-  readonly csrfSecret: Redacted.Redacted<string>;
-  readonly cookiePassword: Redacted.Redacted<string>;
-  readonly cookieDomain: string | undefined;
-  readonly appRedirectSchemes: ReadonlyArray<string>;
+  readonly secret: Redacted.Redacted<string>;
+  readonly baseURL: string;
   readonly webOrigins: ReadonlyArray<string>;
+  readonly google: {
+    readonly clientId: string;
+    readonly clientSecret: Redacted.Redacted<string>;
+  };
 }
 
 export interface Values {
@@ -26,11 +28,6 @@ export class Service extends Context.Service<Service, Values>()("@denora/server/
 
 export const layer = (values: Values): Layer.Layer<Service> =>
   Layer.succeed(Service, Service.of(values));
-
-const cookieDomain = Config.schema(Schema.Trim, "DENORA_COOKIE_DOMAIN").pipe(
-  Config.map((value) => (value.length > 0 ? value : undefined)),
-  Config.withDefault(undefined),
-);
 
 const webOrigins = Config.string("DENORA_WEB_ORIGINS").pipe(
   Config.map((value) => {
@@ -44,30 +41,24 @@ const webOrigins = Config.string("DENORA_WEB_ORIGINS").pipe(
   Config.withDefault([...DefaultWebOrigins]),
 );
 
-const appRedirectSchemes = Config.schema(
-  Config.Array(Schema.Trim),
-  "DENORA_APP_REDIRECT_SCHEMES",
-).pipe(
-  Config.map((values) => values.filter((value) => value.length > 0)),
-  Config.withDefault([DefaultAppRedirectScheme]),
-);
+// Better Auth derives signing keys from this; keep it secret and stable.
+const secret = Config.redacted("BETTER_AUTH_SECRET");
 
-const csrfSecret = Config.schema(Schema.Redacted(Schema.NonEmptyString), "CSRF_SECRET");
+// The public origin Better Auth serves from (used for cookies + as a trusted
+// origin). Normalized to an origin so a trailing path/slash never leaks in.
+const baseURL = Config.string("BETTER_AUTH_URL").pipe(Config.map((value) => new URL(value).origin));
 
-const workOsCookiePassword = Config.schema(
-  Schema.Redacted(Schema.String.check(Schema.isLengthBetween(32, 32))),
-  "WORKOS_COOKIE_PASSWORD",
-);
+const google = Config.all({
+  clientId: Config.string("GOOGLE_CLIENT_ID"),
+  clientSecret: Config.redacted("GOOGLE_CLIENT_SECRET"),
+});
 
 export const load: Config.Config<Values> = Config.all({
   auth: Config.all({
-    apiKey: Config.redacted("WORKOS_API_KEY"),
-    appRedirectSchemes,
-    clientId: Config.nonEmptyString("WORKOS_CLIENT_ID"),
-    csrfSecret,
-    cookiePassword: workOsCookiePassword,
-    cookieDomain,
+    secret,
+    baseURL,
     webOrigins,
+    google,
   }),
 });
 

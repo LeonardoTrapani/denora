@@ -6,7 +6,6 @@ import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import { DenoraPublicApi } from "./http/PublicApi.ts";
 
 export { DenoraPublicApi } from "./http/PublicApi.ts";
-export { SessionCookieName } from "./auth/Session.ts";
 
 export interface DenoraClientOptions {
   readonly transformClient?: ((client: HttpClient.HttpClient) => HttpClient.HttpClient) | undefined;
@@ -21,15 +20,6 @@ export const makeDenoraClient = (baseUrl: string | URL, options: DenoraClientOpt
 
 export const makeDenoraUrlBuilder = (baseUrl: string | URL) =>
   HttpApiClient.urlBuilder(DenoraPublicApi, { baseUrl });
-
-export const makeDenoraAuthUrls = (baseUrl: string | URL) => {
-  const root = baseUrl.toString().replace(/\/+$/, "");
-  return {
-    csrfToken: () => `${root}/auth/csrf-token`,
-    login: (returnTo: string) => `${root}/auth/login?returnTo=${encodeURIComponent(returnTo)}`,
-    logout: (returnTo: string) => `${root}/auth/logout?returnTo=${encodeURIComponent(returnTo)}`,
-  };
-};
 
 export class DenoraClient extends Context.Service<
   DenoraClient,

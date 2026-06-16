@@ -2,7 +2,6 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpServer from "effect/unstable/http/HttpServer";
@@ -10,10 +9,10 @@ import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 import { Client } from "../../src/Client.ts";
 import { Health } from "../../src/http/system/Schema.ts";
 import { Routes } from "../../src/http/Routes.ts";
+import * as AuthMock from "../helpers/AuthMock.ts";
 import { makeDenoraUser } from "../helpers/fixtures.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
 import * as TestServer from "../helpers/TestServer.ts";
-import * as WorkOsAuthMock from "../helpers/WorkOsAuthMock.ts";
 
 // =============================================================================
 // SCHEMA
@@ -27,8 +26,6 @@ describe("schema: Health", () => {
   });
 
   it("rejects a non-'ok' status", () => {
-    // `decodeUnknownOption` returns `None` when decoding fails, which lets us
-    // assert the rejection without throwing in the test body.
     const decode = Schema.decodeUnknownOption(Health);
     assert.isTrue(Option.isNone(decode({ status: "other" })));
     assert.isTrue(Option.isNone(decode({ status: "OK" })));
@@ -46,14 +43,10 @@ describe("schema: Health", () => {
 describe("schema: DenoraUser", () => {
   const fullEncoded = {
     id: "00000000-0000-0000-0000-000000000001",
-    workosUserId: "user_01HZX",
     email: "ada@example.com",
     emailVerified: true,
     name: "Ada Lovelace",
-    firstName: "Ada",
-    lastName: "Lovelace",
-    profilePictureUrl: "https://example.com/ada.png",
-    locale: "en-US",
+    image: "https://example.com/ada.png",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-02T00:00:00.000Z",
   };
@@ -63,25 +56,14 @@ describe("schema: DenoraUser", () => {
     assert.instanceOf(user, DenoraUser);
     assert.strictEqual(user.email, "ada@example.com");
     assert.strictEqual(user.emailVerified, true);
-    const encoded = Schema.encodeSync(DenoraUser)(user);
-    assert.deepStrictEqual(encoded, fullEncoded);
+    assert.deepStrictEqual(Schema.encodeSync(DenoraUser)(user), fullEncoded);
   });
 
   it("round-trips with null nullable fields", () => {
-    const encoded = {
-      ...fullEncoded,
-      name: null,
-      firstName: null,
-      lastName: null,
-      profilePictureUrl: null,
-      locale: null,
-    };
+    const encoded = { ...fullEncoded, name: null, image: null };
     const user = Schema.decodeSync(DenoraUser)(encoded);
     assert.strictEqual(user.name, null);
-    assert.strictEqual(user.firstName, null);
-    assert.strictEqual(user.lastName, null);
-    assert.strictEqual(user.profilePictureUrl, null);
-    assert.strictEqual(user.locale, null);
+    assert.strictEqual(user.image, null);
     assert.deepStrictEqual(Schema.encodeSync(DenoraUser)(user), encoded);
   });
 
@@ -96,9 +78,6 @@ describe("schema: DenoraUser", () => {
     assert.isTrue(Option.isNone(Schema.decodeUnknownOption(DenoraUser)(bad)));
   });
 
-  // Generated instances encode-then-decode back to an equal value: the schema
-  // has no transformations, so this exercises structural stability of the
-  // class shape across the codec boundary.
   it.effect.prop("encode then decode is identity", [DenoraUser], ([user]) =>
     Effect.sync(() => {
       const encoded = Schema.encodeSync(DenoraUser)(user);
@@ -152,33 +131,8 @@ describe("client: makeDenoraUrlBuilder", () => {
   });
 });
 
-describe("client: makeDenoraAuthUrls", () => {
-  // The auth routes are plain HttpRouter routes (not part of the HttpApi), so
-  // the client exposes them as hand-built urls. returnTo is url-encoded so app
-  // deep links (denora://...) survive intact.
-  it("builds the auth endpoint urls and encodes returnTo, normalizing the base", () => {
-    const urls = Client.makeDenoraAuthUrls("http://api.test/");
-    assert.strictEqual(urls.csrfToken(), "http://api.test/auth/csrf-token");
-    assert.strictEqual(
-      urls.login("denora://auth/callback"),
-      `http://api.test/auth/login?returnTo=${encodeURIComponent("denora://auth/callback")}`,
-    );
-    assert.strictEqual(
-      urls.logout("https://app.denora.me/"),
-      `http://api.test/auth/logout?returnTo=${encodeURIComponent("https://app.denora.me/")}`,
-    );
-  });
-});
-
 const appLayer = Routes.layer.pipe(
-  Layer.provide(
-    WorkOsAuthMock.layer({
-      authenticateSession: (credential) =>
-        Redacted.value(credential) === "valid-session"
-          ? Effect.succeed({ user: makeDenoraUser() })
-          : Effect.fail(new Unauthorized({ message: "Missing or invalid session" })),
-    }),
-  ),
+  Layer.provide(AuthMock.layer(() => Option.some(makeDenoraUser()))),
   Layer.provide(ServerConfigMock.layer()),
 );
 
@@ -190,7 +144,6 @@ describe("client: makeDenoraClient (real round-trip)", () => {
       const server = yield* HttpServer.HttpServer;
       const address = server.address;
       assert.strictEqual(address._tag, "TcpAddress");
-      // Narrowed by the assertion above; read the bound ephemeral port.
       const port = address._tag === "TcpAddress" ? address.port : 0;
       assert.isTrue(port > 0);
 
@@ -216,8 +169,6 @@ describe("client: makeDenoraClient (real round-trip)", () => {
     Effect.gen(function* () {
       const server = yield* HttpServer.HttpServer;
       const port = server.address._tag === "TcpAddress" ? server.address.port : 0;
-      // Supply a fresh FetchHttpClient via the option path (rather than the
-      // default) to exercise `DenoraClientOptions.httpClientLayer`.
       const client = yield* Client.makeDenoraClient(`http://127.0.0.1:${port}`, {
         httpClientLayer: FetchHttpClient.layer,
       });

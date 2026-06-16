@@ -5,13 +5,11 @@ import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import { ServerConfig } from "../../src/config/ServerConfig.ts";
 
-const COOKIE_PASSWORD_32 = "0123456789abcdef0123456789abcdef"; // exactly 32 chars
-
 const baseEnv: Record<string, string> = {
-  WORKOS_API_KEY: "sk_x",
-  WORKOS_CLIENT_ID: "client_123",
-  CSRF_SECRET: "super-secret",
-  WORKOS_COOKIE_PASSWORD: COOKIE_PASSWORD_32,
+  BETTER_AUTH_SECRET: "test-better-auth-secret-value-please-change-0001",
+  BETTER_AUTH_URL: "http://localhost:3000",
+  GOOGLE_CLIENT_ID: "test-google-client-id.apps.googleusercontent.com",
+  GOOGLE_CLIENT_SECRET: "test-google-client-secret",
 };
 
 const providerFor = (env: Record<string, string>): ConfigProvider.ConfigProvider =>
@@ -26,13 +24,24 @@ describe("ServerConfig.load", () => {
   it.effect("maps a full valid env into the values record", () =>
     Effect.gen(function* () {
       const { auth } = yield* load(baseEnv);
-
-      assert.strictEqual(Redacted.value(auth.apiKey), "sk_x");
-      assert.strictEqual(auth.clientId, "client_123");
-      assert.strictEqual(Redacted.value(auth.csrfSecret), "super-secret");
-      assert.strictEqual(Redacted.value(auth.cookiePassword), COOKIE_PASSWORD_32);
+      assert.strictEqual(Redacted.value(auth.secret), baseEnv.BETTER_AUTH_SECRET);
+      assert.strictEqual(auth.baseURL, "http://localhost:3000");
+      assert.strictEqual(auth.google.clientId, baseEnv.GOOGLE_CLIENT_ID);
+      assert.strictEqual(Redacted.value(auth.google.clientSecret), baseEnv.GOOGLE_CLIENT_SECRET);
     }),
   );
+
+  describe("baseURL (BETTER_AUTH_URL)", () => {
+    it.effect("is normalized to an origin (path + trailing slash dropped)", () =>
+      Effect.gen(function* () {
+        const { auth } = yield* load({
+          ...baseEnv,
+          BETTER_AUTH_URL: "https://api.denora.me/base/",
+        });
+        assert.strictEqual(auth.baseURL, "https://api.denora.me");
+      }),
+    );
+  });
 
   describe("webOrigins (DENORA_WEB_ORIGINS)", () => {
     it.effect("defaults to DefaultWebOrigins when unset", () =>
@@ -41,7 +50,7 @@ describe("ServerConfig.load", () => {
         assert.deepStrictEqual(auth.webOrigins, [...ServerConfig.DefaultWebOrigins]);
         assert.deepStrictEqual(
           [...ServerConfig.DefaultWebOrigins],
-          ["http://localhost:3000", "http://localhost:8081"],
+          ["http://localhost:3000", "http://localhost:1338", "http://localhost:8081"],
         );
       }),
     );
@@ -71,89 +80,12 @@ describe("ServerConfig.load", () => {
     );
   });
 
-  describe("appRedirectSchemes (DENORA_APP_REDIRECT_SCHEMES)", () => {
-    it.effect("defaults to [DefaultAppRedirectScheme] when unset", () =>
-      Effect.gen(function* () {
-        const { auth } = yield* load(baseEnv);
-        assert.deepStrictEqual(auth.appRedirectSchemes, [ServerConfig.DefaultAppRedirectScheme]);
-        assert.strictEqual(ServerConfig.DefaultAppRedirectScheme, "denora");
-      }),
-    );
-
-    it.effect("parses a comma-separated list and trims each entry", () =>
-      Effect.gen(function* () {
-        const { auth } = yield* load({
-          ...baseEnv,
-          DENORA_APP_REDIRECT_SCHEMES: " denora , denora-staging ",
-        });
-        assert.deepStrictEqual(auth.appRedirectSchemes, ["denora", "denora-staging"]);
-      }),
-    );
-  });
-
-  describe("cookieDomain (DENORA_COOKIE_DOMAIN)", () => {
-    it.effect("is undefined when unset", () =>
-      Effect.gen(function* () {
-        const { auth } = yield* load(baseEnv);
-        assert.strictEqual(auth.cookieDomain, undefined);
-      }),
-    );
-
-    it.effect("is undefined when empty", () =>
-      Effect.gen(function* () {
-        const { auth } = yield* load({ ...baseEnv, DENORA_COOKIE_DOMAIN: "" });
-        assert.strictEqual(auth.cookieDomain, undefined);
-      }),
-    );
-
-    it.effect("is undefined when whitespace only (trimmed to empty)", () =>
-      Effect.gen(function* () {
-        const { auth } = yield* load({ ...baseEnv, DENORA_COOKIE_DOMAIN: "   " });
-        assert.strictEqual(auth.cookieDomain, undefined);
-      }),
-    );
-
-    it.effect("is the trimmed value when non-empty", () =>
-      Effect.gen(function* () {
-        const { auth } = yield* load({ ...baseEnv, DENORA_COOKIE_DOMAIN: "  .denora.me  " });
-        assert.strictEqual(auth.cookieDomain, ".denora.me");
-      }),
-    );
-  });
-
-  describe("cookiePassword length constraint (WORKOS_COOKIE_PASSWORD)", () => {
-    it.effect("accepts exactly 32 chars", () =>
-      Effect.gen(function* () {
-        const { auth } = yield* load({ ...baseEnv, WORKOS_COOKIE_PASSWORD: COOKIE_PASSWORD_32 });
-        assert.strictEqual(Redacted.value(auth.cookiePassword), COOKIE_PASSWORD_32);
-      }),
-    );
-
-    it.effect("fails on 31 chars", () =>
-      Effect.gen(function* () {
-        const error = yield* Effect.flip(
-          load({ ...baseEnv, WORKOS_COOKIE_PASSWORD: "a".repeat(31) }),
-        );
-        assert.strictEqual(error._tag, "ConfigError");
-      }),
-    );
-
-    it.effect("fails on 33 chars", () =>
-      Effect.gen(function* () {
-        const error = yield* Effect.flip(
-          load({ ...baseEnv, WORKOS_COOKIE_PASSWORD: "a".repeat(33) }),
-        );
-        assert.strictEqual(error._tag, "ConfigError");
-      }),
-    );
-  });
-
   describe("missing required keys produce a ConfigError", () => {
     const required = [
-      "WORKOS_API_KEY",
-      "WORKOS_CLIENT_ID",
-      "CSRF_SECRET",
-      "WORKOS_COOKIE_PASSWORD",
+      "BETTER_AUTH_SECRET",
+      "BETTER_AUTH_URL",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
     ] as const;
 
     it.effect.each(required)("missing %s fails", (key) =>
@@ -161,20 +93,6 @@ describe("ServerConfig.load", () => {
         const env = { ...baseEnv };
         delete env[key];
         const error = yield* Effect.flip(load(env));
-        assert.strictEqual(error._tag, "ConfigError");
-      }),
-    );
-
-    it.effect("empty CSRF_SECRET fails (NonEmptyString)", () =>
-      Effect.gen(function* () {
-        const error = yield* Effect.flip(load({ ...baseEnv, CSRF_SECRET: "" }));
-        assert.strictEqual(error._tag, "ConfigError");
-      }),
-    );
-
-    it.effect("empty WORKOS_CLIENT_ID fails (nonEmptyString)", () =>
-      Effect.gen(function* () {
-        const error = yield* Effect.flip(load({ ...baseEnv, WORKOS_CLIENT_ID: "" }));
         assert.strictEqual(error._tag, "ConfigError");
       }),
     );

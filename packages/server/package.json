@@ -39,15 +39,10 @@
       "bun": "./src/server/Resource.ts",
       "import": "./src/server/Resource.ts",
       "default": "./src/server/Resource.ts"
-    },
-    "./server/WorkOsEventsResource": {
-      "types": "./src/server/WorkOsEventsResource.ts",
-      "bun": "./src/server/WorkOsEventsResource.ts",
-      "import": "./src/server/WorkOsEventsResource.ts",
-      "default": "./src/server/WorkOsEventsResource.ts"
     }
   },
   "scripts": {
+    "auth:schema": "better-auth generate --config auth.ts --output src/persistence/schema/auth.ts --yes && bun scripts/strip-auth-relations.ts",
     "build": "tsc --noEmit",
     "check-types": "tsc --noEmit",
     "test": "vitest run",
@@ -55,13 +50,14 @@
   },
   "dependencies": {
     "@effect/sql-pg": "^4.0.0-beta.83",
-    "@workos-inc/node": "^10.2.0",
     "alchemy": "^2.0.0-beta.55",
+    "better-auth": "^1.6.18",
     "drizzle-orm": "1.0.0-rc.1",
     "effect": "^4.0.0-beta.83",
     "pg": "^8.13.0"
   },
   "devDependencies": {
+    "@better-auth/cli": "^1.4.21",
     "@effect/platform-node": "^4.0.0-beta.83",
     "@effect/vitest": "4.0.0-beta.83",
     "@testcontainers/postgresql": "^12.0.2",

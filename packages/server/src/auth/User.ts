@@ -1,16 +1,16 @@
 import * as Context from "effect/Context";
 import * as Schema from "effect/Schema";
 
+/**
+ * The authenticated user as exposed to the rest of the app. Mirrors Better
+ * Auth's `user` model (dates serialized as ISO strings for the HTTP API).
+ */
 export class DenoraUser extends Schema.Class<DenoraUser>("DenoraUser")({
   id: Schema.String,
-  workosUserId: Schema.String,
   email: Schema.String,
   emailVerified: Schema.Boolean,
   name: Schema.NullOr(Schema.String),
-  firstName: Schema.NullOr(Schema.String),
-  lastName: Schema.NullOr(Schema.String),
-  profilePictureUrl: Schema.NullOr(Schema.String),
-  locale: Schema.NullOr(Schema.String),
+  image: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
   updatedAt: Schema.String,
 }) {}

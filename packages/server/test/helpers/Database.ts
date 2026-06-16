@@ -77,7 +77,7 @@ export const dbLayer = Layer.effect(
 export const truncateAll = Effect.gen(function* () {
   const sql = yield* PgClient.PgClient;
   yield* sql.unsafe(
-    `TRUNCATE TABLE "users", "workos_event_cursors", "workos_event_sync_locks", "records" RESTART IDENTITY CASCADE`,
+    `TRUNCATE TABLE "user", "session", "account", "verification", "records" RESTART IDENTITY CASCADE`,
   );
 });
 

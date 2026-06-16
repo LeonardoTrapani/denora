@@ -38,7 +38,6 @@ if (hasCreds) {
       expect(typeof out.webUrl).toBe("string");
       expect(out.databaseName).toBeTruthy();
       expect(out.hyperdriveId).toBeTruthy();
-      expect(out.workosEventsWorkerName).toBeTruthy();
 
       const client = yield* HttpClient.HttpClient;
 

@@ -51,45 +51,29 @@ function LoginPage() {
           <Badge variant="secondary">Denora</Badge>
           <CardTitle>Sign in to your agent.</CardTitle>
           <CardDescription>
-            Use Google to continue into the chat-first control surface.
+            Continue with WorkOS AuthKit to enter the chat-first control surface.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <GoogleLogin />
+          <AuthKitLogin />
         </CardContent>
       </Card>
     </main>
   );
 }
 
-function GoogleLogin() {
+function AuthKitLogin() {
   const search = Route.useSearch();
 
   const signInMutation = useMutation({
     mutationFn: async () => {
-      const callbackURL = new URL(search.redirect ?? "/app", window.location.origin).toString();
-      const errorCallbackURL = new URL("/login", window.location.origin).toString();
-
-      const result = await getAuthClient().signIn.social({
-        provider: "google",
-        callbackURL,
-        disableRedirect: true,
-        errorCallbackURL,
+      getAuthClient().signIn({
+        redirect: new URL(search.redirect ?? "/app", window.location.origin).toString(),
+        screenHint: "sign-in",
       });
-
-      if (result.error) {
-        throw new Error(result.error.message || "Unable to start Google sign-in.");
-      }
-
-      if (result.data?.url) {
-        window.location.assign(result.data.url);
-        return result.data;
-      }
-
-      throw new Error("Google sign-in did not return a redirect URL.");
     },
     onError: (error) => {
-      console.error("Google sign-in failed", error);
+      console.error("AuthKit sign-in failed", error);
     },
   });
 
@@ -101,7 +85,7 @@ function GoogleLogin() {
         size="lg"
         type="button"
       >
-        {signInMutation.isPending ? "Opening Google..." : "Continue with Google"}
+        {signInMutation.isPending ? "Opening sign-in..." : "Continue with WorkOS"}
       </Button>
       {signInMutation.error instanceof Error ? (
         <Alert variant="destructive">

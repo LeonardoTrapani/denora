@@ -11,13 +11,11 @@ export const DefaultWebOrigins = [
 ] as const;
 
 export interface Auth {
-  readonly secret: Redacted.Redacted<string>;
+  readonly apiKey: Redacted.Redacted<string>;
   readonly baseURL: string;
+  readonly clientId: string;
+  readonly cookiePassword: Redacted.Redacted<string>;
   readonly webOrigins: ReadonlyArray<string>;
-  readonly google: {
-    readonly clientId: string;
-    readonly clientSecret: Redacted.Redacted<string>;
-  };
 }
 
 export interface Values {
@@ -41,24 +39,25 @@ const webOrigins = Config.string("DENORA_WEB_ORIGINS").pipe(
   Config.withDefault([...DefaultWebOrigins]),
 );
 
-// Better Auth derives signing keys from this; keep it secret and stable.
-const secret = Config.redacted("BETTER_AUTH_SECRET");
+const apiKey = Config.redacted("WORKOS_API_KEY");
 
-// The public origin Better Auth serves from (used for cookies + as a trusted
-// origin). Normalized to an origin so a trailing path/slash never leaks in.
-const baseURL = Config.string("BETTER_AUTH_URL").pipe(Config.map((value) => new URL(value).origin));
+// The public origin this API serves from. WorkOS redirects back here and cookies
+// are scoped to this origin.
+const baseURL = Config.string("WORKOS_REDIRECT_BASE_URL").pipe(
+  Config.map((value) => new URL(value).origin),
+);
 
-const google = Config.all({
-  clientId: Config.string("GOOGLE_CLIENT_ID"),
-  clientSecret: Config.redacted("GOOGLE_CLIENT_SECRET"),
-});
+const clientId = Config.string("WORKOS_CLIENT_ID");
+
+const cookiePassword = Config.redacted("WORKOS_COOKIE_PASSWORD");
 
 export const load: Config.Config<Values> = Config.all({
   auth: Config.all({
-    secret,
+    apiKey,
     baseURL,
+    clientId,
+    cookiePassword,
     webOrigins,
-    google,
   }),
 });
 

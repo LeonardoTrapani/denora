@@ -16,14 +16,17 @@ export const layer: Layer.Layer<Service, never, Auth.Service> = Layer.effect(
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
         const webRequest = yield* HttpServerRequest.toWeb(request).pipe(Effect.orDie);
-        const user = yield* auth
-          .requireSession(webRequest)
-          .pipe(
-            Effect.catchTag(
-              "AuthProviderError",
-              () => new Unauthorized({ message: "Authentication required" }),
-            ),
-          );
+        const user = yield* auth.requireSession(webRequest).pipe(
+          Effect.catchTag("AuthProviderError", (error) =>
+            Effect.gen(function* () {
+              yield* Effect.logWarning("auth provider failed while resolving protected session", {
+                operation: error.operation,
+                cause: error.cause,
+              });
+              return yield* new Unauthorized({ message: "Authentication required" });
+            }),
+          ),
+        );
 
         return yield* Effect.provideService(httpEffect, CurrentUser, user);
       }),

@@ -6,10 +6,10 @@ import * as Redacted from "effect/Redacted";
 import { ServerConfig } from "../../src/config/ServerConfig.ts";
 
 const baseEnv: Record<string, string> = {
-  BETTER_AUTH_SECRET: "test-better-auth-secret-value-please-change-0001",
-  BETTER_AUTH_URL: "http://localhost:3000",
-  GOOGLE_CLIENT_ID: "test-google-client-id.apps.googleusercontent.com",
-  GOOGLE_CLIENT_SECRET: "test-google-client-secret",
+  WORKOS_API_KEY: "sk_test_workos_api_key",
+  WORKOS_CLIENT_ID: "client_test_workos_client_id",
+  WORKOS_COOKIE_PASSWORD: "test-workos-cookie-password-value-please-change-0001",
+  WORKOS_REDIRECT_BASE_URL: "http://localhost:3000",
 };
 
 const providerFor = (env: Record<string, string>): ConfigProvider.ConfigProvider =>
@@ -24,19 +24,19 @@ describe("ServerConfig.load", () => {
   it.effect("maps a full valid env into the values record", () =>
     Effect.gen(function* () {
       const { auth } = yield* load(baseEnv);
-      assert.strictEqual(Redacted.value(auth.secret), baseEnv.BETTER_AUTH_SECRET);
+      assert.strictEqual(Redacted.value(auth.apiKey), baseEnv.WORKOS_API_KEY);
       assert.strictEqual(auth.baseURL, "http://localhost:3000");
-      assert.strictEqual(auth.google.clientId, baseEnv.GOOGLE_CLIENT_ID);
-      assert.strictEqual(Redacted.value(auth.google.clientSecret), baseEnv.GOOGLE_CLIENT_SECRET);
+      assert.strictEqual(auth.clientId, baseEnv.WORKOS_CLIENT_ID);
+      assert.strictEqual(Redacted.value(auth.cookiePassword), baseEnv.WORKOS_COOKIE_PASSWORD);
     }),
   );
 
-  describe("baseURL (BETTER_AUTH_URL)", () => {
+  describe("baseURL (WORKOS_REDIRECT_BASE_URL)", () => {
     it.effect("is normalized to an origin (path + trailing slash dropped)", () =>
       Effect.gen(function* () {
         const { auth } = yield* load({
           ...baseEnv,
-          BETTER_AUTH_URL: "https://api.denora.me/base/",
+          WORKOS_REDIRECT_BASE_URL: "https://api.denora.me/base/",
         });
         assert.strictEqual(auth.baseURL, "https://api.denora.me");
       }),
@@ -82,10 +82,10 @@ describe("ServerConfig.load", () => {
 
   describe("missing required keys produce a ConfigError", () => {
     const required = [
-      "BETTER_AUTH_SECRET",
-      "BETTER_AUTH_URL",
-      "GOOGLE_CLIENT_ID",
-      "GOOGLE_CLIENT_SECRET",
+      "WORKOS_API_KEY",
+      "WORKOS_CLIENT_ID",
+      "WORKOS_COOKIE_PASSWORD",
+      "WORKOS_REDIRECT_BASE_URL",
     ] as const;
 
     it.effect.each(required)("missing %s fails", (key) =>

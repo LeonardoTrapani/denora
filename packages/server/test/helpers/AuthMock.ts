@@ -6,7 +6,7 @@ import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 
 // A stand-in Auth.Service for HTTP tests: resolves the session straight from the
 // request (typically a cookie) so the Authorization middleware and protected
-// routes can be exercised without a real Better Auth instance or database.
+// routes can be exercised without a real WorkOS session.
 export const layer = (resolve: (request: Request) => Option.Option<DenoraUser>) =>
   Layer.succeed(
     Auth.Service,

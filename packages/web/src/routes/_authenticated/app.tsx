@@ -18,7 +18,7 @@ import {
   ItemTitle,
 } from "@denora/ui/components/item";
 import { Separator } from "@denora/ui/components/separator";
-import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
 
 import { getAuthClient } from "../../auth-client.ts";
@@ -28,22 +28,13 @@ export const Route = createFileRoute("/_authenticated/app")({
 });
 
 function AppHome() {
-  const router = useRouter();
   const { auth } = Route.useRouteContext();
   const user = auth.user;
   const userInitial = (user.name || user.email || "D").slice(0, 1).toUpperCase();
 
   const signOutMutation = useMutation({
     mutationFn: async () => {
-      const result = await getAuthClient().signOut();
-
-      if (result.error) {
-        throw new Error(result.error.message || "Unable to sign out.");
-      }
-    },
-    onSuccess: async () => {
-      await router.invalidate();
-      await router.navigate({ to: "/login" });
+      getAuthClient().signOut();
     },
   });
 
@@ -63,7 +54,7 @@ function AppHome() {
             </ItemMedia>
             <ItemContent>
               <ItemTitle>{user.email}</ItemTitle>
-              <ItemDescription>Signed in with your session cookie.</ItemDescription>
+              <ItemDescription>Signed in with your WorkOS AuthKit session.</ItemDescription>
             </ItemContent>
           </Item>
           <Separator />

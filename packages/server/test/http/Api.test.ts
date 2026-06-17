@@ -12,9 +12,9 @@ import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
 import * as TestServer from "../helpers/TestServer.ts";
 
 // The /me handler runs behind the Authorization middleware, which resolves the
-// Better Auth session via Auth.requireSession. We swap the whole Auth port for a
-// mock that treats any cookie containing "valid" as an authenticated session;
-// the real Better Auth seal/verify path is out of scope here.
+// WorkOS session via Auth.requireSession. We swap the whole Auth port for a mock
+// that treats any cookie containing "valid" as an authenticated session; the
+// real WorkOS seal/verify path is out of scope here.
 const validUser = makeDenoraUser();
 
 const appLayer = TestServer.layer(
@@ -65,7 +65,7 @@ describe("Api http surface", () => {
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
         const res = yield* client.get("/me", {
-          headers: { cookie: "better-auth.session_token=bogus" },
+          headers: { cookie: "denora_session=bogus" },
         });
         assert.strictEqual(res.status, 401);
       }).pipe(Effect.provide(appLayer)),
@@ -75,7 +75,7 @@ describe("Api http surface", () => {
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
         const res = yield* client.get("/me", {
-          headers: { cookie: "better-auth.session_token=valid" },
+          headers: { cookie: "denora_session=valid" },
         });
         assert.strictEqual(res.status, 200);
         assert.deepStrictEqual(yield* res.json, {

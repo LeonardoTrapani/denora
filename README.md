@@ -42,4 +42,4 @@ After deploy, copy the printed `mobileApiUrl` into `.env.mobile` and run:
 bun run dev:mobile
 ```
 
-Runtime server secrets such as `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, and `CSRF_SECRET` stay in `.env.staging` as deploy-time inputs. Alchemy reads them through `effect/Config` during Worker init and binds them to Cloudflare as encrypted Worker secrets. `.env.mobile` is intentionally separate because it contains public mobile config, not secrets.
+Runtime server secrets such as `WORKOS_API_KEY` and `WORKOS_COOKIE_PASSWORD` stay in `.env.staging` as deploy-time inputs. Alchemy reads them through `effect/Config` during Worker init and binds them to Cloudflare as encrypted Worker secrets. `.env.mobile` is intentionally separate because it contains public mobile config, not secrets.

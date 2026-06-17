@@ -3,13 +3,11 @@ import * as Redacted from "effect/Redacted";
 import { ServerConfig } from "../../src/config/ServerConfig.ts";
 
 export const testAuth: ServerConfig.Auth = {
-  secret: Redacted.make("test-better-auth-secret-value-please-change-0001"),
+  apiKey: Redacted.make("sk_test_workos_api_key"),
   baseURL: "http://localhost:3000",
+  clientId: "client_test_workos_client_id",
+  cookiePassword: Redacted.make("test-workos-cookie-password-value-please-change-0001"),
   webOrigins: ["http://localhost:3000", "https://app.denora.me"],
-  google: {
-    clientId: "test-google-client-id.apps.googleusercontent.com",
-    clientSecret: Redacted.make("test-google-client-secret"),
-  },
 };
 
 export const layer = (auth: ServerConfig.Auth = testAuth): Layer.Layer<ServerConfig.Service> =>

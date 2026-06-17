@@ -5,13 +5,11 @@ import {
 } from "@tanstack/react-query";
 import { createRouter } from "@tanstack/react-router";
 
-import { getAuthClient } from "./auth-client.ts";
 import type { DenoraAuthSession } from "./lib/auth-server.ts";
 import { routeTree } from "./routeTree.gen";
 
 export interface AppRouterContext {
   readonly auth: DenoraAuthSession | null;
-  readonly authClient: ReturnType<typeof getAuthClient>;
   readonly queryClient: QueryClientType;
 }
 
@@ -47,7 +45,6 @@ export function getRouter() {
   return createRouter({
     context: {
       auth: null,
-      authClient: getAuthClient(),
       queryClient,
     } satisfies AppRouterContext,
     routeTree,

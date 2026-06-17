@@ -5,7 +5,7 @@ import * as Schema from "effect/Schema";
 import type { DenoraUser, Unauthorized } from "./User.ts";
 
 /**
- * Wraps unexpected Better Auth failures.
+ * Wraps unexpected auth provider failures.
  */
 export class AuthProviderError extends Schema.TaggedErrorClass<AuthProviderError>()(
   "AuthProviderError",
@@ -16,7 +16,7 @@ export class AuthProviderError extends Schema.TaggedErrorClass<AuthProviderError
 ) {}
 
 /**
- * Server-owned auth port. `handle` serves Better Auth's own HTTP endpoints;
+ * Server-owned auth port. `handle` serves WorkOS AuthKit endpoints;
  * `getSession`/`requireSession` resolve the current user for protected routes.
  */
 export class Service extends Context.Service<

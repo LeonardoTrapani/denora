@@ -6,7 +6,6 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Routes } from "../http/Routes.ts";
-import { Db } from "../persistence/Db.ts";
 
 const corsLayer = Layer.unwrap(
   Effect.gen(function* () {
@@ -23,7 +22,6 @@ const corsLayer = Layer.unwrap(
 
 export const webHandlerLayer = Routes.layer.pipe(
   Layer.provide(AuthLive.layerFromConfig),
-  Layer.provide(Db.hyperdriveLayer),
   Layer.provide([HttpPlatform.layer, Etag.layer]),
   Layer.provide(corsLayer),
 );

@@ -2,8 +2,8 @@ import * as Context from "effect/Context";
 import * as Schema from "effect/Schema";
 
 /**
- * The authenticated user as exposed to the rest of the app. Mirrors Better
- * Auth's `user` model (dates serialized as ISO strings for the HTTP API).
+ * The authenticated user as exposed to the rest of the app. Mirrors the stable
+ * user shape Denora needs from WorkOS AuthKit.
  */
 export class DenoraUser extends Schema.Class<DenoraUser>("DenoraUser")({
   id: Schema.String,

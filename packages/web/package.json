@@ -10,13 +10,17 @@
   },
   "dependencies": {
     "@denora/server": "workspace:*",
+    "@denora/ui": "workspace:*",
+    "@tailwindcss/vite": "^4",
     "@tanstack/react-query": "^5.95.2",
     "@tanstack/react-router": "^1.170.15",
     "@tanstack/react-start": "^1.168.25",
     "better-auth": "^1.6.18",
     "effect": "^4.0.0-beta.83",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "tailwindcss": "^4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tanstack/router-plugin": "^1.168.18",

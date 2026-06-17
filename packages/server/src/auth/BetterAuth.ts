@@ -36,11 +36,6 @@ const baseOptions = (options: BetterAuthRuntimeOptions) =>
         clientSecret: Redacted.value(options.google.clientSecret),
       },
     },
-    advanced: {
-      database: {
-        generateId: false,
-      },
-    },
     account: {
       storeStateStrategy: "cookie",
     },

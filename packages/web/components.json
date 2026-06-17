@@ -1,0 +1,23 @@
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "base-luma",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "../ui/src/styles/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true
+  },
+  "iconLibrary": "tabler",
+  "aliases": {
+    "components": "@/components",
+    "hooks": "@/hooks",
+    "lib": "@/lib",
+    "utils": "@denora/ui/lib/utils",
+    "ui": "@denora/ui/components"
+  },
+  "rtl": false,
+  "menuColor": "default-translucent",
+  "menuAccent": "subtle"
+}

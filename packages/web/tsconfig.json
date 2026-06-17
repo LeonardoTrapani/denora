@@ -11,6 +11,8 @@
     "moduleResolution": "Bundler",
     "noEmit": true,
     "paths": {
+      "@/*": ["./src/*"],
+      "@denora/ui/*": ["../ui/src/*"],
       "~/*": ["./src/*"]
     },
     "target": "ES2024",

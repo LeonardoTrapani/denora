@@ -10,6 +10,11 @@
       "repository": "alchemy-run/alchemy-effect",
       "branch": "main",
       "description": "Use for Alchemy Effect v2 APIs, patterns, migration guidance, source, tests, and ai-docs. Also about doubts regarding anything about deploys."
+    },
+    "better-auth": {
+      "repository": "better-auth/better-auth",
+      "branch": "main",
+      "description": "Use for Better Auth APIs, adapter contracts, OAuth callback flow, source, tests, and migration guidance."
     }
   }
 }

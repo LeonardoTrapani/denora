@@ -41,11 +41,9 @@ import { AuthRequestContext } from "./AuthRequestContext.ts";
  * `Db` client keeps a single Hyperdrive connection managed by alchemy's
  * per-request scope — no second pool to lifecycle on Workers.
  *
- * The query translation + transaction handling mirror the official drizzle
- * adapter (same operator mapping; `transaction` recurses with a sub-adapter
- * bound to the `tx` handle and `transaction: false`), specialized to a single
- * Postgres dialect, with each query Effect run on the request context captured
- * in `AuthRequestContext`.
+ * The query translation mirrors the official drizzle adapter's operator mapping,
+ * specialized to a single Postgres dialect, with each query Effect run on the
+ * request context captured in `AuthRequestContext`.
  */
 
 // The generated better-auth drizzle tables, keyed by model name (`user`,
@@ -81,7 +79,6 @@ interface DrizzleClient {
       $dynamic: () => DynamicSelect;
     };
   };
-  transaction: (run: (tx: unknown) => Query) => Query;
 }
 
 // Mirrors better-auth's `CleanedWhere` (`Required<Where>`), whose property types
@@ -107,8 +104,21 @@ interface CleanWhere {
   mode: "sensitive" | "insensitive" | undefined;
 }
 
-const run = (query: Query): Promise<any> =>
-  Effect.runPromiseWith(AuthRequestContext.current())(query);
+const run = (operation: string, model: string, query: Query): Promise<any> =>
+  Effect.runPromiseWith(AuthRequestContext.current())(
+    Effect.gen(function* () {
+      const startedAt = Date.now();
+      yield* Effect.logInfo("better-auth adapter query started", { model, operation });
+      const result = yield* query;
+      yield* Effect.logInfo("better-auth adapter query finished", {
+        durationMs: Date.now() - startedAt,
+        model,
+        operation,
+        rows: Array.isArray(result) ? result.length : undefined,
+      });
+      return result;
+    }),
+  );
 
 const asRows = (value: unknown): any[] => (Array.isArray(value) ? value : []);
 
@@ -118,17 +128,9 @@ const isStringArray = (value: unknown): value is string[] =>
 
 export const makeAuthDbAdapter = (client: Db.Client, tableSchema: AuthTableSchema) => {
   const db = client as unknown as DrizzleClient;
-  let lazyOptions: BetterAuthOptions | undefined;
 
-  const requireOptions = (): BetterAuthOptions => {
-    if (lazyOptions === undefined) {
-      throw new Error("[Denora Auth Adapter] used before initialization");
-    }
-    return lazyOptions;
-  };
-
-  // The CRUD creator, parameterized over a handle so the same logic serves both
-  // the root client and a transaction-bound `tx`.
+  // The CRUD creator, parameterized over a handle so the same logic can be used
+  // with any compatible drizzle/effect-postgres client handle.
   const makeCreator =
     (handle: DrizzleClient): AdapterFactoryCustomizeAdapterCreator =>
     ({ getFieldName }) => {
@@ -226,13 +228,17 @@ export const makeAuthDbAdapter = (client: Db.Client, tableSchema: AuthTableSchem
 
       return {
         create: async ({ model, data }) => {
-          const rows = asRows(await run(handle.insert(getModel(model)).values(data).returning()));
+          const rows = asRows(
+            await run("create", model, handle.insert(getModel(model)).values(data).returning()),
+          );
           return rows[0];
         },
 
         findOne: async ({ model, where, select }) => {
           const rows = asRows(
             await run(
+              "findOne",
+              model,
               handle
                 .select(projection(model, select))
                 .from(getModel(model))
@@ -253,12 +259,14 @@ export const makeAuthDbAdapter = (client: Db.Client, tableSchema: AuthTableSchem
           }
           if (limit !== undefined) query = query.limit(limit);
           if (offset !== undefined) query = query.offset(offset);
-          return asRows(await run(query));
+          return asRows(await run("findMany", model, query));
         },
 
         count: async ({ model, where }) => {
           const rows = asRows(
             await run(
+              "count",
+              model,
               handle
                 .select({ value: countRows() })
                 .from(getModel(model))
@@ -271,6 +279,8 @@ export const makeAuthDbAdapter = (client: Db.Client, tableSchema: AuthTableSchem
         update: async ({ model, where, update }) => {
           const rows = asRows(
             await run(
+              "update",
+              model,
               handle
                 .update(getModel(model))
                 .set(update)
@@ -284,6 +294,8 @@ export const makeAuthDbAdapter = (client: Db.Client, tableSchema: AuthTableSchem
         updateMany: async ({ model, where, update }) => {
           const rows = asRows(
             await run(
+              "updateMany",
+              model,
               handle
                 .update(getModel(model))
                 .set(update)
@@ -295,12 +307,20 @@ export const makeAuthDbAdapter = (client: Db.Client, tableSchema: AuthTableSchem
         },
 
         delete: async ({ model, where }) => {
-          await run(handle.delete(getModel(model)).where(buildWhere(model, where)));
+          await run(
+            "delete",
+            model,
+            handle.delete(getModel(model)).where(buildWhere(model, where)),
+          );
         },
 
         deleteMany: async ({ model, where }) => {
           const rows = asRows(
-            await run(handle.delete(getModel(model)).where(buildWhere(model, where)).returning()),
+            await run(
+              "deleteMany",
+              model,
+              handle.delete(getModel(model)).where(buildWhere(model, where)).returning(),
+            ),
           );
           return rows.length;
         },
@@ -319,42 +339,19 @@ export const makeAuthDbAdapter = (client: Db.Client, tableSchema: AuthTableSchem
       fieldAttributes.type === "date" && data !== null && data !== undefined
         ? new Date(data as string | number | Date)
         : data,
-  } satisfies Omit<AdapterFactoryConfig, "transaction">;
+    // Alchemy's effect-postgres transaction state is fiber-local. Better Auth's
+    // transaction callback is Promise-based, so replaying query Effects through a
+    // separate runPromise boundary can lose that transaction state and hang OAuth
+    // callbacks. Let Better Auth run those multi-step operations sequentially.
+    transaction: false,
+  } satisfies AdapterFactoryConfig;
 
   const factory = createAdapterFactory({
-    config: {
-      ...baseConfig,
-      // Run better-auth's transaction callback inside a real effect-postgres
-      // transaction. We recurse exactly like the official adapter — a sub-adapter
-      // bound to the `tx` handle with `transaction: false` — and re-stash the tx
-      // body's context so the sub-adapter's per-query runs join the transaction.
-      // A rejected callback fails the Effect, which rolls the transaction back.
-      transaction: (callback) =>
-        run(
-          db.transaction((tx) =>
-            Effect.gen(function* () {
-              const txContext = yield* Effect.context<never>();
-              return yield* Effect.tryPromise(() =>
-                AuthRequestContext.runWith(txContext, () =>
-                  callback(
-                    createAdapterFactory({
-                      config: { ...baseConfig, transaction: false },
-                      adapter: makeCreator(tx as unknown as DrizzleClient),
-                    })(requireOptions()),
-                  ),
-                ),
-              );
-            }),
-          ),
-        ),
-    },
+    config: baseConfig,
     adapter: makeCreator(db),
   });
 
-  return (options: BetterAuthOptions) => {
-    lazyOptions = options;
-    return factory(options);
-  };
+  return (options: BetterAuthOptions) => factory(options);
 };
 
 export * as AuthDbAdapter from "./AuthDbAdapter.ts";

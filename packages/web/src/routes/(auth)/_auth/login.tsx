@@ -1,20 +1,34 @@
+import { Alert, AlertDescription } from "@denora/ui/components/alert";
+import { Badge } from "@denora/ui/components/badge";
+import { Button } from "@denora/ui/components/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@denora/ui/components/card";
 import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
+import { z } from "zod";
 
 import { getAuthClient } from "../../../auth-client.ts";
 import { getServerSession } from "../../../lib/auth-server.ts";
 
-type LoginSearch = {
-  readonly redirect?: string | undefined;
-};
+const loginSearchSchema = z
+  .object({
+    redirect: z
+      .string()
+      .refine((value) => value.startsWith("/") && !value.startsWith("//"))
+      .optional()
+      .catch(undefined),
+  })
+  .catch({ redirect: undefined });
 
-const normalizeRedirect = (value: unknown) =>
-  typeof value === "string" && value.startsWith("/") && !value.startsWith("//") ? value : undefined;
+type LoginSearch = z.infer<typeof loginSearchSchema>;
 
 export const Route = createFileRoute("/(auth)/_auth/login")({
-  validateSearch: (search): LoginSearch => ({
-    redirect: normalizeRedirect(search.redirect),
-  }),
+  validateSearch: (search): LoginSearch => loginSearchSchema.parse(search),
   beforeLoad: async ({ context, search }) => {
     const session = context.auth ?? (await getServerSession());
 
@@ -31,13 +45,19 @@ export const Route = createFileRoute("/(auth)/_auth/login")({
 
 function LoginPage() {
   return (
-    <main className="auth-page-shell">
-      <section className="auth-card">
-        <p className="eyebrow">Denora</p>
-        <h1>Sign in to your agent.</h1>
-        <p>Use Google to continue into the chat-first control surface.</p>
-        <GoogleLogin />
-      </section>
+    <main className="grid min-h-svh place-items-center p-4">
+      <Card className="w-full max-w-md" size="sm">
+        <CardHeader>
+          <Badge variant="secondary">Denora</Badge>
+          <CardTitle>Sign in to your agent.</CardTitle>
+          <CardDescription>
+            Use Google to continue into the chat-first control surface.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <GoogleLogin />
+        </CardContent>
+      </Card>
     </main>
   );
 }
@@ -74,20 +94,19 @@ function GoogleLogin() {
   });
 
   return (
-    <div className="login-form">
-      <button
-        className="google-login-button"
+    <div className="grid gap-3">
+      <Button
         disabled={signInMutation.isPending}
         onClick={() => signInMutation.mutate()}
+        size="lg"
         type="button"
       >
-        <span className="google-mark" aria-hidden="true">
-          G
-        </span>
         {signInMutation.isPending ? "Opening Google..." : "Continue with Google"}
-      </button>
+      </Button>
       {signInMutation.error instanceof Error ? (
-        <p className="form-error">{signInMutation.error.message}</p>
+        <Alert variant="destructive">
+          <AlertDescription>{signInMutation.error.message}</AlertDescription>
+        </Alert>
       ) : null}
     </div>
   );

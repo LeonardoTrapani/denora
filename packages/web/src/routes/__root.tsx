@@ -1,17 +1,18 @@
 import type { ReactNode } from "react";
+import appCss from "@denora/ui/globals.css?url";
+import { TooltipProvider } from "@denora/ui/components/tooltip";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { HeadContent, Outlet, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
 
 import { getServerSession } from "../lib/auth-server.ts";
 import type { AppRouterContext } from "../router.tsx";
-import stylesUrl from "../styles.css?url";
 
 export const Route = createRootRouteWithContext<AppRouterContext>()({
   beforeLoad: async () => ({
     auth: await getServerSession(),
   }),
   head: () => ({
-    links: [{ rel: "stylesheet", href: stylesUrl }],
+    links: [{ rel: "stylesheet", href: appCss }],
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
@@ -32,7 +33,9 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <Outlet />
+      <TooltipProvider>
+        <Outlet />
+      </TooltipProvider>
     </QueryClientProvider>
   );
 }

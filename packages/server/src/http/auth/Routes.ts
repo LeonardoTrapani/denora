@@ -16,9 +16,10 @@ export const routes = HttpRouter.use((router) =>
     yield* router.add("*", `${authBasePath}/*`, (request) =>
       Effect.gen(function* () {
         const startedAt = Date.now();
+        const requestPath = pathOnly(request.url);
         yield* Effect.logInfo("auth request started", {
           method: request.method,
-          url: request.url,
+          path: requestPath,
         });
 
         const webRequest = yield* HttpServerRequest.toWeb(request);
@@ -28,7 +29,7 @@ export const routes = HttpRouter.use((router) =>
           durationMs: Date.now() - startedAt,
           method: request.method,
           status: webResponse.status,
-          url: request.url,
+          path: requestPath,
         });
 
         return HttpServerResponse.fromWeb(webResponse);
@@ -39,7 +40,7 @@ export const routes = HttpRouter.use((router) =>
             yield* Effect.logError("auth request failed", {
               method: request.method,
               traceId,
-              url: request.url,
+              path: pathOnly(request.url),
               cause,
             });
             return HttpServerResponse.fromWeb(
@@ -51,5 +52,13 @@ export const routes = HttpRouter.use((router) =>
     );
   }),
 );
+
+const pathOnly = (url: string): string => {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url.split("?", 1)[0] ?? url;
+  }
+};
 
 export * as AuthRoutes from "./Routes.ts";

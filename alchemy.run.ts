@@ -2,6 +2,7 @@ import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Drizzle from "alchemy/Drizzle";
 import * as Neon from "alchemy/Neon";
+import { AgentAiGateway } from "@denora/server/agent/AiGateway";
 import { AlchemyDb } from "@denora/server/persistence/AlchemyDb";
 import { ServerResource } from "@denora/server/server/Resource";
 import * as Effect from "effect/Effect";
@@ -18,6 +19,7 @@ export default Alchemy.Stack(
   Effect.gen(function* () {
     const { branch } = yield* AlchemyDb.DenoraDb;
     const hyperdrive = yield* AlchemyDb.DenoraHyperdrive;
+    const gateway = yield* AgentAiGateway.Gateway;
     const server = yield* ServerResource.Resource;
     const serverUrl = server.url.as<string>();
 
@@ -33,6 +35,7 @@ export default Alchemy.Stack(
 
     return {
       databaseName: branch.databaseName,
+      gatewayId: gateway.gatewayId,
       hyperdriveId: hyperdrive.hyperdriveId,
       serverUrl,
       webUrl: web.url.as<string>(),

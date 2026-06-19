@@ -31,6 +31,12 @@ The user talks to their own named agent. Denora is the product name; each user's
 - Proactivity is opt-in. The agent proposes routines such as morning briefings or follow-up reports, and the user chooses when they want them.
 - When the agent receives the first email or new class of inbound event, it should ask whether the user likes receiving that kind of report and under what conditions.
 
+## Domain Language
+
+- Agent: the named personal assistant identity owned by a user.
+- Thread: one conversation or event-driven interaction with an agent.
+- Agent Run: one model/tool execution started from a message, inbound event, or routine.
+
 ## Email Identity
 
 - Every agent can have an email identity using a Denora-controlled domain, currently `denora.me`.

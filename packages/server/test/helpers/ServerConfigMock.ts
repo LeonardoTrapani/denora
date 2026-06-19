@@ -7,6 +7,7 @@ export const testAuth: ServerConfig.Auth = {
   baseURL: "http://localhost:3000",
   clientId: "client_test_workos_client_id",
   cookiePassword: Redacted.make("test-workos-cookie-password-value-please-change-0001"),
+  e2eAuthSecret: undefined,
   webOrigins: ["http://localhost:3000", "https://app.denora.me"],
 };
 

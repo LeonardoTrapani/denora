@@ -3,9 +3,9 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
-import { DenoraPublicApi } from "./http/PublicApi.ts";
+import { Api } from "./http/Api.ts";
 
-export { DenoraPublicApi } from "./http/PublicApi.ts";
+export { DenoraApi } from "./http/Api.ts";
 
 export interface DenoraClientOptions {
   readonly transformClient?: ((client: HttpClient.HttpClient) => HttpClient.HttpClient) | undefined;
@@ -13,18 +13,20 @@ export interface DenoraClientOptions {
 }
 
 export const makeDenoraClient = (baseUrl: string | URL, options: DenoraClientOptions = {}) =>
-  HttpApiClient.make(DenoraPublicApi, {
+  HttpApiClient.make(Api.DenoraApi, {
     baseUrl,
     transformClient: options.transformClient,
   }).pipe(Effect.provide(options.httpClientLayer ?? FetchHttpClient.layer));
 
 export const makeDenoraUrlBuilder = (baseUrl: string | URL) =>
-  HttpApiClient.urlBuilder(DenoraPublicApi, { baseUrl });
+  HttpApiClient.urlBuilder(Api.DenoraApi, { baseUrl });
 
 export class DenoraClient extends Context.Service<
   DenoraClient,
-  HttpApiClient.ForApi<typeof DenoraPublicApi>
+  HttpApiClient.ForApi<typeof Api.DenoraApi>
 >()("@denora/server/ClientApi") {}
 
 export const layer = (baseUrl: string | URL, options: DenoraClientOptions = {}) =>
   Layer.effect(DenoraClient, makeDenoraClient(baseUrl, options));
+
+export * as ClientApi from "./ClientApi.ts";

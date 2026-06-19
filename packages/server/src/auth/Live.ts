@@ -13,6 +13,7 @@ import { DenoraUser, Unauthorized } from "./User.ts";
 
 const authBasePath = "/api/auth";
 const callbackPath = `${authBasePath}/callback`;
+const e2eSessionPath = `${authBasePath}/e2e/session`;
 const loginPath = `${authBasePath}/login`;
 const logoutPath = `${authBasePath}/logout`;
 const sessionPath = `${authBasePath}/session`;
@@ -84,6 +85,64 @@ const sign = async (payload: string, secret: string) => {
 const sealTransaction = async (transaction: AuthTransaction, secret: string) => {
   const payload = toBase64Url(encoder.encode(JSON.stringify(transaction)));
   return `${payload}.${await sign(payload, secret)}`;
+};
+
+const sealE2eSession = async (session: AuthenticatedSession, secret: string) => {
+  const payload = toBase64Url(encoder.encode(JSON.stringify(toSessionBody(session))));
+  return `e2e.${payload}.${await sign(payload, secret)}`;
+};
+
+const unsealE2eSession = async (
+  value: string,
+  secret: string | undefined,
+): Promise<AuthenticatedSession | undefined> => {
+  if (secret === undefined || !value.startsWith("e2e.")) return undefined;
+
+  const [, payload, signature] = value.split(".");
+  if (!payload || !signature) return undefined;
+
+  const expectedSignature = await sign(payload, secret);
+  if (!constantTimeEqual(signature, expectedSignature)) return undefined;
+
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(fromBase64Url(payload))) as {
+      readonly session?: { readonly id?: unknown; readonly organizationId?: unknown };
+      readonly user?: Partial<DenoraUser>;
+    };
+    const user = parsed.user;
+    const session = parsed.session;
+    if (
+      user === undefined ||
+      session === undefined ||
+      typeof session.id !== "string" ||
+      !(typeof session.organizationId === "string" || session.organizationId === null) ||
+      typeof user.id !== "string" ||
+      typeof user.email !== "string" ||
+      typeof user.emailVerified !== "boolean" ||
+      !(typeof user.name === "string" || user.name === null) ||
+      !(typeof user.image === "string" || user.image === null) ||
+      typeof user.createdAt !== "string" ||
+      typeof user.updatedAt !== "string"
+    ) {
+      return undefined;
+    }
+
+    return {
+      organizationId: session.organizationId,
+      sessionId: session.id,
+      user: new DenoraUser({
+        id: user.id,
+        email: user.email,
+        emailVerified: user.emailVerified,
+        name: user.name,
+        image: user.image,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+      }),
+    };
+  } catch {
+    return undefined;
+  }
 };
 
 const unsealTransaction = async (
@@ -299,11 +358,21 @@ export const layer = (options: AuthOptions): Layer.Layer<Auth.Service> =>
     Effect.sync(() => {
       const workos = makeWorkOS(options);
       const cookiePassword = Redacted.value(options.cookiePassword);
+      const e2eAuthSecret =
+        options.e2eAuthSecret === undefined ? undefined : Redacted.value(options.e2eAuthSecret);
 
       const loadSession = Effect.fn("Auth.loadSession")(function* (request: Request) {
         const sealedSession = parseCookies(request.headers.get("cookie")).get(sessionCookieName);
         if (sealedSession === undefined) {
           return { _tag: "Missing" } satisfies SessionState;
+        }
+
+        const e2eSession = yield* Effect.tryPromise({
+          try: () => unsealE2eSession(sealedSession, e2eAuthSecret),
+          catch: (cause) => new AuthProviderError({ operation: "loadE2eSession", cause }),
+        });
+        if (e2eSession !== undefined) {
+          return { _tag: "Authenticated", ...e2eSession } satisfies SessionState;
         }
 
         return yield* Effect.tryPromise({
@@ -360,6 +429,47 @@ export const layer = (options: AuthOptions): Layer.Layer<Auth.Service> =>
         });
 
         return redirect(result.url, [transactionCookie(sealedTransaction, options)]);
+      });
+
+      const handleE2eSession = Effect.fn("Auth.handleE2eSession")(function* (
+        request: Request,
+        url: URL,
+      ) {
+        if (e2eAuthSecret === undefined) {
+          return json({ error: "NotFound" }, { status: 404 });
+        }
+
+        const providedSecret = request.headers.get("x-denora-e2e-auth");
+        if (providedSecret === null || !constantTimeEqual(providedSecret, e2eAuthSecret)) {
+          return json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const createdAt = new Date().toISOString();
+        const session: AuthenticatedSession = {
+          organizationId: null,
+          sessionId: `e2e_${crypto.randomUUID().replaceAll("-", "")}`,
+          user: new DenoraUser({
+            id: "user_e2e_browser",
+            email: "e2e@denora.local",
+            emailVerified: true,
+            name: "E2E Browser",
+            image: null,
+            createdAt,
+            updatedAt: createdAt,
+          }),
+        };
+        const sealedSession = yield* Effect.tryPromise({
+          try: () => sealE2eSession(session, e2eAuthSecret),
+          catch: (cause) => new AuthProviderError({ operation: "sealE2eSession", cause }),
+        });
+        const returnTo = resolveReturnTo(
+          request,
+          url.searchParams.get("return_to"),
+          options,
+          "/app",
+        );
+
+        return redirect(returnTo, [sessionCookie(sealedSession, options)]);
       });
 
       const handleCallback = Effect.fn("Auth.handleCallback")(function* (
@@ -460,6 +570,8 @@ export const layer = (options: AuthOptions): Layer.Layer<Auth.Service> =>
         if (request.method === "OPTIONS") return new Response(null, { status: 204 });
         if (request.method === "GET" && url.pathname === loginPath)
           return yield* handleLogin(request, url);
+        if (request.method === "GET" && url.pathname === e2eSessionPath)
+          return yield* handleE2eSession(request, url);
         if (request.method === "GET" && url.pathname === callbackPath) {
           return yield* handleCallback(request, url);
         }

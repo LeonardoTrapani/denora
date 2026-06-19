@@ -7,8 +7,10 @@ import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 import { Client } from "../../src/Client.ts";
+import { SendMessageRequest } from "../../src/agent/Schema.ts";
 import { Health } from "../../src/http/system/Schema.ts";
 import { Routes } from "../../src/http/Routes.ts";
+import * as AgentThreadsMock from "../helpers/AgentThreadsMock.ts";
 import * as AuthMock from "../helpers/AuthMock.ts";
 import { makeDenoraUser } from "../helpers/fixtures.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
@@ -106,6 +108,14 @@ describe("schema: Unauthorized", () => {
   });
 });
 
+describe("schema: SendMessageRequest", () => {
+  it("decodes a message payload", () => {
+    const payload = Schema.decodeSync(SendMessageRequest)({ message: "hello" });
+    assert.strictEqual(payload.message, "hello");
+    assert.instanceOf(payload, SendMessageRequest);
+  });
+});
+
 // =============================================================================
 // CLIENT
 // =============================================================================
@@ -133,6 +143,7 @@ describe("client: makeDenoraUrlBuilder", () => {
 
 const appLayer = Routes.layer.pipe(
   Layer.provide(AuthMock.layer(() => Option.some(makeDenoraUser()))),
+  Layer.provide(AgentThreadsMock.layer()),
   Layer.provide(ServerConfigMock.layer()),
 );
 

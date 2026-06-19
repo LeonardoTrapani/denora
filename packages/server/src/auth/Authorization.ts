@@ -15,7 +15,9 @@ export const layer: Layer.Layer<Service, never, Auth.Service> = Layer.effect(
     return Service.of((httpEffect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
-        const webRequest = yield* HttpServerRequest.toWeb(request).pipe(Effect.orDie);
+        const webRequest = yield* HttpServerRequest.toWeb(request).pipe(
+          Effect.catch(() => new Unauthorized({ message: "Authentication required" })),
+        );
         const user = yield* auth.requireSession(webRequest).pipe(
           Effect.catchTag("AuthProviderError", (error) =>
             Effect.gen(function* () {

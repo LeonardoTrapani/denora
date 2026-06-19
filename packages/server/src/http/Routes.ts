@@ -3,14 +3,19 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { Authorization } from "../auth/Authorization.ts";
 import { Api } from "./Api.ts";
 import * as AccountHandlers from "./account/Handlers.ts";
+import * as AgentHandlers from "./agent/Handlers.ts";
+import { AgentStreamRoutes } from "./agent/StreamRoutes.ts";
 import { AuthRoutes } from "./auth/Routes.ts";
 import * as SystemHandlers from "./system/Handlers.ts";
 
-export const handlers = Layer.mergeAll(SystemHandlers.layer, AccountHandlers.layer);
+export const handlers = Layer.mergeAll(
+  SystemHandlers.layer,
+  AccountHandlers.layer,
+  AgentHandlers.layer,
+).pipe(Layer.provide(Authorization.layer));
 
-export const layer = Layer.mergeAll(HttpApiBuilder.layer(Api.DenoraApi), AuthRoutes.routes).pipe(
-  Layer.provide(handlers),
-  Layer.provide(Authorization.layer),
-);
+export const apiLayer = HttpApiBuilder.layer(Api.DenoraApi).pipe(Layer.provide(handlers));
+
+export const layer = Layer.mergeAll(apiLayer, AgentStreamRoutes.routes, AuthRoutes.routes);
 
 export * as Routes from "./Routes.ts";

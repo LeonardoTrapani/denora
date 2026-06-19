@@ -76,9 +76,14 @@ export const dbLayer = Layer.effect(
 
 export const truncateAll = Effect.gen(function* () {
   const sql = yield* PgClient.PgClient;
-  yield* sql.unsafe(
-    `TRUNCATE TABLE "user", "session", "account", "verification", "records" RESTART IDENTITY CASCADE`,
-  );
+  const rows = yield* sql<{
+    readonly tablename: string;
+  }>`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`;
+
+  if (rows.length === 0) return;
+
+  const tables = rows.map((row) => `"${row.tablename.replaceAll('"', '""')}"`).join(", ");
+  yield* sql.unsafe(`TRUNCATE TABLE ${tables} RESTART IDENTITY CASCADE`);
 });
 
 export * as Database from "./Database.ts";

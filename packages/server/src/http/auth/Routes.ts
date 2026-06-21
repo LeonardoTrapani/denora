@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
@@ -16,7 +17,7 @@ export const routes = HttpRouter.use((router) =>
     yield* router.add("*", `${authBasePath}/*`, (request) =>
       Effect.gen(function* () {
         const startedAt = Date.now();
-        const requestPath = pathOnly(request.url);
+        const requestPath = requestPathname(request);
         yield* Effect.logInfo("auth request started", {
           method: request.method,
           path: requestPath,
@@ -40,7 +41,7 @@ export const routes = HttpRouter.use((router) =>
             yield* Effect.logError("auth request failed", {
               method: request.method,
               traceId,
-              path: pathOnly(request.url),
+              path: requestPathname(request),
               cause,
             });
             return HttpServerResponse.fromWeb(
@@ -53,12 +54,9 @@ export const routes = HttpRouter.use((router) =>
   }),
 );
 
-const pathOnly = (url: string): string => {
-  try {
-    return new URL(url).pathname;
-  } catch {
-    return url.split("?", 1)[0] ?? url;
-  }
+const requestPathname = (request: HttpServerRequest.HttpServerRequest): string => {
+  const url = HttpServerRequest.toURL(request);
+  return Option.isNone(url) ? request.url : url.value.pathname;
 };
 
 export * as AuthRoutes from "./Routes.ts";

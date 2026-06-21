@@ -1,12 +1,9 @@
 import * as Cloudflare from "alchemy/Cloudflare";
-import { RuntimeContext } from "alchemy";
 import * as Effect from "effect/Effect";
 import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Layer from "effect/Layer";
-import { AgentThreadObject } from "../agent/ThreadObject.ts";
-import { AgentThreads } from "../agent/Threads.ts";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Routes } from "../http/Routes.ts";
@@ -34,12 +31,9 @@ export class Resource extends Cloudflare.Worker<Resource>()(
   },
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
-    const agentThreads = yield* AgentThreadObject.ThreadObject;
-    const runtimeContext = yield* RuntimeContext;
 
     return {
       fetch: Routes.layer.pipe(
-        Layer.provide(AgentThreads.layer(agentThreads, runtimeContext)),
         Layer.provide(AuthLive.layerFromConfig),
         Layer.provide([HttpPlatform.layer, Etag.layer]),
         Layer.provide(corsLayer),

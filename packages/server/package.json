@@ -16,12 +16,6 @@
       "import": "./src/ClientApi.ts",
       "default": "./src/ClientApi.ts"
     },
-    "./agent/AiGateway": {
-      "types": "./src/agent/AiGateway.ts",
-      "bun": "./src/agent/AiGateway.ts",
-      "import": "./src/agent/AiGateway.ts",
-      "default": "./src/agent/AiGateway.ts"
-    },
     "./http/Api": {
       "types": "./src/http/Api.ts",
       "bun": "./src/http/Api.ts",
@@ -54,10 +48,9 @@
     "test-types": "tsc --noEmit"
   },
   "dependencies": {
-    "@effect/ai-openai-compat": "^4.0.0-beta.83",
     "@effect/sql-pg": "^4.0.0-beta.83",
     "@workos-inc/node": "^10.3.0",
-    "alchemy": "^2.0.0-beta.55",
+    "alchemy": "2.0.0-beta.57",
     "drizzle-orm": "1.0.0-rc.1",
     "effect": "^4.0.0-beta.83",
     "pg": "^8.13.0"

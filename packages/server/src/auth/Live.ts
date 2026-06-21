@@ -7,6 +7,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Url from "effect/unstable/http/Url";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Auth, AuthProviderError } from "./Auth.ts";
 import { DenoraUser, Unauthorized } from "./User.ts";
@@ -263,20 +265,34 @@ const toSessionBody = (session: AuthenticatedSession) => ({
 
 const safePath = (value: string) => value.startsWith("/") && !value.startsWith("//");
 
-const trustedOriginFromRequest = (request: Request, webOrigins: ReadonlyArray<string>) => {
+const originFromString = (value: string): string | undefined => {
+  const url = Url.fromString(value);
+  return Result.isSuccess(url) ? url.success.origin : undefined;
+};
+
+const parseRequestUrl = (request: Request) =>
+  Effect.fromResult(Url.fromString(request.url)).pipe(
+    Effect.mapError((cause) => new AuthProviderError({ operation: "parseRequestUrl", cause })),
+  );
+
+const trustedOriginFromRequest = (
+  request: Request,
+  options: Pick<AuthOptions, "baseURL" | "webOrigins">,
+) => {
   const candidates = [request.headers.get("origin"), request.headers.get("referer")];
 
   for (const candidate of candidates) {
     if (candidate === null) continue;
-    try {
-      const origin = new URL(candidate).origin;
-      if (webOrigins.includes(origin)) return origin;
-    } catch {
-      // Ignore malformed browser-provided headers.
-    }
+    const origin = originFromString(candidate);
+    if (origin !== undefined && options.webOrigins.includes(origin)) return origin;
   }
 
-  return webOrigins[0] ?? new URL(request.url).origin;
+  return (
+    options.webOrigins[0] ??
+    originFromString(request.url) ??
+    originFromString(options.baseURL) ??
+    options.baseURL
+  );
 };
 
 const resolveReturnTo = (
@@ -285,7 +301,7 @@ const resolveReturnTo = (
   options: Pick<AuthOptions, "baseURL" | "webOrigins">,
   fallbackPath: string,
 ) => {
-  const fallbackOrigin = trustedOriginFromRequest(request, options.webOrigins);
+  const fallbackOrigin = trustedOriginFromRequest(request, options);
   const fallback = new URL(fallbackPath, fallbackOrigin).toString();
 
   if (rawValue === null || rawValue.length === 0) return fallback;
@@ -565,7 +581,7 @@ export const layer = (options: AuthOptions): Layer.Layer<Auth.Service> =>
       });
 
       const handle = Effect.fn("Auth.handle")(function* (request: Request) {
-        const url = new URL(request.url);
+        const url = yield* parseRequestUrl(request);
 
         if (request.method === "OPTIONS") return new Response(null, { status: 204 });
         if (request.method === "GET" && url.pathname === loginPath)

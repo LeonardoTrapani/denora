@@ -9,9 +9,23 @@ import * as Option from "effect/Option";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Routes } from "../http/Routes.ts";
+import { Telemetry } from "../observability/Telemetry.ts";
+
+export interface ObservabilityConfig {
+  readonly logsDataset: unknown;
+  readonly logsDestinationName: string;
+  readonly logsEndpoint: unknown;
+  readonly metricsDataset: unknown;
+  readonly metricsEndpoint: unknown;
+  readonly token: unknown;
+  readonly tracesDataset: unknown;
+  readonly tracesDestinationName: string;
+  readonly tracesEndpoint: unknown;
+}
 
 export interface DeploymentConfig {
   readonly apiDomain?: string | undefined;
+  readonly observability?: ObservabilityConfig | undefined;
   readonly webDomain?: string | undefined;
 }
 
@@ -26,7 +40,8 @@ const origin = (domain: string) => `https://${domain}`;
 
 const props = Effect.gen(function* () {
   const deployment = yield* Deployment;
-  const env: Record<string, string> = {};
+  const observability = deployment.observability;
+  const env: Record<string, unknown> = {};
 
   if (deployment.apiDomain !== undefined) {
     env.WORKOS_REDIRECT_BASE_URL = origin(deployment.apiDomain);
@@ -36,12 +51,44 @@ const props = Effect.gen(function* () {
     env.DENORA_WEB_ORIGINS = origin(deployment.webDomain);
   }
 
+  if (observability !== undefined) {
+    env.AXIOM_INGEST_TOKEN = observability.token;
+    env.AXIOM_OTEL_LOGS_DATASET = observability.logsDataset;
+    env.AXIOM_OTEL_LOGS_ENDPOINT = observability.logsEndpoint;
+    env.AXIOM_OTEL_METRICS_DATASET = observability.metricsDataset;
+    env.AXIOM_OTEL_METRICS_ENDPOINT = observability.metricsEndpoint;
+    env.AXIOM_OTEL_TRACES_DATASET = observability.tracesDataset;
+    env.AXIOM_OTEL_TRACES_ENDPOINT = observability.tracesEndpoint;
+  }
+
   const baseProps = {
     main: import.meta.filename,
     compatibility: {
       flags: ["nodejs_compat" as const],
     },
     env,
+    logpush: observability !== undefined,
+    observability: {
+      enabled: true,
+      headSamplingRate: 1,
+      logs: {
+        enabled: true,
+        ...(observability === undefined
+          ? {}
+          : { destinations: [observability.logsDestinationName] }),
+        invocationLogs: true,
+        headSamplingRate: 1,
+        persist: true,
+      },
+      traces: {
+        enabled: true,
+        ...(observability === undefined
+          ? {}
+          : { destinations: [observability.tracesDestinationName] }),
+        headSamplingRate: 1,
+        persist: true,
+      },
+    },
   };
 
   return Option.match(Option.fromUndefinedOr(deployment.apiDomain), {
@@ -74,6 +121,7 @@ export class Resource extends Cloudflare.Worker<Resource>()(
         Layer.provide(AuthLive.layerFromConfig),
         Layer.provide([HttpPlatform.layer, Etag.layer]),
         Layer.provide(corsLayer),
+        Layer.provide(Telemetry.layer),
         Layer.provide(ServerConfig.layer(config)),
         HttpRouter.toHttpEffect,
       ),

@@ -25,6 +25,9 @@ export const routes = HttpRouter.use((router) =>
 
         const webRequest = yield* HttpServerRequest.toWeb(request);
         const webResponse = yield* auth.handle(webRequest);
+        yield* Effect.annotateCurrentSpan({
+          "http.response.status_code": webResponse.status,
+        });
 
         yield* Effect.logInfo("auth request finished", {
           durationMs: Date.now() - startedAt,
@@ -49,6 +52,11 @@ export const routes = HttpRouter.use((router) =>
             );
           }),
         ),
+        Effect.annotateSpans({
+          "http.request.method": request.method,
+          "http.route": `${authBasePath}/*`,
+        }),
+        Effect.withSpan("denora.http.auth"),
       ),
     );
   }),

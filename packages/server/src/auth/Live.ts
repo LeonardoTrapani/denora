@@ -140,6 +140,7 @@ const cookie = (
   value: string,
   options: {
     readonly baseURL: string;
+    readonly cookieDomain?: string | undefined;
     readonly maxAgeSeconds?: number | undefined;
     readonly path?: string | undefined;
   },
@@ -155,6 +156,10 @@ const cookie = (
     parts.push("Secure");
   }
 
+  if (options.cookieDomain !== undefined) {
+    parts.push(`Domain=${options.cookieDomain}`);
+  }
+
   if (options.maxAgeSeconds !== undefined) {
     parts.push(`Max-Age=${options.maxAgeSeconds}`);
   }
@@ -162,8 +167,14 @@ const cookie = (
   return parts.join("; ");
 };
 
-const clearCookie = (name: string, options: { readonly baseURL: string; readonly path?: string }) =>
-  `${cookie(name, "", { ...options, maxAgeSeconds: 0 })}; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+const clearCookie = (
+  name: string,
+  options: {
+    readonly baseURL: string;
+    readonly cookieDomain?: string | undefined;
+    readonly path?: string;
+  },
+) => `${cookie(name, "", { ...options, maxAgeSeconds: 0 })}; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
 
 const appendCookies = (headers: Headers, cookies: ReadonlyArray<string>) => {
   for (const value of cookies) {
@@ -261,21 +272,27 @@ const resolveReturnTo = (
 const sessionCookie = (sealedSession: string, options: AuthOptions) =>
   cookie(sessionCookieName, sealedSession, {
     baseURL: options.baseURL,
+    cookieDomain: options.cookieDomain,
     maxAgeSeconds: sessionMaxAgeSeconds,
   });
 
 const clearSessionCookie = (options: AuthOptions) =>
-  clearCookie(sessionCookieName, { baseURL: options.baseURL });
+  clearCookie(sessionCookieName, { baseURL: options.baseURL, cookieDomain: options.cookieDomain });
 
 const transactionCookie = (sealedTransaction: string, options: AuthOptions) =>
   cookie(transactionCookieName, sealedTransaction, {
     baseURL: options.baseURL,
+    cookieDomain: options.cookieDomain,
     maxAgeSeconds: transactionMaxAgeSeconds,
     path: callbackPath,
   });
 
 const clearTransactionCookie = (options: AuthOptions) =>
-  clearCookie(transactionCookieName, { baseURL: options.baseURL, path: callbackPath });
+  clearCookie(transactionCookieName, {
+    baseURL: options.baseURL,
+    cookieDomain: options.cookieDomain,
+    path: callbackPath,
+  });
 
 const screenHint = (url: URL) => {
   const value = url.searchParams.get("screen_hint");

@@ -5,12 +5,24 @@ import { AuthLive } from "../../src/auth/Live.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
 
 const authLayer = AuthLive.layer(ServerConfigMock.testAuth);
+const prodAuth = {
+  ...ServerConfigMock.testAuth,
+  baseURL: "https://api.denora.me",
+  cookieDomain: "denora.me",
+  webOrigins: ["https://denora.me"],
+};
 
 const runAuth = (request: Request) =>
   Effect.gen(function* () {
     const auth = yield* Auth.Service;
     return yield* auth.handle(request);
   }).pipe(Effect.provide(authLayer));
+
+const runProdAuth = (request: Request) =>
+  Effect.gen(function* () {
+    const auth = yield* Auth.Service;
+    return yield* auth.handle(request);
+  }).pipe(Effect.provide(AuthLive.layer(prodAuth)));
 
 describe("AuthLive", () => {
   it.effect("starts WorkOS AuthKit login with PKCE and a callback-scoped transaction cookie", () =>
@@ -45,6 +57,29 @@ describe("AuthLive", () => {
       assert.match(setCookie, /SameSite=Lax/);
       assert.match(setCookie, /Max-Age=600/);
       assert.ok(!/Secure/.test(setCookie));
+    }),
+  );
+
+  it.effect("sets prod auth cookies for the shared web/API domain", () =>
+    Effect.gen(function* () {
+      const response = yield* runProdAuth(
+        new Request("https://api.denora.me/api/auth/login?redirect=https%3A%2F%2Fdenora.me%2Fapp"),
+      );
+
+      assert.strictEqual(response.status, 302);
+
+      const location = response.headers.get("location");
+      assert.ok(location);
+      assert.strictEqual(
+        new URL(location).searchParams.get("redirect_uri"),
+        "https://api.denora.me/api/auth/callback",
+      );
+
+      const setCookie = response.headers.get("set-cookie");
+      assert.ok(setCookie);
+      assert.match(setCookie, /^denora_auth_transaction=/);
+      assert.match(setCookie, /Secure/);
+      assert.match(setCookie, /Domain=denora\.me/);
     }),
   );
 

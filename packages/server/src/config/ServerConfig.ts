@@ -16,6 +16,7 @@ export interface Auth {
   readonly apiKey: Redacted.Redacted<string>;
   readonly baseURL: string;
   readonly clientId: string;
+  readonly cookieDomain: string | undefined;
   readonly cookiePassword: Redacted.Redacted<string>;
   readonly webOrigins: ReadonlyArray<string>;
 }
@@ -52,6 +53,11 @@ const baseURL = Config.string("WORKOS_REDIRECT_BASE_URL").pipe(
 
 const clientId = Config.string("WORKOS_CLIENT_ID");
 
+const cookieDomain = Config.string("DENORA_COOKIE_DOMAIN").pipe(
+  Config.withDefault(""),
+  Config.map((value) => value.trim().replace(/^\.+/, "") || undefined),
+);
+
 const cookiePassword = Config.redacted("WORKOS_COOKIE_PASSWORD");
 
 export const load: Config.Config<Values> = Config.all({
@@ -59,6 +65,7 @@ export const load: Config.Config<Values> = Config.all({
     apiKey,
     baseURL,
     clientId,
+    cookieDomain,
     cookiePassword,
     webOrigins,
   }),

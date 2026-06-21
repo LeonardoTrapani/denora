@@ -48,6 +48,7 @@ const props = Effect.gen(function* () {
   }
 
   if (deployment.webDomain !== undefined) {
+    env.DENORA_COOKIE_DOMAIN = deployment.webDomain;
     env.DENORA_WEB_ORIGINS = origin(deployment.webDomain);
   }
 

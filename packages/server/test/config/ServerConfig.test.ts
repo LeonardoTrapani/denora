@@ -26,6 +26,7 @@ describe("ServerConfig.load", () => {
       assert.strictEqual(Redacted.value(auth.apiKey), baseEnv.WORKOS_API_KEY);
       assert.strictEqual(auth.baseURL, ServerConfig.DefaultApiOrigin);
       assert.strictEqual(auth.clientId, baseEnv.WORKOS_CLIENT_ID);
+      assert.strictEqual(auth.cookieDomain, undefined);
       assert.strictEqual(Redacted.value(auth.cookiePassword), baseEnv.WORKOS_COOKIE_PASSWORD);
     }),
   );
@@ -45,6 +46,26 @@ describe("ServerConfig.load", () => {
           WORKOS_REDIRECT_BASE_URL: "https://api.denora.me/base/",
         });
         assert.strictEqual(auth.baseURL, "https://api.denora.me");
+      }),
+    );
+  });
+
+  describe("cookieDomain (DENORA_COOKIE_DOMAIN)", () => {
+    it.effect("defaults to undefined when unset or blank", () =>
+      Effect.gen(function* () {
+        const unset = yield* load(baseEnv);
+        const blank = yield* load({ ...baseEnv, DENORA_COOKIE_DOMAIN: "   " });
+
+        assert.strictEqual(unset.auth.cookieDomain, undefined);
+        assert.strictEqual(blank.auth.cookieDomain, undefined);
+      }),
+    );
+
+    it.effect("normalizes a leading dot", () =>
+      Effect.gen(function* () {
+        const { auth } = yield* load({ ...baseEnv, DENORA_COOKIE_DOMAIN: ".dev.denora.me" });
+
+        assert.strictEqual(auth.cookieDomain, "dev.denora.me");
       }),
     );
   });

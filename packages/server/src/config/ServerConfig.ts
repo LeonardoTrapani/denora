@@ -2,7 +2,6 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import type * as Redacted from "effect/Redacted";
 
 export const DefaultWebOrigins = [
@@ -11,12 +10,13 @@ export const DefaultWebOrigins = [
   "http://localhost:8081",
 ] as const;
 
+export const DefaultApiOrigin = "http://localhost:1337";
+
 export interface Auth {
   readonly apiKey: Redacted.Redacted<string>;
   readonly baseURL: string;
   readonly clientId: string;
   readonly cookiePassword: Redacted.Redacted<string>;
-  readonly e2eAuthSecret?: Redacted.Redacted<string> | undefined;
   readonly webOrigins: ReadonlyArray<string>;
 }
 
@@ -47,16 +47,12 @@ const apiKey = Config.redacted("WORKOS_API_KEY");
 // are scoped to this origin.
 const baseURL = Config.string("WORKOS_REDIRECT_BASE_URL").pipe(
   Config.map((value) => new URL(value).origin),
+  Config.withDefault(DefaultApiOrigin),
 );
 
 const clientId = Config.string("WORKOS_CLIENT_ID");
 
 const cookiePassword = Config.redacted("WORKOS_COOKIE_PASSWORD");
-
-const e2eAuthSecret = Config.redacted("DENORA_E2E_AUTH_SECRET").pipe(
-  Config.option,
-  Config.map(Option.getOrUndefined),
-);
 
 export const load: Config.Config<Values> = Config.all({
   auth: Config.all({
@@ -64,7 +60,6 @@ export const load: Config.Config<Values> = Config.all({
     baseURL,
     clientId,
     cookiePassword,
-    e2eAuthSecret,
     webOrigins,
   }),
 });

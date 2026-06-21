@@ -15,31 +15,46 @@ Bun + Turborepo monorepo for Denora, deployed and developed as a single Alchemy 
 ```sh
 bun install
 bun run dev
-bun run dev:mobile
+bun run deploy:dev
 bun run deploy:staging
+bun run deploy:prod
 bun fmt
 bun lint
 bun check-types
 bun run build
 ```
 
-`bun run dev` runs the full stack through `alchemy dev`. Use `bun run dev:web` only for isolated frontend work.
-Use `.env.mobile` to point the Expo app at an Alchemy-deployed or locally served API.
+`bun run dev` runs the full stack through `alchemy dev --stage local` and keeps the app on localhost. Use `bun run dev:web` only for isolated frontend work.
 
-## Staging
+## Stages And Domains
 
-Alchemy stages isolate deployed resources. Profiles only select which local cloud credentials Alchemy uses, so this repo uses the default profile and targets staging with `--stage staging`.
+Alchemy stages isolate deployed resources. Local development is the `local` stage and uses localhost. Deployed stages use Cloudflare custom domains managed from `alchemy.run.ts`:
+
+- `dev`: `dev.denora.me`, `api.dev.denora.me`
+- `staging`: `staging.denora.me`, `api.staging.denora.me`
+- `prod`: `denora.me`, `api.denora.me`
+
+The stack adopts the existing `denora.me` Cloudflare zone and attaches Workers to the stage domains. Worker/public URL values are derived from the stage map, not from `.env`.
+
+## Environment
+
+`.env*` files contain only secrets and per-stage WorkOS client credentials. Public URLs and CORS origins are derived by Alchemy from the stage domains.
+
+Use one WorkOS client per stage with these Redirect URIs:
+
+- local: `http://localhost:1337/api/auth/callback`
+- dev: `https://api.dev.denora.me/api/auth/callback`
+- staging: `https://api.staging.denora.me/api/auth/callback`
+- prod: `https://api.denora.me/api/auth/callback`
 
 ```sh
+cp .env.example .env
+cp .env.dev.example .env.dev
 cp .env.staging.example .env.staging
-cp .env.mobile.example .env.mobile
+cp .env.production.example .env.production
+bun run deploy:dev
 bun run deploy:staging
+bun run deploy:prod
 ```
 
-After deploy, copy the printed `mobileApiUrl` into `.env.mobile` and run:
-
-```sh
-bun run dev:mobile
-```
-
-Runtime server secrets such as `WORKOS_API_KEY` and `WORKOS_COOKIE_PASSWORD` stay in `.env.staging` as deploy-time inputs. Alchemy reads them through `effect/Config` during Worker init and binds them to Cloudflare as encrypted Worker secrets. `.env.mobile` is intentionally separate because it contains public mobile config, not secrets.
+Runtime server secrets such as `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, and `WORKOS_COOKIE_PASSWORD` stay in the stage env file as deploy-time inputs. Alchemy reads them through `effect/Config` during Worker init and binds them to Cloudflare as encrypted Worker secrets.

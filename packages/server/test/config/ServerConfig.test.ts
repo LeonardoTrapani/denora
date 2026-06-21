@@ -9,7 +9,6 @@ const baseEnv: Record<string, string> = {
   WORKOS_API_KEY: "sk_test_workos_api_key",
   WORKOS_CLIENT_ID: "client_test_workos_client_id",
   WORKOS_COOKIE_PASSWORD: "test-workos-cookie-password-value-please-change-0001",
-  WORKOS_REDIRECT_BASE_URL: "http://localhost:3000",
 };
 
 const providerFor = (env: Record<string, string>): ConfigProvider.ConfigProvider =>
@@ -25,13 +24,20 @@ describe("ServerConfig.load", () => {
     Effect.gen(function* () {
       const { auth } = yield* load(baseEnv);
       assert.strictEqual(Redacted.value(auth.apiKey), baseEnv.WORKOS_API_KEY);
-      assert.strictEqual(auth.baseURL, "http://localhost:3000");
+      assert.strictEqual(auth.baseURL, ServerConfig.DefaultApiOrigin);
       assert.strictEqual(auth.clientId, baseEnv.WORKOS_CLIENT_ID);
       assert.strictEqual(Redacted.value(auth.cookiePassword), baseEnv.WORKOS_COOKIE_PASSWORD);
     }),
   );
 
   describe("baseURL (WORKOS_REDIRECT_BASE_URL)", () => {
+    it.effect("defaults to the local API origin when unset", () =>
+      Effect.gen(function* () {
+        const { auth } = yield* load(baseEnv);
+        assert.strictEqual(auth.baseURL, ServerConfig.DefaultApiOrigin);
+      }),
+    );
+
     it.effect("is normalized to an origin (path + trailing slash dropped)", () =>
       Effect.gen(function* () {
         const { auth } = yield* load({
@@ -81,12 +87,7 @@ describe("ServerConfig.load", () => {
   });
 
   describe("missing required keys produce a ConfigError", () => {
-    const required = [
-      "WORKOS_API_KEY",
-      "WORKOS_CLIENT_ID",
-      "WORKOS_COOKIE_PASSWORD",
-      "WORKOS_REDIRECT_BASE_URL",
-    ] as const;
+    const required = ["WORKOS_API_KEY", "WORKOS_CLIENT_ID", "WORKOS_COOKIE_PASSWORD"] as const;
 
     it.effect.each(required)("missing %s fails", (key) =>
       Effect.gen(function* () {

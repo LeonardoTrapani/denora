@@ -1,6 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Redacted from "effect/Redacted";
 import { Auth } from "../../src/auth/Auth.ts";
 import { AuthLive } from "../../src/auth/Live.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
@@ -90,70 +89,6 @@ describe("AuthLive", () => {
       assert.match(setCookie, /denora_auth_transaction=/);
       assert.match(setCookie, /Max-Age=0/);
       assert.match(setCookie, /Expires=Thu, 01 Jan 1970 00:00:00 GMT/);
-    }),
-  );
-
-  it.effect("keeps e2e session bootstrap disabled unless an explicit secret is configured", () =>
-    Effect.gen(function* () {
-      const response = yield* runAuth(
-        new Request("http://localhost:3000/api/auth/e2e/session", {
-          headers: { "x-denora-e2e-auth": "test" },
-        }),
-      );
-
-      assert.strictEqual(response.status, 404);
-      assert.deepStrictEqual(yield* Effect.promise(() => response.json()), {
-        error: "NotFound",
-      });
-    }),
-  );
-
-  it.effect("boots an authenticated e2e session when the configured secret matches", () =>
-    Effect.gen(function* () {
-      const response = yield* Effect.gen(function* () {
-        const auth = yield* Auth.Service;
-        return yield* auth.handle(
-          new Request("http://localhost:3000/api/auth/e2e/session?return_to=/app", {
-            headers: { "x-denora-e2e-auth": "browser-secret" },
-          }),
-        );
-      }).pipe(
-        Effect.provide(
-          AuthLive.layer({
-            ...ServerConfigMock.testAuth,
-            e2eAuthSecret: Redacted.make("browser-secret"),
-          }),
-        ),
-      );
-
-      assert.strictEqual(response.status, 302);
-      assert.strictEqual(response.headers.get("location"), "http://localhost:3000/app");
-
-      const setCookie = response.headers.get("set-cookie");
-      assert.ok(setCookie);
-      assert.match(setCookie, /^denora_session=e2e\./);
-      assert.match(setCookie, /HttpOnly/);
-      assert.match(setCookie, /SameSite=Lax/);
-    }),
-  );
-
-  it.effect("does not accept the e2e bootstrap secret from the query string", () =>
-    Effect.gen(function* () {
-      const response = yield* Effect.gen(function* () {
-        const auth = yield* Auth.Service;
-        return yield* auth.handle(
-          new Request("http://localhost:3000/api/auth/e2e/session?secret=browser-secret"),
-        );
-      }).pipe(
-        Effect.provide(
-          AuthLive.layer({
-            ...ServerConfigMock.testAuth,
-            e2eAuthSecret: Redacted.make("browser-secret"),
-          }),
-        ),
-      );
-
-      assert.strictEqual(response.status, 401);
     }),
   );
 });

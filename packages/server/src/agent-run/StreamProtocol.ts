@@ -1,3 +1,13 @@
+/**
+ * Durable Streams protocol read endpoints.
+ *
+ * Implements DS-compliant GET (catch-up, long-poll, SSE) and HEAD on any
+ * {@link EventStreamStore} path. These are read-only — writes are internal
+ * side-effects of agent execution and workflow lifecycle.
+ *
+ * @see https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md
+ */
+
 import * as Cause from "effect/Cause";
 import * as Channel from "effect/Channel";
 import * as Effect from "effect/Effect";

@@ -123,10 +123,12 @@ const corsLayer = Layer.unwrap(
 
 export class Resource extends Cloudflare.Worker<Resource, {}, AgentRunObject>()("Server", props) {}
 
+export { AgentRunObject };
+
 export default Resource.make(
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
-    const runObjects = yield* AgentRunObject.from(Resource);
+    const runObjects = yield* AgentRunObject;
 
     return {
       fetch: Routes.layer.pipe(

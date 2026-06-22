@@ -34,8 +34,8 @@ The user talks to their own named agent. Denora is the product name; each user's
 ## Domain Language
 
 - Agent: the named personal assistant identity owned by a user.
-- Thread: one conversation or event-driven interaction with an agent.
-- Agent Run: one model/tool execution started from a message, inbound event, or routine.
+- Conversation: one ongoing chat or event-driven interaction history with an agent.
+- Agent Run: one asynchronous model/tool execution started from a message, inbound event, or routine.
 
 ## Email Identity
 

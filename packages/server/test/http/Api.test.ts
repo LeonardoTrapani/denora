@@ -127,5 +127,51 @@ describe("Api http surface", () => {
         assert.strictEqual(events[0]?.runId, runId);
       }).pipe(Effect.provide(appLayer())),
     );
+
+    it.effect("serves HEAD metadata for an existing run stream", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const runId = `run_${crypto.randomUUID()}`;
+
+        const created = yield* client.execute(
+          HttpClientRequest.post("/agent-runs").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ runId, input: { prompt: "hello" } }),
+          ),
+        );
+        assert.strictEqual(created.status, 200);
+        const createdBody = (yield* created.json) as { readonly offset: string };
+
+        const head = yield* client.execute(
+          HttpClientRequest.head(`/runs/${runId}`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+          ),
+        );
+
+        assert.strictEqual(head.status, 200);
+        assert.strictEqual(yield* head.text, "");
+        assert.strictEqual(head.headers["stream-next-offset"], createdBody.offset);
+        assert.strictEqual(head.headers["stream-up-to-date"], "true");
+        assert.isString(head.headers.etag);
+        assert.strictEqual(head.headers["x-content-type-options"], "nosniff");
+        assert.strictEqual(head.headers["cross-origin-resource-policy"], "cross-origin");
+      }).pipe(Effect.provide(appLayer())),
+    );
+
+    it.effect("serves an empty 404 HEAD response for a missing run stream", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const runId = `run_${crypto.randomUUID()}`;
+
+        const head = yield* client.execute(
+          HttpClientRequest.head(`/runs/${runId}`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+          ),
+        );
+
+        assert.strictEqual(head.status, 404);
+        assert.strictEqual(yield* head.text, "");
+      }).pipe(Effect.provide(appLayer())),
+    );
   });
 });

@@ -7,7 +7,7 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { type EventStreamError, makeInMemoryEventStreamStore } from "./EventStreamStore.ts";
 import { AgentRunLifecycle, type CreateRunInput, type CreateRunResult } from "./Lifecycle.ts";
-import { handleStreamRead } from "./StreamProtocol.ts";
+import { handleStreamHead, handleStreamRead } from "./StreamProtocol.ts";
 
 export class CreateAgentRunFailed extends Schema.TaggedErrorClass<CreateAgentRunFailed>()(
   "CreateAgentRunFailed",
@@ -92,11 +92,16 @@ export const inMemoryLayer = Layer.sync(Service, () => {
     streamRequest: (runId, request) =>
       Effect.gen(function* () {
         const webRequest = yield* HttpServerRequest.toWeb(request);
-        const response = yield* handleStreamRead({
-          store,
-          path: `runs/${runId}`,
-          request: webRequest,
-        }).pipe(
+        const path = `runs/${runId}`;
+        const response = yield* (
+          webRequest.method === "HEAD"
+            ? handleStreamHead(store, path)
+            : handleStreamRead({
+                store,
+                path,
+                request: webRequest,
+              })
+        ).pipe(
           Effect.catch((error) =>
             Effect.succeed(Response.json({ error: error._tag }, { status: 500 })),
           ),

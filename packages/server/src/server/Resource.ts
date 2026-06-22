@@ -6,6 +6,8 @@ import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import { AgentRunObject, AgentRunObjectLive } from "../agent-run/AgentRunObject.ts";
+import { AgentRuns } from "../agent-run/AgentRuns.ts";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Routes } from "../http/Routes.ts";
@@ -104,21 +106,31 @@ const corsLayer = Layer.unwrap(
 
     return HttpRouter.cors({
       allowedOrigins: config.auth.webOrigins,
-      allowedMethods: ["GET", "POST", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"],
+      allowedMethods: ["GET", "HEAD", "POST", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token", "If-None-Match"],
+      exposedHeaders: [
+        "ETag",
+        "Location",
+        "Stream-Next-Offset",
+        "Stream-Up-To-Date",
+        "Stream-Closed",
+        "Stream-Cursor",
+      ],
       credentials: true,
     });
   }),
 );
 
-export class Resource extends Cloudflare.Worker<Resource>()(
-  "Server",
-  props,
+export class Resource extends Cloudflare.Worker<Resource, {}, AgentRunObject>()("Server", props) {}
+
+export default Resource.make(
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
+    const runObjects = yield* AgentRunObject.from(Resource);
 
     return {
       fetch: Routes.layer.pipe(
+        Layer.provide(AgentRuns.layer(runObjects)),
         Layer.provide(AuthLive.layerFromConfig),
         Layer.provide([HttpPlatform.layer, Etag.layer]),
         Layer.provide(corsLayer),
@@ -127,9 +139,7 @@ export class Resource extends Cloudflare.Worker<Resource>()(
         HttpRouter.toHttpEffect,
       ),
     };
-  }),
-) {}
-
-export default Resource;
+  }).pipe(Effect.provide(AgentRunObjectLive)),
+);
 
 export * as ServerResource from "./Resource.ts";

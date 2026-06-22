@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpServer from "effect/unstable/http/HttpServer";
+import { AgentRuns } from "../../src/agent-run/AgentRuns.ts";
 import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 import { Client } from "../../src/Client.ts";
 import { Health } from "../../src/http/system/Schema.ts";
@@ -131,12 +132,14 @@ describe("client: makeDenoraUrlBuilder", () => {
   });
 });
 
-const appLayer = Routes.layer.pipe(
-  Layer.provide(AuthMock.layer(() => Option.some(makeDenoraUser()))),
-  Layer.provide(ServerConfigMock.layer()),
+const appLayer = TestServer.layer(Routes.layer).pipe(
+  Layer.provide([
+    AuthMock.layer(() => Option.some(makeDenoraUser())),
+    AgentRuns.inMemoryLayer,
+    ServerConfigMock.layer(),
+  ]),
 );
-
-const serverLayer = TestServer.layer(appLayer);
+const serverLayer = appLayer;
 
 describe("client: makeDenoraClient (real round-trip)", () => {
   it.effect("calls the health endpoint against the served app", () =>

@@ -158,4 +158,96 @@ describe("StreamProtocol", () => {
       assert.include(body, '"upToDate":true');
     }),
   );
+
+  const invalidRequestCases = [
+    {
+      name: "duplicate offset",
+      url: "https://api.test/runs/run_invalid?offset=-1&offset=now",
+      body: {
+        error: {
+          type: "invalid_request",
+          code: "duplicate_offset_parameter",
+          message: "Duplicate offset parameters are not allowed.",
+          details: { values: ["-1", "now"] },
+        },
+      },
+    },
+    {
+      name: "duplicate tail",
+      url: "https://api.test/runs/run_invalid?tail=1&tail=2",
+      body: {
+        error: {
+          type: "invalid_request",
+          code: "duplicate_tail_parameter",
+          message: "Duplicate tail parameters are not allowed.",
+          details: { values: ["1", "2"] },
+        },
+      },
+    },
+    {
+      name: "invalid tail",
+      url: "https://api.test/runs/run_invalid?tail=0",
+      body: {
+        error: {
+          type: "invalid_request",
+          code: "invalid_tail_parameter",
+          message: "Tail must be an integer greater than or equal to 1.",
+          details: { tail: "0" },
+        },
+      },
+    },
+    {
+      name: "live mode without offset",
+      url: "https://api.test/runs/run_invalid?live=long-poll",
+      body: {
+        error: {
+          type: "invalid_request",
+          code: "missing_live_offset",
+          message: "Offset is required for live mode.",
+          details: { live: "long-poll" },
+        },
+      },
+    },
+    {
+      name: "invalid live mode",
+      url: "https://api.test/runs/run_invalid?offset=-1&live=stream",
+      body: {
+        error: {
+          type: "invalid_request",
+          code: "invalid_live_mode",
+          message: 'Invalid live mode. Use "long-poll" or "sse".',
+          details: { live: "stream" },
+        },
+      },
+    },
+    {
+      name: "malformed offset",
+      url: "https://api.test/runs/run_invalid?offset=banana",
+      body: {
+        error: {
+          type: "invalid_request",
+          code: "invalid_offset_format",
+          message: "Invalid stream offset format.",
+          details: { offset: "banana" },
+        },
+      },
+    },
+  ] as const;
+
+  for (const testCase of invalidRequestCases) {
+    it.effect(`returns structured invalid_request for ${testCase.name}`, () =>
+      Effect.gen(function* () {
+        const store = makeInMemoryEventStreamStore();
+        const response = yield* handleStreamRead({
+          store,
+          path: "runs/run_invalid",
+          request: new Request(testCase.url),
+        });
+
+        assert.strictEqual(response.status, 400);
+        assert.strictEqual(response.headers.get("content-type"), "application/json");
+        assert.deepStrictEqual(yield* Effect.promise(() => response.json()), testCase.body);
+      }),
+    );
+  }
 });

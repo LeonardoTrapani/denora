@@ -30,10 +30,42 @@ const SSE_CURSOR_FIELD = "streamCursor";
 const SSE_CLOSED_FIELD = "streamClosed";
 const SSE_UP_TO_DATE_FIELD = "upToDate";
 
-export class InvalidStreamRequest extends Schema.TaggedErrorClass<InvalidStreamRequest>()(
-  "InvalidStreamRequest",
-  { reason: Schema.String },
+export class DuplicateOffsetParameter extends Schema.TaggedErrorClass<DuplicateOffsetParameter>()(
+  "DuplicateOffsetParameter",
+  { values: Schema.Array(Schema.String) },
 ) {}
+
+export class DuplicateTailParameter extends Schema.TaggedErrorClass<DuplicateTailParameter>()(
+  "DuplicateTailParameter",
+  { values: Schema.Array(Schema.String) },
+) {}
+
+export class InvalidTailParameter extends Schema.TaggedErrorClass<InvalidTailParameter>()(
+  "InvalidTailParameter",
+  { tail: Schema.String },
+) {}
+
+export class MissingLiveOffset extends Schema.TaggedErrorClass<MissingLiveOffset>()(
+  "MissingLiveOffset",
+  { live: Schema.String },
+) {}
+
+export class InvalidLiveMode extends Schema.TaggedErrorClass<InvalidLiveMode>()("InvalidLiveMode", {
+  live: Schema.String,
+}) {}
+
+export class InvalidOffsetFormat extends Schema.TaggedErrorClass<InvalidOffsetFormat>()(
+  "InvalidOffsetFormat",
+  { offset: Schema.String },
+) {}
+
+export type StreamRequestValidationError =
+  | DuplicateOffsetParameter
+  | DuplicateTailParameter
+  | InvalidTailParameter
+  | MissingLiveOffset
+  | InvalidLiveMode
+  | InvalidOffsetFormat;
 
 export interface HandleStreamReadOptions {
   readonly store: EventStreamStore;
@@ -92,8 +124,18 @@ export const handleStreamRead = Effect.fn("StreamProtocol.handleStreamRead")(fun
   const liveRaw = url.searchParams.get("live");
   const cursor = url.searchParams.get("cursor") ?? undefined;
 
-  const invalid = validateReadParams(offsetValues, offsetParam, tailValues, liveRaw);
-  if (invalid !== undefined) return invalidRequestResponse(invalid.reason);
+  const validationResponse = yield* validateReadParams(
+    offsetValues,
+    offsetParam,
+    tailValues,
+    liveRaw,
+  ).pipe(
+    Effect.match({
+      onFailure: invalidRequestResponse,
+      onSuccess: () => undefined,
+    }),
+  );
+  if (validationResponse !== undefined) return validationResponse;
 
   const meta = yield* store.getStreamMeta(path);
   if (meta === null) return notFoundResponse(path, false);
@@ -353,35 +395,32 @@ const waitForStreamData = (
     );
   });
 
-const validateReadParams = (
+const validateReadParams = Effect.fn("StreamProtocol.validateReadParams")(function* (
   offsetValues: ReadonlyArray<string>,
   offsetParam: string,
   tailValues: ReadonlyArray<string>,
   liveRaw: string | null,
-): InvalidStreamRequest | undefined => {
+): Effect.fn.Return<void, StreamRequestValidationError> {
   if (offsetValues.length > 1) {
-    return new InvalidStreamRequest({ reason: "Duplicate offset parameters are not allowed." });
+    return yield* new DuplicateOffsetParameter({ values: Array.from(offsetValues) });
   }
   if (tailValues.length > 1) {
-    return new InvalidStreamRequest({ reason: "Duplicate tail parameters are not allowed." });
+    return yield* new DuplicateTailParameter({ values: Array.from(tailValues) });
   }
   const tailParam = tailValues[0];
   if (tailParam !== undefined && !/^[1-9]\d*$/.test(tailParam)) {
-    return new InvalidStreamRequest({
-      reason: "Tail must be an integer greater than or equal to 1.",
-    });
+    return yield* new InvalidTailParameter({ tail: tailParam });
   }
   if (liveRaw !== null && offsetValues.length === 0) {
-    return new InvalidStreamRequest({ reason: "Offset is required for live mode." });
+    return yield* new MissingLiveOffset({ live: liveRaw });
   }
   if (liveRaw !== null && liveRaw !== "long-poll" && liveRaw !== "sse") {
-    return new InvalidStreamRequest({ reason: 'Invalid live mode. Use "long-poll" or "sse".' });
+    return yield* new InvalidLiveMode({ live: liveRaw });
   }
   if (offsetParam !== "-1" && offsetParam !== "now" && !/^\d+_\d+$/.test(offsetParam)) {
-    return new InvalidStreamRequest({ reason: "Invalid offset format." });
+    return yield* new InvalidOffsetFormat({ offset: offsetParam });
   }
-  return undefined;
-};
+});
 
 const catchUpResponse = (
   request: Request,
@@ -458,11 +497,62 @@ const normalizeRunStreamEvent = (value: unknown): unknown => {
   return { ...rest, input: payload };
 };
 
-const invalidRequestResponse = (reason: string): Response =>
-  new Response(JSON.stringify(errorBody("invalid_request", reason)), {
+const invalidRequestResponse = (error: StreamRequestValidationError): Response =>
+  new Response(JSON.stringify(invalidRequestBody(error)), {
     status: 400,
     headers: { "content-type": "application/json", ...SECURITY_HEADERS },
   });
+
+const invalidRequestBody = (error: StreamRequestValidationError): ErrorBody => {
+  switch (error._tag) {
+    case "DuplicateOffsetParameter":
+      return errorBody(
+        "invalid_request",
+        "Duplicate offset parameters are not allowed.",
+        "duplicate_offset_parameter",
+        { values: error.values },
+      );
+    case "DuplicateTailParameter":
+      return errorBody(
+        "invalid_request",
+        "Duplicate tail parameters are not allowed.",
+        "duplicate_tail_parameter",
+        { values: error.values },
+      );
+    case "InvalidTailParameter":
+      return errorBody(
+        "invalid_request",
+        "Tail must be an integer greater than or equal to 1.",
+        "invalid_tail_parameter",
+        { tail: error.tail },
+      );
+    case "MissingLiveOffset":
+      return errorBody(
+        "invalid_request",
+        "Offset is required for live mode.",
+        "missing_live_offset",
+        {
+          live: error.live,
+        },
+      );
+    case "InvalidLiveMode":
+      return errorBody(
+        "invalid_request",
+        'Invalid live mode. Use "long-poll" or "sse".',
+        "invalid_live_mode",
+        { live: error.live },
+      );
+    case "InvalidOffsetFormat":
+      return errorBody(
+        "invalid_request",
+        "Invalid stream offset format.",
+        "invalid_offset_format",
+        {
+          offset: error.offset,
+        },
+      );
+  }
+};
 
 const notFoundResponse = (path: string, head: boolean): Response => {
   const body = errorBody(
@@ -475,7 +565,28 @@ const notFoundResponse = (path: string, head: boolean): Response => {
   });
 };
 
-const errorBody = (type: string, message: string) => ({ error: { type, message } });
+interface ErrorBody {
+  readonly error: {
+    readonly type: string;
+    readonly message: string;
+    readonly code?: string;
+    readonly details?: Record<string, unknown>;
+  };
+}
+
+const errorBody = (
+  type: string,
+  message: string,
+  code?: string,
+  details?: Record<string, unknown>,
+): ErrorBody => ({
+  error: {
+    type,
+    ...(code === undefined ? {} : { code }),
+    message,
+    ...(details === undefined ? {} : { details }),
+  },
+});
 
 const runIdFromPath = (pathname: string): string => {
   const match = /^\/runs\/([^/]+)$/.exec(pathname);

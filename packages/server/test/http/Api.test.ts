@@ -127,5 +127,24 @@ describe("Api http surface", () => {
         assert.strictEqual(events[0]?.runId, runId);
       }).pipe(Effect.provide(appLayer())),
     );
+
+    it.effect("returns structured stream validation errors", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const res = yield* client.get("/runs/run_invalid?offset=banana", {
+          headers: { cookie: "denora_session=valid" },
+        });
+
+        assert.strictEqual(res.status, 400);
+        assert.deepStrictEqual(yield* res.json, {
+          error: {
+            type: "invalid_request",
+            code: "invalid_offset_format",
+            message: "Invalid stream offset format.",
+            details: { offset: "banana" },
+          },
+        });
+      }).pipe(Effect.provide(appLayer())),
+    );
   });
 });

@@ -33,10 +33,42 @@ const SSE_CURSOR_FIELD = "streamCursor";
 const SSE_CLOSED_FIELD = "streamClosed";
 const SSE_UP_TO_DATE_FIELD = "upToDate";
 
-export class InvalidStreamRequest extends Schema.TaggedErrorClass<InvalidStreamRequest>()(
-  "InvalidStreamRequest",
-  { reason: Schema.String },
+export class DuplicateOffsetParameter extends Schema.TaggedErrorClass<DuplicateOffsetParameter>()(
+  "DuplicateOffsetParameter",
+  { values: Schema.Array(Schema.String) },
 ) {}
+
+export class DuplicateTailParameter extends Schema.TaggedErrorClass<DuplicateTailParameter>()(
+  "DuplicateTailParameter",
+  { values: Schema.Array(Schema.String) },
+) {}
+
+export class InvalidTailParameter extends Schema.TaggedErrorClass<InvalidTailParameter>()(
+  "InvalidTailParameter",
+  { tail: Schema.String },
+) {}
+
+export class MissingLiveOffset extends Schema.TaggedErrorClass<MissingLiveOffset>()(
+  "MissingLiveOffset",
+  { live: Schema.String },
+) {}
+
+export class InvalidLiveMode extends Schema.TaggedErrorClass<InvalidLiveMode>()("InvalidLiveMode", {
+  live: Schema.String,
+}) {}
+
+export class InvalidOffsetFormat extends Schema.TaggedErrorClass<InvalidOffsetFormat>()(
+  "InvalidOffsetFormat",
+  { offset: Schema.String },
+) {}
+
+export type StreamRequestValidationError =
+  | DuplicateOffsetParameter
+  | DuplicateTailParameter
+  | InvalidTailParameter
+  | MissingLiveOffset
+  | InvalidLiveMode
+  | InvalidOffsetFormat;
 
 export interface HandleStreamReadOptions {
   readonly store: EventStreamStore;
@@ -44,6 +76,7 @@ export interface HandleStreamReadOptions {
   readonly request: Request;
   readonly longPollTimeoutMs?: number | undefined;
   readonly sseHeartbeatMs?: number | undefined;
+  readonly sseIdleTimeoutMs?: number | undefined;
 }
 
 export const handleRunObjectRequest = Effect.fn("StreamProtocol.handleRunObjectRequest")(function* (
@@ -94,8 +127,18 @@ export const handleStreamRead = Effect.fn("StreamProtocol.handleStreamRead")(fun
   const liveRaw = url.searchParams.get("live");
   const cursor = url.searchParams.get("cursor") ?? undefined;
 
-  const invalid = validateReadParams(offsetValues, offsetParam, tailValues, liveRaw);
-  if (invalid !== undefined) return invalidRequestResponse(invalid.reason);
+  const validationResponse = yield* validateReadParams(
+    offsetValues,
+    offsetParam,
+    tailValues,
+    liveRaw,
+  ).pipe(
+    Effect.match({
+      onFailure: invalidRequestResponse,
+      onSuccess: () => undefined,
+    }),
+  );
+  if (validationResponse !== undefined) return validationResponse;
 
   const meta = yield* store.getStreamMeta(path);
   if (meta === null) return notFoundResponse(path, false);
@@ -103,7 +146,14 @@ export const handleStreamRead = Effect.fn("StreamProtocol.handleStreamRead")(fun
   const readOffset = yield* resolveReadOffset(offsetParam, liveRaw, tailParam, meta.nextOffset);
 
   if (liveRaw === "sse") {
-    return yield* sseResponse(store, path, readOffset, request.signal, options.sseHeartbeatMs);
+    return yield* sseResponse(
+      store,
+      path,
+      readOffset,
+      request.signal,
+      options.sseHeartbeatMs,
+      options.sseIdleTimeoutMs ?? options.longPollTimeoutMs,
+    );
   }
 
   const result = yield* store.readEvents(path, { offset: readOffset });
@@ -182,9 +232,10 @@ const sseResponse = Effect.fn("StreamProtocol.sseResponse")(function* (
   offset: string,
   signal: AbortSignal,
   heartbeatMs = DEFAULT_SSE_HEARTBEAT_MS,
+  idleTimeoutMs = DEFAULT_LONG_POLL_TIMEOUT_MS,
 ): Effect.fn.Return<Response, never> {
   const body = yield* Stream.toReadableStreamEffect(
-    Stream.encodeText(sseFrames(store, path, offset, signal, heartbeatMs)),
+    Stream.encodeText(sseFrames(store, path, offset, signal, heartbeatMs, idleTimeoutMs)),
   );
   return new Response(body, {
     status: 200,
@@ -202,21 +253,34 @@ const sseFrames = (
   offset: string,
   signal: AbortSignal,
   heartbeatMs: number,
+  idleTimeoutMs: number,
 ): Stream.Stream<string> =>
   Stream.fromChannel(
     Channel.fromTransformBracket((_upstream, _scope, forkedScope) =>
       Effect.gen(function* () {
-        const wakeups = yield* Queue.sliding<"data" | "heartbeat" | "aborted">(1);
+        const wakeups = yield* Queue.sliding<"data" | "heartbeat" | "idle" | "aborted">(1);
         let currentOffset = offset;
         let connected = !signal.aborted;
         let waitingForWake = false;
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
-        const wake = (reason: "data" | "heartbeat" | "aborted") => {
-          Queue.offerUnsafe(wakeups, reason);
+        const wake = (reason: "data" | "heartbeat" | "idle" | "aborted") => {
+          if (connected || reason === "aborted") Queue.offerUnsafe(wakeups, reason);
+        };
+        const clearIdleTimer = () => {
+          if (idleTimer === undefined) return;
+          clearTimeout(idleTimer);
+          idleTimer = undefined;
+        };
+        const armIdleTimer = () => {
+          if (!connected) return;
+          clearIdleTimer();
+          idleTimer = setTimeout(() => wake("idle"), idleTimeoutMs);
         };
         const stop = () => {
           if (!connected) return;
           connected = false;
+          clearIdleTimer();
           wake("aborted");
         };
 
@@ -226,13 +290,14 @@ const sseFrames = (
         const onAbort = () => stop();
         signal.addEventListener("abort", onAbort, { once: true });
         const heartbeat = setInterval(() => {
-          if (connected) wake("heartbeat");
+          if (connected && Queue.sizeUnsafe(wakeups) === 0) wake("heartbeat");
         }, heartbeatMs);
 
         yield* Scope.addFinalizer(
           forkedScope,
           Effect.sync(() => {
             connected = false;
+            clearIdleTimer();
             clearInterval(heartbeat);
             signal.removeEventListener("abort", onAbort);
             unsubscribe();
@@ -246,7 +311,8 @@ const sseFrames = (
           if (waitingForWake) {
             const wakeup = yield* Queue.take(wakeups);
             if (!connected || signal.aborted || wakeup === "aborted") return yield* Cause.done();
-            if (wakeup === "heartbeat") frames.push(": heartbeat\n\n");
+            if (wakeup === "heartbeat") return [": heartbeat\n\n"] as const;
+            clearIdleTimer();
             waitingForWake = false;
           }
 
@@ -257,6 +323,7 @@ const sseFrames = (
                   `event: error\n${encodeSseData(JSON.stringify({ message: String(error) }))}`,
                 );
                 connected = false;
+                clearIdleTimer();
                 return false;
               },
               onSuccess: (result) => {
@@ -278,8 +345,13 @@ const sseFrames = (
                 }
                 frames.push(`event: control\n${encodeSseData(JSON.stringify(controlData))}`);
                 currentOffset = result.nextOffset;
-                if (streamClosed) connected = false;
-                else if (result.upToDate) waitingForWake = true;
+                if (streamClosed) {
+                  connected = false;
+                  clearIdleTimer();
+                } else if (result.upToDate) {
+                  waitingForWake = true;
+                  armIdleTimer();
+                }
                 return connected;
               },
             }),
@@ -332,35 +404,32 @@ const waitForStreamData = (
     );
   });
 
-const validateReadParams = (
+const validateReadParams = Effect.fn("StreamProtocol.validateReadParams")(function* (
   offsetValues: ReadonlyArray<string>,
   offsetParam: string,
   tailValues: ReadonlyArray<string>,
   liveRaw: string | null,
-): InvalidStreamRequest | undefined => {
+): Effect.fn.Return<void, StreamRequestValidationError> {
   if (offsetValues.length > 1) {
-    return new InvalidStreamRequest({ reason: "Duplicate offset parameters are not allowed." });
+    return yield* new DuplicateOffsetParameter({ values: Array.from(offsetValues) });
   }
   if (tailValues.length > 1) {
-    return new InvalidStreamRequest({ reason: "Duplicate tail parameters are not allowed." });
+    return yield* new DuplicateTailParameter({ values: Array.from(tailValues) });
   }
   const tailParam = tailValues[0];
   if (tailParam !== undefined && !/^[1-9]\d*$/.test(tailParam)) {
-    return new InvalidStreamRequest({
-      reason: "Tail must be an integer greater than or equal to 1.",
-    });
+    return yield* new InvalidTailParameter({ tail: tailParam });
   }
   if (liveRaw !== null && offsetValues.length === 0) {
-    return new InvalidStreamRequest({ reason: "Offset is required for live mode." });
+    return yield* new MissingLiveOffset({ live: liveRaw });
   }
   if (liveRaw !== null && liveRaw !== "long-poll" && liveRaw !== "sse") {
-    return new InvalidStreamRequest({ reason: 'Invalid live mode. Use "long-poll" or "sse".' });
+    return yield* new InvalidLiveMode({ live: liveRaw });
   }
   if (offsetParam !== "-1" && offsetParam !== "now" && !/^\d+_\d+$/.test(offsetParam)) {
-    return new InvalidStreamRequest({ reason: "Invalid offset format." });
+    return yield* new InvalidOffsetFormat({ offset: offsetParam });
   }
-  return undefined;
-};
+});
 
 const catchUpResponse = (
   request: Request,
@@ -437,11 +506,62 @@ const normalizeRunStreamEvent = (value: unknown): unknown => {
   return { ...rest, input: payload };
 };
 
-const invalidRequestResponse = (reason: string): Response =>
-  new Response(JSON.stringify(errorBody("invalid_request", reason)), {
+const invalidRequestResponse = (error: StreamRequestValidationError): Response =>
+  new Response(JSON.stringify(invalidRequestBody(error)), {
     status: 400,
     headers: { "content-type": "application/json", ...SECURITY_HEADERS },
   });
+
+const invalidRequestBody = (error: StreamRequestValidationError): ErrorBody => {
+  switch (error._tag) {
+    case "DuplicateOffsetParameter":
+      return errorBody(
+        "invalid_request",
+        "Duplicate offset parameters are not allowed.",
+        "duplicate_offset_parameter",
+        { values: error.values },
+      );
+    case "DuplicateTailParameter":
+      return errorBody(
+        "invalid_request",
+        "Duplicate tail parameters are not allowed.",
+        "duplicate_tail_parameter",
+        { values: error.values },
+      );
+    case "InvalidTailParameter":
+      return errorBody(
+        "invalid_request",
+        "Tail must be an integer greater than or equal to 1.",
+        "invalid_tail_parameter",
+        { tail: error.tail },
+      );
+    case "MissingLiveOffset":
+      return errorBody(
+        "invalid_request",
+        "Offset is required for live mode.",
+        "missing_live_offset",
+        {
+          live: error.live,
+        },
+      );
+    case "InvalidLiveMode":
+      return errorBody(
+        "invalid_request",
+        'Invalid live mode. Use "long-poll" or "sse".',
+        "invalid_live_mode",
+        { live: error.live },
+      );
+    case "InvalidOffsetFormat":
+      return errorBody(
+        "invalid_request",
+        "Invalid stream offset format.",
+        "invalid_offset_format",
+        {
+          offset: error.offset,
+        },
+      );
+  }
+};
 
 const notFoundResponse = (path: string, head: boolean): Response => {
   const body = errorBody(
@@ -454,7 +574,28 @@ const notFoundResponse = (path: string, head: boolean): Response => {
   });
 };
 
-const errorBody = (type: string, message: string) => ({ error: { type, message } });
+interface ErrorBody {
+  readonly error: {
+    readonly type: string;
+    readonly message: string;
+    readonly code?: string;
+    readonly details?: Record<string, unknown>;
+  };
+}
+
+const errorBody = (
+  type: string,
+  message: string,
+  code?: string,
+  details?: Record<string, unknown>,
+): ErrorBody => ({
+  error: {
+    type,
+    ...(code === undefined ? {} : { code }),
+    message,
+    ...(details === undefined ? {} : { details }),
+  },
+});
 
 const runIdFromPath = (pathname: string): string => {
   const match = /^\/runs\/([^/]+)$/.exec(pathname);

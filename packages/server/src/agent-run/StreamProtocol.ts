@@ -1,6 +1,9 @@
+import * as Cause from "effect/Cause";
+import * as Channel from "effect/Channel";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import {
   type EventStreamError,
@@ -200,95 +203,95 @@ const sseFrames = (
   signal: AbortSignal,
   heartbeatMs: number,
 ): Stream.Stream<string> =>
-  Stream.callback<string>(
-    Effect.fn("StreamProtocol.sseFrames")(function* (queue) {
-      const wakeups = yield* Queue.sliding<void>(1);
-      let currentOffset = offset;
-      let connected = !signal.aborted;
+  Stream.fromChannel(
+    Channel.fromTransformBracket((_upstream, _scope, forkedScope) =>
+      Effect.gen(function* () {
+        const wakeups = yield* Queue.sliding<"data" | "heartbeat" | "aborted">(1);
+        let currentOffset = offset;
+        let connected = !signal.aborted;
+        let waitingForWake = false;
 
-      const push = (frame: string) => {
-        if (connected) Queue.offerUnsafe(queue, frame);
-      };
-      const wake = () => {
-        if (connected) Queue.offerUnsafe(wakeups, undefined);
-      };
-      const stop = () => {
-        if (!connected) return;
-        connected = false;
-        Queue.endUnsafe(queue);
-      };
+        const wake = (reason: "data" | "heartbeat" | "aborted") => {
+          Queue.offerUnsafe(wakeups, reason);
+        };
+        const stop = () => {
+          if (!connected) return;
+          connected = false;
+          wake("aborted");
+        };
 
-      const readAvailable = Effect.fn("StreamProtocol.sseReadAvailable")(function* () {
-        while (connected) {
-          const keepReading = yield* store.readEvents(path, { offset: currentOffset }).pipe(
-            Effect.matchEffect({
-              onFailure: (error) =>
-                Effect.sync(() => {
-                  push(
-                    `event: error\n${encodeSseData(JSON.stringify({ message: String(error) }))}`,
+        const unsubscribe = yield* store.subscribe(path, () => {
+          if (connected) wake("data");
+        });
+        const onAbort = () => stop();
+        signal.addEventListener("abort", onAbort, { once: true });
+        const heartbeat = setInterval(() => {
+          if (connected) wake("heartbeat");
+        }, heartbeatMs);
+
+        yield* Scope.addFinalizer(
+          forkedScope,
+          Effect.sync(() => {
+            connected = false;
+            clearInterval(heartbeat);
+            signal.removeEventListener("abort", onAbort);
+            unsubscribe();
+          }),
+        );
+
+        const pull = Effect.gen(function* () {
+          if (!connected || signal.aborted) return yield* Cause.done();
+
+          const frames: Array<string> = [];
+          if (waitingForWake) {
+            const wakeup = yield* Queue.take(wakeups);
+            if (!connected || signal.aborted || wakeup === "aborted") return yield* Cause.done();
+            if (wakeup === "heartbeat") frames.push(": heartbeat\n\n");
+            waitingForWake = false;
+          }
+
+          yield* store.readEvents(path, { offset: currentOffset }).pipe(
+            Effect.match({
+              onFailure: (error) => {
+                frames.push(
+                  `event: error\n${encodeSseData(JSON.stringify({ message: String(error) }))}`,
+                );
+                connected = false;
+                return false;
+              },
+              onSuccess: (result) => {
+                if (result.events.length > 0) {
+                  frames.push(
+                    `event: data\n${encodeSseData(JSON.stringify(publicEventData(path, result)))}`,
                   );
-                  stop();
-                  return false;
-                }),
-              onSuccess: (result) =>
-                Effect.sync(() => {
-                  if (result.events.length > 0) {
-                    push(
-                      `event: data\n${encodeSseData(JSON.stringify(publicEventData(path, result)))}`,
-                    );
-                  }
+                }
 
-                  const streamClosed = result.closed && result.upToDate;
-                  const controlData: Record<string, string | boolean> = {
-                    [SSE_OFFSET_FIELD]: result.nextOffset,
-                  };
-                  if (streamClosed) {
-                    controlData[SSE_CLOSED_FIELD] = true;
-                  } else {
-                    controlData[SSE_CURSOR_FIELD] = generateCursor();
-                    if (result.upToDate) controlData[SSE_UP_TO_DATE_FIELD] = true;
-                  }
-                  push(`event: control\n${encodeSseData(JSON.stringify(controlData))}`);
-                  currentOffset = result.nextOffset;
-                  if (streamClosed) stop();
-                  return connected && !result.upToDate;
-                }),
+                const streamClosed = result.closed && result.upToDate;
+                const controlData: Record<string, string | boolean> = {
+                  [SSE_OFFSET_FIELD]: result.nextOffset,
+                };
+                if (streamClosed) {
+                  controlData[SSE_CLOSED_FIELD] = true;
+                } else {
+                  controlData[SSE_CURSOR_FIELD] = generateCursor();
+                  if (result.upToDate) controlData[SSE_UP_TO_DATE_FIELD] = true;
+                }
+                frames.push(`event: control\n${encodeSseData(JSON.stringify(controlData))}`);
+                currentOffset = result.nextOffset;
+                if (streamClosed) connected = false;
+                else if (result.upToDate) waitingForWake = true;
+                return connected;
+              },
             }),
           );
-          if (!keepReading) return;
-        }
-      });
 
-      const unsubscribe = yield* store.subscribe(path, wake);
-      const onAbort = () => stop();
-      signal.addEventListener("abort", onAbort, { once: true });
-      const heartbeat = setInterval(() => {
-        if (!connected) return;
-        push(": heartbeat\n\n");
-        wake();
-      }, heartbeatMs);
-
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          connected = false;
-          clearInterval(heartbeat);
-          signal.removeEventListener("abort", onAbort);
-          unsubscribe();
-        }),
-      );
-
-      yield* Effect.forkScoped(
-        Effect.gen(function* () {
-          while (connected) {
-            yield* Queue.take(wakeups);
-            yield* readAvailable();
-          }
-        }),
-      );
-
-      if (signal.aborted) stop();
-      else wake();
-    }),
+          const firstFrame = frames[0];
+          if (firstFrame === undefined) return yield* Cause.done();
+          return [firstFrame, ...frames.slice(1)] as readonly [string, ...Array<string>];
+        });
+        return yield* Effect.succeed(pull);
+      }),
+    ),
   );
 
 const waitForStreamData = (

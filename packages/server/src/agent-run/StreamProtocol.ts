@@ -10,8 +10,10 @@
 
 import * as Cause from "effect/Cause";
 import * as Channel from "effect/Channel";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
+import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -92,18 +94,25 @@ export interface HandleStreamReadOptions {
 export const handleRunObjectRequest = Effect.fn("StreamProtocol.handleRunObjectRequest")(function* (
   store: EventStreamStore,
   request: Request,
-): Effect.fn.Return<Response, EventStreamError> {
+): Effect.fn.Return<Response> {
   const url = new URL(request.url);
   const runId = runIdFromPath(url.pathname);
   const path = `runs/${runId}`;
 
-  if (request.method === "HEAD") return yield* handleStreamHead(store, path);
-  if (request.method === "GET") return yield* handleStreamRead({ store, path, request });
+  if (request.method === "HEAD") {
+    return yield* handleStreamHead(store, path).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(eventStreamErrorResponse(error, path, { head: true })),
+      ),
+    );
+  }
+  if (request.method === "GET") {
+    return yield* handleStreamRead({ store, path, request }).pipe(
+      Effect.catch((error) => Effect.succeed(eventStreamErrorResponse(error, path))),
+    );
+  }
 
-  return new Response(JSON.stringify(errorBody("method_not_allowed", "Method not allowed.")), {
-    status: 405,
-    headers: { "content-type": "application/json", Allow: "GET, HEAD", ...SECURITY_HEADERS },
-  });
+  return methodNotAllowedResponse();
 });
 
 export const handleStreamHead = Effect.fn("StreamProtocol.handleStreamHead")(function* (
@@ -210,9 +219,9 @@ const handleLongPollMode = Effect.fn("StreamProtocol.handleLongPollMode")(functi
   timeoutMs = DEFAULT_LONG_POLL_TIMEOUT_MS,
 ): Effect.fn.Return<Response, EventStreamError> {
   if (result.events.length > 0)
-    return longPollDataResponse(result, path, requestOffset, clientCursor);
+    return yield* longPollDataResponse(result, path, requestOffset, clientCursor);
   if (result.closed && result.upToDate) {
-    return longPollEmptyResponse(result.nextOffset, clientCursor, true);
+    return yield* longPollEmptyResponse(result.nextOffset, clientCursor, true);
   }
 
   const waitResult = yield* waitForStreamData(store, path, signal, timeoutMs, () =>
@@ -225,15 +234,15 @@ const handleLongPollMode = Effect.fn("StreamProtocol.handleLongPollMode")(functi
     return new Response(null, { status: 499, headers: SECURITY_HEADERS });
   if (waitResult === "timeout") {
     const closed = ((yield* store.getStreamMeta(path))?.closed ?? false) === true;
-    return longPollEmptyResponse(result.nextOffset, clientCursor, closed);
+    return yield* longPollEmptyResponse(result.nextOffset, clientCursor, closed);
   }
 
   const freshResult = yield* store.readEvents(path, { offset: readOffset });
   if (freshResult.events.length > 0) {
-    return longPollDataResponse(freshResult, path, requestOffset, clientCursor);
+    return yield* longPollDataResponse(freshResult, path, requestOffset, clientCursor);
   }
   const closed = ((yield* store.getStreamMeta(path))?.closed ?? false) === true;
-  return longPollEmptyResponse(result.nextOffset, clientCursor, closed);
+  return yield* longPollEmptyResponse(result.nextOffset, clientCursor, closed);
 });
 
 const sseResponse = Effect.fn("StreamProtocol.sseResponse")(function* (
@@ -264,7 +273,7 @@ const sseFrames = (
   signal: AbortSignal,
   heartbeatMs: number,
   idleTimeoutMs: number,
-): Stream.Stream<string> =>
+): Stream.Stream<string, EventStreamError> =>
   Stream.fromChannel(
     Channel.fromTransformBracket((_upstream, _scope, forkedScope) =>
       Effect.gen(function* () {
@@ -326,46 +335,32 @@ const sseFrames = (
             waitingForWake = false;
           }
 
-          yield* store.readEvents(path, { offset: currentOffset }).pipe(
-            Effect.match({
-              onFailure: (error) => {
-                frames.push(
-                  `event: error\n${encodeSseData(JSON.stringify({ message: String(error) }))}`,
-                );
-                connected = false;
-                clearIdleTimer();
-                return false;
-              },
-              onSuccess: (result) => {
-                if (result.events.length > 0) {
-                  frames.push(
-                    `event: data\n${encodeSseData(JSON.stringify(publicEventData(path, result)))}`,
-                  );
-                }
+          const result = yield* store.readEvents(path, { offset: currentOffset });
+          if (result.events.length > 0) {
+            frames.push(
+              `event: data\n${encodeSseData(JSON.stringify(publicEventData(path, result)))}`,
+            );
+          }
 
-                const streamClosed = result.closed && result.upToDate;
-                const controlData: Record<string, string | boolean> = {
-                  [SSE_OFFSET_FIELD]: result.nextOffset,
-                };
-                if (streamClosed) {
-                  controlData[SSE_CLOSED_FIELD] = true;
-                } else {
-                  controlData[SSE_CURSOR_FIELD] = generateCursor();
-                  if (result.upToDate) controlData[SSE_UP_TO_DATE_FIELD] = true;
-                }
-                frames.push(`event: control\n${encodeSseData(JSON.stringify(controlData))}`);
-                currentOffset = result.nextOffset;
-                if (streamClosed) {
-                  connected = false;
-                  clearIdleTimer();
-                } else if (result.upToDate) {
-                  waitingForWake = true;
-                  armIdleTimer();
-                }
-                return connected;
-              },
-            }),
-          );
+          const streamClosed = result.closed && result.upToDate;
+          const controlData: Record<string, string | boolean> = {
+            [SSE_OFFSET_FIELD]: result.nextOffset,
+          };
+          if (streamClosed) {
+            controlData[SSE_CLOSED_FIELD] = true;
+          } else {
+            controlData[SSE_CURSOR_FIELD] = yield* generateCursor();
+            if (result.upToDate) controlData[SSE_UP_TO_DATE_FIELD] = true;
+          }
+          frames.push(`event: control\n${encodeSseData(JSON.stringify(controlData))}`);
+          currentOffset = result.nextOffset;
+          if (streamClosed) {
+            connected = false;
+            clearIdleTimer();
+          } else if (result.upToDate) {
+            waitingForWake = true;
+            armIdleTimer();
+          }
 
           const firstFrame = frames[0];
           if (firstFrame === undefined) return yield* Cause.done();
@@ -467,41 +462,41 @@ const catchUpResponse = (
   return new Response(JSON.stringify(publicEventData(path, result)), { status: 200, headers });
 };
 
-const longPollDataResponse = (
+const longPollDataResponse = Effect.fn("StreamProtocol.longPollDataResponse")(function* (
   result: EventStreamReadResult,
   path: string,
   offsetParam: string,
   clientCursor: string | undefined,
-): Response => {
+): Effect.fn.Return<Response> {
   const isClosed = result.closed && result.upToDate;
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "cache-control": "no-store",
     ...SECURITY_HEADERS,
     [STREAM_NEXT_OFFSET]: result.nextOffset,
-    [STREAM_CURSOR]: generateCursor(clientCursor),
+    [STREAM_CURSOR]: yield* generateCursor(clientCursor),
   };
   if (result.upToDate) headers[STREAM_UP_TO_DATE] = "true";
   if (isClosed) headers[STREAM_CLOSED] = "true";
   if (offsetParam !== "now")
     headers.etag = generateETag(path, offsetParam, result.nextOffset, isClosed);
   return new Response(JSON.stringify(publicEventData(path, result)), { status: 200, headers });
-};
+});
 
-const longPollEmptyResponse = (
+const longPollEmptyResponse = Effect.fn("StreamProtocol.longPollEmptyResponse")(function* (
   nextOffset: string,
   clientCursor: string | undefined,
   closed: boolean,
-): Response => {
+): Effect.fn.Return<Response> {
   const headers: Record<string, string> = {
     ...SECURITY_HEADERS,
     [STREAM_NEXT_OFFSET]: nextOffset,
     [STREAM_UP_TO_DATE]: "true",
-    [STREAM_CURSOR]: generateCursor(clientCursor),
+    [STREAM_CURSOR]: yield* generateCursor(clientCursor),
   };
   if (closed) headers[STREAM_CLOSED] = "true";
   return new Response(null, { status: 204, headers });
-};
+});
 
 const publicEventData = (path: string, result: EventStreamReadResult): ReadonlyArray<unknown> =>
   result.events.map((event) =>
@@ -520,6 +515,76 @@ const invalidRequestResponse = (error: StreamRequestValidationError): Response =
   new Response(JSON.stringify(invalidRequestBody(error)), {
     status: 400,
     headers: { "content-type": "application/json", ...SECURITY_HEADERS },
+  });
+
+export const eventStreamErrorResponse = (
+  error: EventStreamError,
+  path: string,
+  options?: { readonly head?: boolean | undefined; readonly traceId?: string | undefined },
+): Response => {
+  switch (error._tag) {
+    case "InvalidStreamOffset":
+      return jsonErrorResponse({
+        body: errorBody(
+          "invalid_request",
+          "Invalid stream offset format.",
+          "invalid_offset_format",
+          {
+            offset: error.offset,
+          },
+        ),
+        status: 400,
+        head: options?.head,
+      });
+    case "StreamNotFound":
+      return notFoundResponse(error.path || path, options?.head === true);
+    case "StreamClosed":
+      return jsonErrorResponse({
+        body: errorBody("stream_closed", "The stream is closed."),
+        status: 409,
+        head: options?.head,
+        headers: { [STREAM_CLOSED]: "true" },
+      });
+    case "EventSerializationFailed":
+    case "EventStorageFailed":
+      return internalErrorResponse(options?.traceId);
+  }
+};
+
+export const methodNotAllowedResponse = (): Response =>
+  jsonErrorResponse({
+    body: errorBody("method_not_allowed", "Method not allowed."),
+    status: 405,
+    headers: { Allow: "GET, HEAD" },
+  });
+
+export const unauthorizedResponse = (): Response =>
+  jsonErrorResponse({
+    body: errorBody("unauthorized", "Authentication is required."),
+    status: 401,
+  });
+
+export const runIdRequiredResponse = (): Response =>
+  jsonErrorResponse({
+    body: errorBody("invalid_request", "Run id is required.", "run_id_required"),
+    status: 400,
+  });
+
+export const internalErrorResponse = (traceId: string = crypto.randomUUID()): Response =>
+  jsonErrorResponse({
+    body: errorBody("internal_error", "Internal error.", "internal_error", { traceId }),
+    status: 500,
+  });
+
+const jsonErrorResponse = (options: {
+  readonly body: ErrorBody;
+  readonly status: number;
+  readonly head?: boolean | undefined;
+  readonly headers?: Record<string, string> | undefined;
+}): Response =>
+  new Response(options.head === true ? null : JSON.stringify(options.body), {
+    status: options.status,
+    headers: { "content-type": "application/json", ...SECURITY_HEADERS, ...options.headers },
   });
 
 const invalidRequestBody = (error: StreamRequestValidationError): ErrorBody => {
@@ -574,15 +639,12 @@ const invalidRequestBody = (error: StreamRequestValidationError): ErrorBody => {
 };
 
 const notFoundResponse = (path: string, head: boolean): Response => {
-  const body = errorBody(
-    "run_not_found",
-    `Agent Run "${path.slice("runs/".length)}" was not found.`,
-  );
-  return new Response(head ? null : JSON.stringify(body), {
-    status: 404,
-    headers: { "content-type": "application/json", ...SECURITY_HEADERS },
-  });
+  const body = notFoundBody(path);
+  return jsonErrorResponse({ body, status: 404, head });
 };
+
+const notFoundBody = (path: string): ErrorBody =>
+  errorBody("run_not_found", `Agent Run "${path.slice("runs/".length)}" was not found.`);
 
 interface ErrorBody {
   readonly error: {
@@ -618,14 +680,18 @@ const encodeSseData = (payload: string): string =>
     .map((line) => `data:${line}`)
     .join("\n")}\n\n`;
 
-const generateCursor = (clientCursor?: string): string => {
-  const currentInterval = Math.floor((Date.now() - CURSOR_EPOCH_MS) / CURSOR_INTERVAL_MS);
+const generateCursor = Effect.fn("StreamProtocol.generateCursor")(function* (
+  clientCursor?: string,
+): Effect.fn.Return<string> {
+  const now = yield* Clock.currentTimeMillis;
+  const currentInterval = Math.floor((now - CURSOR_EPOCH_MS) / CURSOR_INTERVAL_MS);
   if (clientCursor === undefined) return String(currentInterval);
   const clientInterval = Number.parseInt(clientCursor, 10);
   if (!Number.isFinite(clientInterval) || clientInterval < currentInterval)
     return String(currentInterval);
-  return String(clientInterval + Math.floor(Math.random() * 180) + 1);
-};
+  const jitter = yield* Random.nextIntBetween(1, 180);
+  return String(clientInterval + jitter);
+});
 
 const generateETag = (
   path: string,

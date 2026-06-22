@@ -7,11 +7,25 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { type EventStreamError, makeInMemoryEventStreamStore } from "./EventStreamStore.ts";
 import { AgentRunLifecycle, type CreateRunInput, type CreateRunResult } from "./Lifecycle.ts";
-import { handleStreamHead, handleStreamRead } from "./StreamProtocol.ts";
+import {
+  eventStreamErrorResponse,
+  handleStreamHead,
+  handleStreamRead,
+  internalErrorResponse,
+} from "./StreamProtocol.ts";
 
 export class CreateAgentRunFailed extends Schema.TaggedErrorClass<CreateAgentRunFailed>()(
   "CreateAgentRunFailed",
-  { message: Schema.String },
+  {
+    reason: Schema.Literals([
+      "invalid_stream_offset",
+      "stream_not_found",
+      "stream_closed",
+      "event_serialization_failed",
+      "event_storage_failed",
+    ]),
+    message: Schema.String,
+  },
   { httpApiStatus: 500 },
 ) {}
 
@@ -53,7 +67,7 @@ export const layer = (objects: AgentRunObjectNamespace): Layer.Layer<Service> =>
         return objects
           .getByName(runId)
           .create({ runId, input: input.input, userId: input.userId })
-          .pipe(Effect.mapError((error) => new CreateAgentRunFailed({ message: error._tag })));
+          .pipe(Effect.mapError(createAgentRunFailed));
       },
       streamRequest: (runId, request) =>
         objects
@@ -68,9 +82,7 @@ export const layer = (objects: AgentRunObjectNamespace): Layer.Layer<Service> =>
                   traceId,
                   cause,
                 });
-                return HttpServerResponse.fromWeb(
-                  Response.json({ error: "InternalError", traceId }, { status: 500 }),
-                );
+                return HttpServerResponse.fromWeb(internalErrorResponse(traceId));
               }),
             ),
           ),
@@ -87,7 +99,7 @@ export const inMemoryLayer = Layer.sync(Service, () => {
         runId,
         input: input.input,
         userId: input.userId,
-      }).pipe(Effect.mapError((error) => new CreateAgentRunFailed({ message: error._tag })));
+      }).pipe(Effect.mapError(createAgentRunFailed));
     },
     streamRequest: (runId, request) =>
       Effect.gen(function* () {
@@ -101,11 +113,7 @@ export const inMemoryLayer = Layer.sync(Service, () => {
                 path,
                 request: webRequest,
               })
-        ).pipe(
-          Effect.catch((error) =>
-            Effect.succeed(Response.json({ error: error._tag }, { status: 500 })),
-          ),
-        );
+        ).pipe(Effect.catch((error) => Effect.succeed(eventStreamErrorResponse(error, path))));
         return HttpServerResponse.fromWeb(response);
       }).pipe(
         Effect.catchCause((cause) =>
@@ -116,13 +124,41 @@ export const inMemoryLayer = Layer.sync(Service, () => {
               traceId,
               cause,
             });
-            return HttpServerResponse.fromWeb(
-              Response.json({ error: "InternalError", traceId }, { status: 500 }),
-            );
+            return HttpServerResponse.fromWeb(internalErrorResponse(traceId));
           }),
         ),
       ),
   });
 });
+
+const createAgentRunFailed = (error: EventStreamError): CreateAgentRunFailed => {
+  switch (error._tag) {
+    case "InvalidStreamOffset":
+      return new CreateAgentRunFailed({
+        reason: "invalid_stream_offset",
+        message: "Invalid stream offset.",
+      });
+    case "StreamNotFound":
+      return new CreateAgentRunFailed({
+        reason: "stream_not_found",
+        message: "Agent run stream was not found.",
+      });
+    case "StreamClosed":
+      return new CreateAgentRunFailed({
+        reason: "stream_closed",
+        message: "Agent run stream is closed.",
+      });
+    case "EventSerializationFailed":
+      return new CreateAgentRunFailed({
+        reason: "event_serialization_failed",
+        message: "Agent run event could not be serialized.",
+      });
+    case "EventStorageFailed":
+      return new CreateAgentRunFailed({
+        reason: "event_storage_failed",
+        message: "Agent run event stream storage failed.",
+      });
+  }
+};
 
 export * as AgentRuns from "./AgentRuns.ts";

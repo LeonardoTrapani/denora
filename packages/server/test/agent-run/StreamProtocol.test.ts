@@ -1,10 +1,15 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import {
+  EventStorageFailed,
   type EventStreamStore,
   makeInMemoryEventStreamStore,
 } from "../../src/agent-run/EventStreamStore.ts";
-import { handleStreamHead, handleStreamRead } from "../../src/agent-run/StreamProtocol.ts";
+import {
+  handleRunObjectRequest,
+  handleStreamHead,
+  handleStreamRead,
+} from "../../src/agent-run/StreamProtocol.ts";
 
 const parseSseFrames = (body: string): Array<{ event: string; data: string }> =>
   body
@@ -32,6 +37,24 @@ const collectSseFor = (
     const body = response.text();
     await new Promise((resolve) => setTimeout(resolve, durationMs));
     controller.abort();
+    return body;
+  });
+
+const collectSseUntilError = (response: Response): Effect.Effect<string> =>
+  Effect.promise(async () => {
+    const reader = response.body?.getReader();
+    assert.isDefined(reader);
+    const decoder = new TextDecoder();
+    let body = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        body += decoder.decode(value, { stream: true });
+      }
+    } catch {
+      body += decoder.decode();
+    }
     return body;
   });
 
@@ -260,6 +283,78 @@ describe("StreamProtocol", () => {
           message: 'Agent Run "run_sse_missing" was not found.',
         },
       });
+    }),
+  );
+
+  it.effect("fails the SSE stream instead of emitting error frames when reads fail", () =>
+    Effect.gen(function* () {
+      const base = makeInMemoryEventStreamStore();
+      yield* base.createStream("runs/run_sse_read_failure");
+      let readCount = 0;
+      const store = {
+        ...base,
+        readEvents: (path, opts) =>
+          Effect.gen(function* () {
+            readCount += 1;
+            if (readCount > 1) {
+              return yield* new EventStorageFailed({
+                operation: "read stream events",
+                cause: new Error("boom"),
+              });
+            }
+            return yield* base.readEvents(path, opts);
+          }),
+      } satisfies EventStreamStore;
+
+      const response = yield* handleStreamRead({
+        store,
+        path: "runs/run_sse_read_failure",
+        request: new Request("https://api.test/runs/run_sse_read_failure?offset=-1&live=sse"),
+        sseHeartbeatMs: 60_000,
+        sseIdleTimeoutMs: 1,
+      });
+
+      const body = yield* collectSseUntilError(response);
+
+      assert.strictEqual(response.status, 200);
+      assert.include(body, "event: control\n");
+      assert.notInclude(body, "event: error\n");
+    }),
+  );
+
+  it.effect("renders object request store failures as stable internal errors", () =>
+    Effect.gen(function* () {
+      const base = makeInMemoryEventStreamStore();
+      yield* base.createStream("runs/run_storage_failed");
+      const store = {
+        ...base,
+        readEvents: () =>
+          Effect.fail(
+            new EventStorageFailed({
+              operation: "read stream events",
+              cause: new Error("boom"),
+            }),
+          ),
+      } satisfies EventStreamStore;
+
+      const response = yield* handleRunObjectRequest(
+        store,
+        new Request("https://api.test/runs/run_storage_failed"),
+      );
+
+      assert.strictEqual(response.status, 500);
+      const body = (yield* Effect.promise(() => response.json())) as {
+        readonly error: {
+          readonly type: string;
+          readonly code: string;
+          readonly message: string;
+          readonly details: { readonly traceId: string };
+        };
+      };
+      assert.strictEqual(body.error.type, "internal_error");
+      assert.strictEqual(body.error.code, "internal_error");
+      assert.strictEqual(body.error.message, "Internal error.");
+      assert.isString(body.error.details.traceId);
     }),
   );
 

@@ -8,7 +8,7 @@ import * as Neon from "alchemy/Neon";
 import * as Output from "alchemy/Output";
 import * as RemovalPolicy from "alchemy/RemovalPolicy";
 import { AlchemyDb } from "@denora/server/persistence/AlchemyDb";
-import { ServerResource } from "@denora/server/server/Resource";
+import ServerResourceLive, { ServerResource } from "@denora/server/server/Resource";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -244,14 +244,13 @@ export default Alchemy.Stack(
       onSome: () => observabilityForStage(stage),
     });
 
+    const deploymentConfig = Option.match(deployment, {
+      onNone: () => ({}),
+      onSome: ({ apiDomain, webDomain }) => ({ apiDomain, observability, webDomain }),
+    });
     const server = yield* ServerResource.Resource.pipe(
-      Effect.provideService(
-        ServerResource.Deployment,
-        Option.match(deployment, {
-          onNone: () => ({}),
-          onSome: ({ apiDomain, webDomain }) => ({ apiDomain, observability, webDomain }),
-        }),
-      ),
+      Effect.provide(ServerResourceLive),
+      Effect.provideService(ServerResource.Deployment, deploymentConfig),
     );
 
     const serverUrl = server.url.as<string>();

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { type EventStreamError, type EventStreamStore, runStreamPath } from "./EventStreamStore.ts";
 
@@ -29,7 +30,7 @@ export const createRun = Effect.fn("AgentRunLifecycle.createRun")(function* (
   }
 
   yield* store.createStream(streamPath);
-  const timestamp = new Date().toISOString();
+  const timestamp = DateTime.formatIso(yield* DateTime.now);
   const offset = yield* store.appendEvent(streamPath, {
     v: 1,
     type: "run_start",

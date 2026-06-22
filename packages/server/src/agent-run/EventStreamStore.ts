@@ -1,5 +1,4 @@
 import type * as Cloudflare from "alchemy/Cloudflare";
-import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -104,12 +103,8 @@ const clampLimit = (limit: number | undefined): number => {
 
 const storageFailure =
   (operation: string) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | EventStorageFailed, R> =>
-    effect.pipe(
-      Effect.catchCause((cause) =>
-        Effect.fail(new EventStorageFailed({ operation, cause: Cause.squash(cause) })),
-      ),
-    );
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, EventStorageFailed, R> =>
+    effect.pipe(Effect.mapError((cause) => new EventStorageFailed({ operation, cause })));
 
 interface StreamRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly next_offset: number;
@@ -373,10 +368,12 @@ export const makeInMemoryEventStreamStore = (): EventStreamStore => {
     const startAfter = yield* parseOffset(rawOffset);
     const rows = (entries.get(path) ?? []).filter((entry) => entry.seq > startAfter);
     const page = rows.slice(0, limit);
-    const events = page.map((entry) => ({
-      data: JSON.parse(entry.data) as unknown,
-      offset: formatOffset(entry.seq),
-    }));
+    const events = yield* Effect.forEach(page, (entry) =>
+      Effect.try({
+        try: () => ({ data: JSON.parse(entry.data) as unknown, offset: formatOffset(entry.seq) }),
+        catch: (cause) => new EventStorageFailed({ operation: "parse stream event", cause }),
+      }),
+    );
     const lastRow = page.at(-1);
     return {
       events,

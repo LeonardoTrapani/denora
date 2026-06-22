@@ -5,6 +5,11 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { Auth } from "../../auth/Auth.ts";
 import { AgentRuns } from "../../agent-run/AgentRuns.ts";
+import {
+  methodNotAllowedResponse,
+  runIdRequiredResponse,
+  unauthorizedResponse,
+} from "../../agent-run/StreamProtocol.ts";
 
 export const routes = HttpRouter.use((router) =>
   router.add("*", "/runs/:runId", streamRoute, { uninterruptible: false }),
@@ -15,23 +20,18 @@ const streamRoute = (request: HttpServerRequest.HttpServerRequest) =>
     const params = yield* HttpRouter.params;
     const runId = params.runId;
     if (runId === undefined || runId.length === 0) {
-      return HttpServerResponse.fromWeb(Response.json({ error: "RunIdRequired" }, { status: 400 }));
+      return HttpServerResponse.fromWeb(runIdRequiredResponse());
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
-      return HttpServerResponse.fromWeb(
-        Response.json(
-          { error: "MethodNotAllowed" },
-          { status: 405, headers: { Allow: "GET, HEAD" } },
-        ),
-      );
+      return HttpServerResponse.fromWeb(methodNotAllowedResponse());
     }
 
     const auth = yield* Auth.Service;
     const webRequest = yield* HttpServerRequest.toWeb(request);
     const user = yield* auth.requireSession(webRequest).pipe(Effect.result);
     if (Result.isFailure(user)) {
-      return HttpServerResponse.fromWeb(Response.json({ error: "Unauthorized" }, { status: 401 }));
+      return HttpServerResponse.fromWeb(unauthorizedResponse());
     }
 
     const agentRuns = yield* AgentRuns.Service;

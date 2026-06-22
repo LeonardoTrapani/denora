@@ -174,6 +174,21 @@ describe("Api http surface", () => {
       }).pipe(Effect.provide(appLayer())),
     );
 
+    it.effect("returns structured unauthorized errors for run streams", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const res = yield* client.get("/runs/run_missing");
+
+        assert.strictEqual(res.status, 401);
+        assert.deepStrictEqual(yield* res.json, {
+          error: {
+            type: "unauthorized",
+            message: "Authentication is required.",
+          },
+        });
+      }).pipe(Effect.provide(appLayer())),
+    );
+
     it.effect("returns structured stream validation errors", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;

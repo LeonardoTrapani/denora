@@ -41,6 +41,7 @@ export interface HandleStreamReadOptions {
   readonly request: Request;
   readonly longPollTimeoutMs?: number | undefined;
   readonly sseHeartbeatMs?: number | undefined;
+  readonly sseIdleTimeoutMs?: number | undefined;
 }
 
 export const handleRunObjectRequest = Effect.fn("StreamProtocol.handleRunObjectRequest")(function* (
@@ -100,7 +101,14 @@ export const handleStreamRead = Effect.fn("StreamProtocol.handleStreamRead")(fun
   const readOffset = yield* resolveReadOffset(offsetParam, liveRaw, tailParam, meta.nextOffset);
 
   if (liveRaw === "sse") {
-    return yield* sseResponse(store, path, readOffset, request.signal, options.sseHeartbeatMs);
+    return yield* sseResponse(
+      store,
+      path,
+      readOffset,
+      request.signal,
+      options.sseHeartbeatMs,
+      options.sseIdleTimeoutMs ?? options.longPollTimeoutMs,
+    );
   }
 
   const result = yield* store.readEvents(path, { offset: readOffset });
@@ -179,9 +187,10 @@ const sseResponse = Effect.fn("StreamProtocol.sseResponse")(function* (
   offset: string,
   signal: AbortSignal,
   heartbeatMs = DEFAULT_SSE_HEARTBEAT_MS,
+  idleTimeoutMs = DEFAULT_LONG_POLL_TIMEOUT_MS,
 ): Effect.fn.Return<Response, never> {
   const body = yield* Stream.toReadableStreamEffect(
-    Stream.encodeText(sseFrames(store, path, offset, signal, heartbeatMs)),
+    Stream.encodeText(sseFrames(store, path, offset, signal, heartbeatMs, idleTimeoutMs)),
   );
   return new Response(body, {
     status: 200,
@@ -199,12 +208,14 @@ const sseFrames = (
   offset: string,
   signal: AbortSignal,
   heartbeatMs: number,
+  idleTimeoutMs: number,
 ): Stream.Stream<string> =>
   Stream.callback<string>(
     Effect.fn("StreamProtocol.sseFrames")(function* (queue) {
       const wakeups = yield* Queue.sliding<void>(1);
       let currentOffset = offset;
       let connected = !signal.aborted;
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
       const push = (frame: string) => {
         if (connected) Queue.offerUnsafe(queue, frame);
@@ -212,9 +223,20 @@ const sseFrames = (
       const wake = () => {
         if (connected) Queue.offerUnsafe(wakeups, undefined);
       };
+      const clearIdleTimer = () => {
+        if (idleTimer === undefined) return;
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      };
+      const armIdleTimer = () => {
+        if (!connected) return;
+        clearIdleTimer();
+        idleTimer = setTimeout(wake, idleTimeoutMs);
+      };
       const stop = () => {
         if (!connected) return;
         connected = false;
+        clearIdleTimer();
         Queue.endUnsafe(queue);
       };
 
@@ -265,12 +287,12 @@ const sseFrames = (
       const heartbeat = setInterval(() => {
         if (!connected) return;
         push(": heartbeat\n\n");
-        wake();
       }, heartbeatMs);
 
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           connected = false;
+          clearIdleTimer();
           clearInterval(heartbeat);
           signal.removeEventListener("abort", onAbort);
           unsubscribe();
@@ -281,7 +303,9 @@ const sseFrames = (
         Effect.gen(function* () {
           while (connected) {
             yield* Queue.take(wakeups);
+            clearIdleTimer();
             yield* readAvailable();
+            armIdleTimer();
           }
         }),
       );

@@ -5,12 +5,14 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpServer from "effect/unstable/http/HttpServer";
+import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
 import { AgentRuns } from "../../src/agent-run/AgentRuns.ts";
 import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 import { Client } from "../../src/Client.ts";
 import { Health } from "../../src/http/system/Schema.ts";
 import { Routes } from "../../src/http/Routes.ts";
 import * as AuthMock from "../helpers/AuthMock.ts";
+import { FakeAiGateway } from "../helpers/FakeAiGateway.ts";
 import { makeDenoraUser } from "../helpers/fixtures.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
 import * as TestServer from "../helpers/TestServer.ts";
@@ -135,7 +137,9 @@ describe("client: makeDenoraUrlBuilder", () => {
 const appLayer = TestServer.layer(Routes.layer).pipe(
   Layer.provide([
     AuthMock.layer(() => Option.some(makeDenoraUser())),
-    AgentRuns.inMemoryLayer,
+    AgentRuns.inMemoryLayer.pipe(
+      Layer.provide(PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(FakeAiGateway.make())))),
+    ),
     ServerConfigMock.layer(),
   ]),
 );

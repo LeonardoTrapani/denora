@@ -1,3 +1,4 @@
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -5,6 +6,7 @@ import * as Schema from "effect/Schema";
 import type { HttpServerError } from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import { PiRuntime } from "../agent-loop/PiRuntime.ts";
 import { type EventStreamError, makeInMemoryEventStreamStore } from "./EventStreamStore.ts";
 import { AgentRunLifecycle, type CreateRunInput, type CreateRunResult } from "./Lifecycle.ts";
 import {
@@ -67,7 +69,10 @@ export const layer = (objects: AgentRunObjectNamespace): Layer.Layer<Service> =>
         return objects
           .getByName(runId)
           .create({ runId, input: input.input, userId: input.userId })
-          .pipe(Effect.mapError(createAgentRunFailed));
+          .pipe(
+            Effect.mapError(createAgentRunFailed),
+            Effect.catchCause(createAgentRunFailedFromCause),
+          );
       },
       streamRequest: (runId, request) =>
         objects
@@ -89,47 +94,64 @@ export const layer = (objects: AgentRunObjectNamespace): Layer.Layer<Service> =>
     }),
   );
 
-export const inMemoryLayer = Layer.sync(Service, () => {
-  const store = makeInMemoryEventStreamStore();
+export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const pi = yield* PiRuntime.Service;
+    const store = makeInMemoryEventStreamStore();
 
-  return Service.of({
-    create: (input) => {
-      const runId = input.runId ?? crypto.randomUUID();
-      return AgentRunLifecycle.createRun(store, {
-        runId,
-        input: input.input,
-        userId: input.userId,
-      }).pipe(Effect.mapError(createAgentRunFailed));
-    },
-    streamRequest: (runId, request) =>
-      Effect.gen(function* () {
-        const webRequest = yield* HttpServerRequest.toWeb(request);
-        const path = `runs/${runId}`;
-        const response = yield* (
-          webRequest.method === "HEAD"
-            ? handleStreamHead(store, path)
-            : handleStreamRead({
-                store,
-                path,
-                request: webRequest,
-              })
-        ).pipe(Effect.catch((error) => Effect.succeed(eventStreamErrorResponse(error, path))));
-        return HttpServerResponse.fromWeb(response);
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.gen(function* () {
-            const traceId = crypto.randomUUID();
-            yield* Effect.logError("agent run in-memory stream request failed", {
+    return Service.of({
+      create: (input) => {
+        const runId = input.runId ?? crypto.randomUUID();
+        return AgentRunLifecycle.startRun(store, {
+          runId,
+          input: input.input,
+          userId: input.userId,
+          scheduleExecution: () =>
+            AgentRunLifecycle.executeRun(store, {
               runId,
-              traceId,
-              cause,
-            });
-            return HttpServerResponse.fromWeb(internalErrorResponse(traceId));
-          }),
+              input: input.input,
+              userId: input.userId,
+              pi,
+            }).pipe(
+              Effect.catch((error) =>
+                Effect.logError("in-memory agent run execution failed", { error }),
+              ),
+              Effect.forkDetach({ startImmediately: true }),
+              Effect.asVoid,
+            ),
+        }).pipe(Effect.mapError(createAgentRunFailed));
+      },
+      streamRequest: (runId, request) =>
+        Effect.gen(function* () {
+          const webRequest = yield* HttpServerRequest.toWeb(request);
+          const path = `runs/${runId}`;
+          const response = yield* (
+            webRequest.method === "HEAD"
+              ? handleStreamHead(store, path)
+              : handleStreamRead({
+                  store,
+                  path,
+                  request: webRequest,
+                })
+          ).pipe(Effect.catch((error) => Effect.succeed(eventStreamErrorResponse(error, path))));
+          return HttpServerResponse.fromWeb(response);
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              const traceId = crypto.randomUUID();
+              yield* Effect.logError("agent run in-memory stream request failed", {
+                runId,
+                traceId,
+                cause,
+              });
+              return HttpServerResponse.fromWeb(internalErrorResponse(traceId));
+            }),
+          ),
         ),
-      ),
-  });
-});
+    });
+  }),
+);
 
 const createAgentRunFailed = (error: EventStreamError): CreateAgentRunFailed => {
   switch (error._tag) {
@@ -159,6 +181,22 @@ const createAgentRunFailed = (error: EventStreamError): CreateAgentRunFailed => 
         message: "Agent run event stream storage failed.",
       });
   }
+};
+
+const createAgentRunFailedFromCause = (
+  cause: Cause.Cause<CreateAgentRunFailed>,
+): Effect.Effect<never, CreateAgentRunFailed> => {
+  const failure = cause.reasons.find(Cause.isFailReason)?.error;
+  if (failure !== undefined) return Effect.fail(failure);
+
+  return Effect.gen(function* () {
+    const traceId = crypto.randomUUID();
+    yield* Effect.logError("agent run create failed", { traceId, cause });
+    return yield* new CreateAgentRunFailed({
+      reason: "event_storage_failed",
+      message: "Agent run could not be started.",
+    });
+  });
 };
 
 export * as AgentRuns from "./AgentRuns.ts";

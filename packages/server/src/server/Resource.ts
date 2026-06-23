@@ -6,7 +6,7 @@ import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { AgentRunObject, AgentRunObjectLive } from "../agent-run/AgentRunObject.ts";
+import { AgentRunObject, AgentRunObjectLive, AiGateway } from "../agent-run/AgentRunObject.ts";
 import { AgentRuns } from "../agent-run/AgentRuns.ts";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
@@ -128,6 +128,7 @@ export { AgentRunObject };
 export default Resource.make(
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
+    yield* Cloudflare.AiGateway.bind(AiGateway);
     const runObjects = yield* AgentRunObject;
 
     return {
@@ -141,7 +142,7 @@ export default Resource.make(
         HttpRouter.toHttpEffect,
       ),
     };
-  }).pipe(Effect.provide(AgentRunObjectLive)),
+  }).pipe(Effect.provide(Layer.mergeAll(AgentRunObjectLive, Cloudflare.AiGatewayBindingLive))),
 );
 
 export * as ServerResource from "./Resource.ts";

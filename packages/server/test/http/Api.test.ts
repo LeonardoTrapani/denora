@@ -5,10 +5,12 @@ import * as Option from "effect/Option";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
 import { AgentRuns } from "../../src/agent-run/AgentRuns.ts";
 import { Api } from "../../src/http/Api.ts";
 import { Routes } from "../../src/http/Routes.ts";
 import * as AuthMock from "../helpers/AuthMock.ts";
+import { FakeAiGateway } from "../helpers/FakeAiGateway.ts";
 import { makeDenoraUser } from "../helpers/fixtures.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
 import * as TestServer from "../helpers/TestServer.ts";
@@ -27,10 +29,34 @@ const appLayer = () =>
           ? Option.some(validUser)
           : Option.none(),
       ),
-      AgentRuns.inMemoryLayer,
+      AgentRuns.inMemoryLayer.pipe(
+        Layer.provide(PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fakeGateway())))),
+      ),
       ServerConfigMock.layer(),
     ]),
   );
+
+const fakeGateway = () =>
+  FakeAiGateway.make(
+    FakeAiGateway.sse(
+      FakeAiGateway.json({ choices: [{ delta: { content: "hello" } }] }),
+      FakeAiGateway.json({ choices: [{ finish_reason: "stop" }] }),
+      FakeAiGateway.done(),
+    ),
+  );
+
+const waitForRunReplay = (client: HttpClient.HttpClient, runId: string) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const response = yield* client.get(`/runs/${runId}`, {
+        headers: { cookie: "denora_session=valid" },
+      });
+      const events = (yield* response.json) as ReadonlyArray<Record<string, unknown>>;
+      if (response.headers["stream-closed"] === "true") return { response, events };
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+    throw new Error(`Timed out waiting for run ${runId} to close.`);
+  });
 
 describe("Api http surface", () => {
   describe("System group (topLevel) GET /health", () => {
@@ -94,7 +120,7 @@ describe("Api http surface", () => {
   });
 
   describe("Agent Run", () => {
-    it.effect("creates a run and replays its initial run_start event", () =>
+    it.effect("creates a run and replays translated agent events", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
         const runId = `run_${crypto.randomUUID()}`;
@@ -116,15 +142,31 @@ describe("Api http surface", () => {
         assert.strictEqual(createdBody.streamPath, `runs/${runId}`);
         assert.strictEqual(createdBody.offset, "0000000000000000_0000000000000000");
 
-        const replay = yield* client.get(`/runs/${runId}`, {
-          headers: { cookie: "denora_session=valid" },
-        });
+        const { response: replay, events } = yield* waitForRunReplay(client, runId);
         assert.strictEqual(replay.status, 200);
-        assert.strictEqual(replay.headers["stream-next-offset"], createdBody.offset);
-        const events = (yield* replay.json) as ReadonlyArray<Record<string, unknown>>;
-        assert.strictEqual(events.length, 1);
+        assert.strictEqual(replay.headers["stream-closed"], "true");
         assert.strictEqual(events[0]?.type, "run_start");
         assert.strictEqual(events[0]?.runId, runId);
+        assert.includeMembers(
+          events.map((event) => event.type),
+          [
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "text_delta",
+            "turn",
+            "message_end",
+            "turn_messages",
+            "agent_end",
+            "run_end",
+          ],
+        );
+        const textDelta = events.find((event) => event.type === "text_delta");
+        assert.strictEqual(textDelta?.runId, runId);
+        assert.strictEqual(textDelta?.text, "hello");
+        const runEnd = events.find((event) => event.type === "run_end");
+        assert.strictEqual(runEnd?.runId, runId);
+        assert.strictEqual(runEnd?.outcome, "completed");
       }).pipe(Effect.provide(appLayer())),
     );
 
@@ -140,7 +182,7 @@ describe("Api http surface", () => {
           ),
         );
         assert.strictEqual(created.status, 200);
-        const createdBody = (yield* created.json) as { readonly offset: string };
+        yield* waitForRunReplay(client, runId);
 
         const head = yield* client.execute(
           HttpClientRequest.head(`/runs/${runId}`).pipe(
@@ -150,8 +192,8 @@ describe("Api http surface", () => {
 
         assert.strictEqual(head.status, 200);
         assert.strictEqual(yield* head.text, "");
-        assert.strictEqual(head.headers["stream-next-offset"], createdBody.offset);
         assert.strictEqual(head.headers["stream-up-to-date"], "true");
+        assert.strictEqual(head.headers["stream-closed"], "true");
         assert.isString(head.headers.etag);
         assert.strictEqual(head.headers["x-content-type-options"], "nosniff");
         assert.strictEqual(head.headers["cross-origin-resource-policy"], "cross-origin");

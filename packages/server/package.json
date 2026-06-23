@@ -28,6 +28,18 @@
       "import": "./src/http/Api.ts",
       "default": "./src/http/Api.ts"
     },
+    "./agent-loop/PiAgentModel": {
+      "types": "./src/agent-loop/PiAgentModel.ts",
+      "bun": "./src/agent-loop/PiAgentModel.ts",
+      "import": "./src/agent-loop/PiAgentModel.ts",
+      "default": "./src/agent-loop/PiAgentModel.ts"
+    },
+    "./agent-loop/PiAgentRuntime": {
+      "types": "./src/agent-loop/PiAgentRuntime.ts",
+      "bun": "./src/agent-loop/PiAgentRuntime.ts",
+      "import": "./src/agent-loop/PiAgentRuntime.ts",
+      "default": "./src/agent-loop/PiAgentRuntime.ts"
+    },
     "./persistence/AlchemyDb": {
       "types": "./src/persistence/AlchemyDb.ts",
       "bun": "./src/persistence/AlchemyDb.ts",
@@ -54,6 +66,8 @@
     "test-types": "tsc --noEmit"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.79.10",
+    "@earendil-works/pi-ai": "0.79.10",
     "@effect/sql-pg": "^4.0.0-beta.83",
     "@workos-inc/node": "^10.3.0",
     "alchemy": "2.0.0-beta.57",

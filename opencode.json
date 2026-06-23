@@ -15,6 +15,11 @@
       "repository": "withastro/flue",
       "branch": "main",
       "description": "Use whenever asked about Flue, Astro's coding framework, and when comparing to a coding agent over Pi running on Cloudflare, for example."
+    },
+    "pi": {
+      "repository": "earendil-works/pi",
+      "branch": "main",
+      "description": "Use for Pi, the AI agent toolkit and coding agent CLI/runtime, especially when comparing or integrating coding agents on Cloudflare."
     }
   }
 }

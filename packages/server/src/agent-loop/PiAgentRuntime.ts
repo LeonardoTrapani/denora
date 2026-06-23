@@ -9,7 +9,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { PiAgentModel } from "./PiAgentModel.ts";
+import { PiRuntime } from "./PiRuntime.ts";
 
 export class ExecutePromptFailed extends Schema.TaggedErrorClass<ExecutePromptFailed>()(
   "ExecutePromptFailed",
@@ -46,12 +46,10 @@ export class Service extends Context.Service<Service, Interface>()(
   "@denora/server/PiAgentRuntime",
 ) {}
 
-export const layer: Layer.Layer<Service, never, PiAgentModel.Service> = Layer.effect(
+export const layer: Layer.Layer<Service, never, PiRuntime.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const model = yield* PiAgentModel.Service;
-    const effectContext = yield* Effect.context<PiAgentModel.Service>();
-    const runPromise = Effect.runPromiseWith(effectContext);
+    const pi = yield* PiRuntime.Service;
 
     const executePrompt = Effect.fn("PiAgentRuntime.executePrompt")(function* (
       input: ExecutePromptInput,
@@ -67,8 +65,7 @@ export const layer: Layer.Layer<Service, never, PiAgentModel.Service> = Layer.ef
               messages: [...(input.messages ?? [])],
               thinkingLevel: input.thinkingLevel ?? "medium",
             },
-            streamFn: (piModel, context, options) =>
-              runPromise(model.stream({ model: piModel, context, options })),
+            streamFn: pi.streamFn,
             toolExecution: "parallel",
             sessionId: input.sessionId,
           });

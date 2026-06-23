@@ -164,6 +164,42 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
     }),
   );
 
+  it.effect("emits a terminal error for invalid SSE JSON", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(FakeAiGateway.sse(FakeAiGateway.raw("data: not-json\n\n")));
+
+      const events = yield* streamWithFake(fake);
+
+      expect(events).toEqual([
+        expect.objectContaining({ type: "start" }),
+        expect.objectContaining({
+          type: "error",
+          reason: "error",
+          error: expect.objectContaining({ stopReason: "error" }),
+        }),
+      ]);
+    }),
+  );
+
+  it.effect("emits a terminal error for schema-invalid stream chunks", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(
+        FakeAiGateway.sse(FakeAiGateway.json({ choices: [{ delta: { content: 123 } }] })),
+      );
+
+      const events = yield* streamWithFake(fake);
+
+      expect(events).toEqual([
+        expect.objectContaining({ type: "start" }),
+        expect.objectContaining({
+          type: "error",
+          reason: "error",
+          error: expect.objectContaining({ stopReason: "error" }),
+        }),
+      ]);
+    }),
+  );
+
   it.effect("translates reasoning deltas to thinking content", () =>
     Effect.gen(function* () {
       const fake = FakeAiGateway.make(

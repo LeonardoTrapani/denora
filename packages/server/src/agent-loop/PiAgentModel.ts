@@ -25,11 +25,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-type WorkersAiMessage = {
-  readonly role: string;
-  readonly content?: unknown;
-  readonly [key: string]: unknown;
-};
+type WorkersAiMessage = ReturnType<typeof convertMessages>[number];
 
 type WorkersAiTool = {
   readonly type: "function";
@@ -41,41 +37,57 @@ type WorkersAiTool = {
   };
 };
 
-type ChatCompletionDelta = {
-  readonly content?: string | null;
-  readonly reasoning_content?: string | null;
-  readonly reasoning?: string | null;
-  readonly tool_calls?: ReadonlyArray<{
-    readonly index?: number;
-    readonly id?: string;
-    readonly function?: { readonly name?: string; readonly arguments?: string };
-  }>;
-};
+const FiniteNumber = Schema.Number.check(Schema.isFinite());
 
-type ChatCompletionChoice = {
-  readonly index?: number;
-  readonly delta?: ChatCompletionDelta;
-  readonly finish_reason?: string | null;
-  readonly usage?: WorkersAiUsage;
-};
+const WorkersAiUsage = Schema.Struct({
+  prompt_tokens: Schema.optionalKey(FiniteNumber),
+  completion_tokens: Schema.optionalKey(FiniteNumber),
+  total_tokens: Schema.optionalKey(FiniteNumber),
+  input_tokens: Schema.optionalKey(FiniteNumber),
+  output_tokens: Schema.optionalKey(FiniteNumber),
+  cache_read_tokens: Schema.optionalKey(FiniteNumber),
+  cache_write_tokens: Schema.optionalKey(FiniteNumber),
+  prompt_tokens_details: Schema.optionalKey(
+    Schema.Struct({ cached_tokens: Schema.optionalKey(FiniteNumber) }),
+  ),
+});
+type WorkersAiUsage = typeof WorkersAiUsage.Type;
 
-type WorkersAiUsage = {
-  readonly prompt_tokens?: number;
-  readonly completion_tokens?: number;
-  readonly total_tokens?: number;
-  readonly input_tokens?: number;
-  readonly output_tokens?: number;
-  readonly cache_read_tokens?: number;
-  readonly cache_write_tokens?: number;
-  readonly prompt_tokens_details?: { readonly cached_tokens?: number };
-};
+const ChatCompletionToolCall = Schema.Struct({
+  index: Schema.optionalKey(FiniteNumber),
+  id: Schema.optionalKey(Schema.String),
+  function: Schema.optionalKey(
+    Schema.Struct({
+      name: Schema.optionalKey(Schema.String),
+      arguments: Schema.optionalKey(Schema.String),
+    }),
+  ),
+});
 
-type ChatCompletionChunk = {
-  readonly id?: unknown;
-  readonly model?: unknown;
-  readonly choices?: ReadonlyArray<ChatCompletionChoice>;
-  readonly usage?: WorkersAiUsage;
-};
+const ChatCompletionDelta = Schema.Struct({
+  content: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  reasoning_content: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  reasoning: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  tool_calls: Schema.optionalKey(Schema.Array(ChatCompletionToolCall)),
+});
+type ChatCompletionDelta = typeof ChatCompletionDelta.Type;
+
+const ChatCompletionChoice = Schema.Struct({
+  index: Schema.optionalKey(FiniteNumber),
+  delta: Schema.optionalKey(ChatCompletionDelta),
+  finish_reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  usage: Schema.optionalKey(WorkersAiUsage),
+});
+
+const ChatCompletionChunk = Schema.Struct({
+  id: Schema.optionalKey(Schema.Unknown),
+  model: Schema.optionalKey(Schema.Unknown),
+  choices: Schema.optionalKey(Schema.Array(ChatCompletionChoice)),
+  usage: Schema.optionalKey(WorkersAiUsage),
+});
+type ChatCompletionChunk = typeof ChatCompletionChunk.Type;
+
+const ChatCompletionChunkFromJsonString = Schema.fromJsonString(ChatCompletionChunk);
 
 type WorkersAIReasoningEffort = "low" | "medium" | "high";
 
@@ -126,9 +138,34 @@ type StreamingTextBlock = TextContent;
 type StreamingThinkingBlock = ThinkingContent;
 type StreamingToolCallBlock = ToolCall & { partialArgs?: string; streamIndex?: number };
 type StreamingBlock = StreamingTextBlock | StreamingThinkingBlock | StreamingToolCallBlock;
+type SseChunkHandler = (chunk: ChatCompletionChunk) => Effect.Effect<void, ModelStreamFailed>;
+type SseReaderReadResult =
+  | { readonly done: true; readonly value?: unknown }
+  | { readonly done: false; readonly value: unknown };
+type SseReader = {
+  readonly read: () => PromiseLike<SseReaderReadResult>;
+  readonly cancel: () => PromiseLike<void>;
+  readonly releaseLock: () => void;
+};
+type SseReaderState = {
+  readonly reader: SseReader;
+  readonly decoder: TextDecoder;
+  buffer: string;
+  finished: boolean;
+};
+
+type WorkersAiRunBinding = Effect.Success<Cloudflare.AiGatewayClient["raw"]>;
+
+type ModelTurnError = InvalidPiModel | ModelCallFailed | ModelResponseFailed | ModelStreamFailed;
 
 // Copied from Flue: event/turn payloads never carry raw image bytes.
 export const IMAGE_DATA_OMITTED = "[image data omitted from event]";
+
+export const AiGatewayId = Schema.String.pipe(Schema.brand("AiGatewayId"));
+export type AiGatewayId = typeof AiGatewayId.Type;
+
+export const WorkersAiModelId = Schema.String.pipe(Schema.brand("WorkersAiModelId"));
+export type WorkersAiModelId = typeof WorkersAiModelId.Type;
 
 const WORKERS_AI_COMPAT: Required<Omit<OpenAICompletionsCompat, "cacheControlFormat">> & {
   readonly cacheControlFormat: OpenAICompletionsCompat["cacheControlFormat"] | undefined;
@@ -169,77 +206,179 @@ export interface Interface {
   readonly stream: (input: StreamInput) => Effect.Effect<AssistantMessageEventStream>;
 }
 
+export interface AiGatewayRuntime {
+  readonly ai: WorkersAiRunBinding;
+  readonly id: AiGatewayId;
+}
+
 export class Service extends Context.Service<Service, Interface>()("@denora/server/PiAgentModel") {}
 
-class ModelCallFailed extends Schema.TaggedErrorClass<ModelCallFailed>()("ModelCallFailed", {
+export class AiGateway extends Context.Service<AiGateway, AiGatewayRuntime>()(
+  "@denora/server/PiAgentModel/AiGateway",
+) {}
+
+export class InvalidPiModel extends Schema.TaggedErrorClass<InvalidPiModel>()("InvalidPiModel", {
+  message: Schema.String,
+  api: Schema.String,
+}) {}
+
+export class ModelCallFailed extends Schema.TaggedErrorClass<ModelCallFailed>()("ModelCallFailed", {
   message: Schema.String,
   cause: Schema.Defect(),
 }) {}
 
-export const layerFromAiGateway = (
-  aiGateway: Cloudflare.AiGatewayClient,
-  config: AiGatewayModelOptions = {},
-) =>
+export class ModelResponseFailed extends Schema.TaggedErrorClass<ModelResponseFailed>()(
+  "ModelResponseFailed",
+  {
+    message: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
+
+export class ModelStreamFailed extends Schema.TaggedErrorClass<ModelStreamFailed>()(
+  "ModelStreamFailed",
+  {
+    message: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
+
+export const layer = (config: AiGatewayModelOptions = {}) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
-      const ai = yield* aiGateway.raw;
-      const gatewayId = yield* aiGateway.id;
+      const aiGateway = yield* AiGateway;
+      const ai = aiGateway.ai;
+      const gatewayId = aiGateway.id;
 
-      const stream = ({ model, context, options }: StreamInput) =>
-        Effect.sync(() => {
-          const requestedModel = config.defaultModelId ?? model.id;
-          const stream = createAssistantMessageEventStream();
-          const output = makeAssistantMessage({
-            model,
-            modelId: requestedModel,
-            content: [],
-            stopReason: "stop",
-          });
-          const maxTokens = options?.maxTokens ?? config.maxTokens;
-          const temperature = options?.temperature ?? config.temperature;
-
-          void runWorkersAiTurn({
-            ai,
-            gatewayId,
-            requestedModel,
-            context,
-            model,
-            options: {
-              ...options,
-              ...(maxTokens !== undefined ? { maxTokens } : {}),
-              ...(temperature !== undefined ? { temperature } : {}),
-            },
-            stream,
-            output,
-          });
-
-          return stream;
+      const stream = Effect.fn("PiAgentModel.stream")(function* ({
+        model,
+        context,
+        options,
+      }: StreamInput) {
+        const requestedModel = WorkersAiModelId.make(config.defaultModelId ?? model.id);
+        const eventStream = createAssistantMessageEventStream();
+        const output = makeAssistantMessage({
+          model,
+          modelId: requestedModel,
+          content: [],
+          stopReason: "stop",
         });
+        const maxTokens = options?.maxTokens ?? config.maxTokens;
+        const temperature = options?.temperature ?? config.temperature;
+
+        yield* runWorkersAiTurn({
+          ai,
+          gatewayId,
+          requestedModel,
+          context,
+          model,
+          options: {
+            ...options,
+            ...(maxTokens !== undefined ? { maxTokens } : {}),
+            ...(temperature !== undefined ? { temperature } : {}),
+          },
+          stream: eventStream,
+          output,
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.sync(() => emitTurnError({ output, stream: eventStream, options, error })),
+          ),
+          Effect.forkDetach,
+        );
+
+        return eventStream;
+      });
 
       return Service.of({ stream });
     }),
   );
 
-const runWorkersAiTurn = async (input: {
-  readonly ai: unknown;
-  readonly gatewayId: string;
-  readonly requestedModel: string;
+export const aiGatewayLayerFromClient = (client: Cloudflare.AiGatewayClient) =>
+  Layer.effect(
+    AiGateway,
+    Effect.gen(function* () {
+      const ai = yield* client.raw;
+      const id = AiGatewayId.make(yield* client.id);
+      return AiGateway.of({ ai, id });
+    }),
+  );
+
+const emitTurnError = ({
+  output,
+  stream,
+  options,
+  error,
+}: {
+  readonly output: AssistantMessage;
+  readonly stream: AssistantMessageEventStream;
+  readonly options: SimpleStreamOptions | undefined;
+  readonly error: unknown;
+}): void => {
+  for (const block of output.content as StreamingBlock[]) {
+    if (block.type === "toolCall") {
+      delete (block as StreamingToolCallBlock).partialArgs;
+      delete (block as StreamingToolCallBlock).streamIndex;
+    }
+  }
+  const reason = options?.signal?.aborted || isAbortError(error) ? "aborted" : "error";
+  output.stopReason = reason;
+  output.errorMessage = error instanceof Error ? error.message : String(error);
+  stream.push({ type: "error", reason, error: output });
+  stream.end();
+};
+
+const modelStreamFailure = (cause: unknown): ModelStreamFailed =>
+  new ModelStreamFailed({
+    message: cause instanceof Error ? cause.message : "Workers AI stream processing failed.",
+    cause,
+  });
+
+const streamFailure = (cause: unknown): Effect.Effect<never, ModelStreamFailed> =>
+  Effect.fail(modelStreamFailure(cause));
+
+const tryStreamSync = <A>(evaluate: () => A): Effect.Effect<A, ModelStreamFailed> =>
+  Effect.try({
+    try: evaluate,
+    catch: modelStreamFailure,
+  });
+
+const runWorkersAiTurn = Effect.fn("PiAgentModel.runWorkersAiTurn")(function* (input: {
+  readonly ai: WorkersAiRunBinding;
+  readonly gatewayId: AiGatewayId;
+  readonly requestedModel: WorkersAiModelId;
   readonly context: PiContext;
   readonly model: Model<Api>;
   readonly options: SimpleStreamOptions | undefined;
   readonly stream: AssistantMessageEventStream;
   readonly output: AssistantMessage;
-}) => {
-  let response: Response | undefined;
-  try {
-    assertOpenAiCompletionsModel(input.model);
-    response = await callWorkersAi(input);
-    if (!response.body) {
-      throw new Error("Cloudflare AI Gateway returned empty response body.");
-    }
+}): Effect.fn.Return<void, ModelTurnError> {
+  const model = yield* requireOpenAiCompletionsModel(input.model);
+  const response = yield* callWorkersAi({ ...input, model });
+  const body = response.body;
+  if (!body) {
+    return yield* new ModelResponseFailed({
+      message: "Cloudflare AI Gateway returned empty response body.",
+      cause: response,
+    });
+  }
 
-    input.stream.push({ type: "start", partial: input.output });
+  return yield* processWorkersAiResponse({ ...input, model, body }).pipe(
+    Effect.catch((error) =>
+      cancelResponseBody(response).pipe(Effect.flatMap(() => Effect.fail(error))),
+    ),
+  );
+});
+
+const processWorkersAiResponse = Effect.fn("PiAgentModel.processWorkersAiResponse")(
+  function* (input: {
+    readonly body: ReadableStream<Uint8Array>;
+    readonly model: Model<"openai-completions">;
+    readonly options: SimpleStreamOptions | undefined;
+    readonly stream: AssistantMessageEventStream;
+    readonly output: AssistantMessage;
+  }): Effect.fn.Return<void, ModelStreamFailed> {
+    yield* tryStreamSync(() => input.stream.push({ type: "start", partial: input.output }));
 
     let textBlock: StreamingTextBlock | null = null;
     let thinkingBlock: StreamingThinkingBlock | null = null;
@@ -249,35 +388,36 @@ const runWorkersAiTurn = async (input: {
     const blocks = input.output.content as StreamingBlock[];
     const indexOf = (block: StreamingBlock | null): number => (block ? blocks.indexOf(block) : -1);
 
-    const finishBlock = (block: StreamingBlock): void => {
-      const contentIndex = indexOf(block);
-      if (contentIndex === -1) return;
-      if (block.type === "text") {
-        input.stream.push({
-          type: "text_end",
-          contentIndex,
-          content: block.text,
-          partial: input.output,
-        });
-      } else if (block.type === "thinking") {
-        input.stream.push({
-          type: "thinking_end",
-          contentIndex,
-          content: block.thinking,
-          partial: input.output,
-        });
-      } else if (block.type === "toolCall") {
-        block.arguments = parseStreamingJson(block.partialArgs ?? "") as Record<string, unknown>;
-        delete block.partialArgs;
-        delete block.streamIndex;
-        input.stream.push({
-          type: "toolcall_end",
-          contentIndex,
-          toolCall: block,
-          partial: input.output,
-        });
-      }
-    };
+    const finishBlock = (block: StreamingBlock): Effect.Effect<void, ModelStreamFailed> =>
+      tryStreamSync(() => {
+        const contentIndex = indexOf(block);
+        if (contentIndex === -1) return;
+        if (block.type === "text") {
+          input.stream.push({
+            type: "text_end",
+            contentIndex,
+            content: block.text,
+            partial: input.output,
+          });
+        } else if (block.type === "thinking") {
+          input.stream.push({
+            type: "thinking_end",
+            contentIndex,
+            content: block.thinking,
+            partial: input.output,
+          });
+        } else if (block.type === "toolCall") {
+          block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs ?? "");
+          delete block.partialArgs;
+          delete block.streamIndex;
+          input.stream.push({
+            type: "toolcall_end",
+            contentIndex,
+            toolCall: block,
+            partial: input.output,
+          });
+        }
+      });
 
     const ensureTextBlock = (): StreamingTextBlock => {
       if (!textBlock) {
@@ -350,128 +490,117 @@ const runWorkersAiTurn = async (input: {
       return block;
     };
 
-    for await (const rawChunk of iterateSseChunks(response.body)) {
-      const chunk = rawChunk as ChatCompletionChunk | null;
-      if (!chunk || typeof chunk !== "object") continue;
+    const applyChunk = (chunk: ChatCompletionChunk): Effect.Effect<void, ModelStreamFailed> =>
+      tryStreamSync(() => {
+        const responseId = stringOrEmpty(chunk.id);
+        if (!input.output.responseId && responseId.length > 0) {
+          input.output.responseId = responseId;
+        }
+        const responseModel = stringOrEmpty(chunk.model);
+        if (
+          !input.output.responseModel &&
+          responseModel.length > 0 &&
+          responseModel !== input.output.model
+        ) {
+          input.output.responseModel = responseModel;
+        }
+        if (chunk.usage) {
+          input.output.usage = toUsage(chunk.usage);
+        }
 
-      const responseId = stringOrEmpty(chunk.id);
-      if (!input.output.responseId && responseId.length > 0) {
-        input.output.responseId = responseId;
-      }
-      const responseModel = stringOrEmpty(chunk.model);
-      if (
-        !input.output.responseModel &&
-        responseModel.length > 0 &&
-        responseModel !== input.output.model
-      ) {
-        input.output.responseModel = responseModel;
-      }
-      if (chunk.usage) {
-        input.output.usage = toUsage(chunk.usage);
-      }
+        const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+        if (!choice) return;
+        if (!chunk.usage && choice.usage) {
+          input.output.usage = toUsage(choice.usage);
+        }
+        if (choice.finish_reason) {
+          const mapped = mapFinishReason(choice.finish_reason);
+          input.output.stopReason = mapped.stopReason;
+          if (mapped.errorMessage) input.output.errorMessage = mapped.errorMessage;
+          hasFinishReason = true;
+        }
 
-      const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
-      if (!choice) continue;
-      if (!chunk.usage && choice.usage) {
-        input.output.usage = toUsage(choice.usage);
-      }
-      if (choice.finish_reason) {
-        const mapped = mapFinishReason(choice.finish_reason);
-        input.output.stopReason = mapped.stopReason;
-        if (mapped.errorMessage) input.output.errorMessage = mapped.errorMessage;
-        hasFinishReason = true;
-      }
+        const delta = choice.delta;
+        if (!delta) return;
 
-      const delta = choice.delta;
-      if (!delta) continue;
-
-      if (delta.content !== null && delta.content !== undefined && delta.content.length > 0) {
-        const block = ensureTextBlock();
-        block.text += delta.content;
-        input.stream.push({
-          type: "text_delta",
-          contentIndex: indexOf(block),
-          delta: delta.content,
-          partial: input.output,
-        });
-      }
-
-      const reasoningDelta = pickReasoning(delta);
-      if (reasoningDelta) {
-        const block = ensureThinkingBlock(reasoningDelta.field);
-        block.thinking += reasoningDelta.text;
-        input.stream.push({
-          type: "thinking_delta",
-          contentIndex: indexOf(block),
-          delta: reasoningDelta.text,
-          partial: input.output,
-        });
-      }
-
-      if (delta.tool_calls) {
-        for (const toolCall of delta.tool_calls) {
-          const block = ensureToolCallBlock(toolCall);
-          if (!block.id && toolCall.id) {
-            block.id = toolCall.id;
-            toolCallBlocksById.set(toolCall.id, block);
-          }
-          if (!block.name && toolCall.function?.name) {
-            block.name = toolCall.function.name;
-          }
-          let toolDelta = "";
-          if (toolCall.function?.arguments) {
-            toolDelta = toolCall.function.arguments;
-            block.partialArgs = (block.partialArgs ?? "") + toolDelta;
-            block.arguments = parseStreamingJson(block.partialArgs) as Record<string, unknown>;
-          }
+        if (delta.content !== null && delta.content !== undefined && delta.content.length > 0) {
+          const block = ensureTextBlock();
+          block.text += delta.content;
           input.stream.push({
-            type: "toolcall_delta",
+            type: "text_delta",
             contentIndex: indexOf(block),
-            delta: toolDelta,
+            delta: delta.content,
             partial: input.output,
           });
         }
-      }
-    }
+
+        const reasoningDelta = pickReasoning(delta);
+        if (reasoningDelta) {
+          const block = ensureThinkingBlock(reasoningDelta.field);
+          block.thinking += reasoningDelta.text;
+          input.stream.push({
+            type: "thinking_delta",
+            contentIndex: indexOf(block),
+            delta: reasoningDelta.text,
+            partial: input.output,
+          });
+        }
+
+        if (delta.tool_calls) {
+          for (const toolCall of delta.tool_calls) {
+            const block = ensureToolCallBlock(toolCall);
+            if (!block.id && toolCall.id) {
+              block.id = toolCall.id;
+              toolCallBlocksById.set(toolCall.id, block);
+            }
+            if (!block.name && toolCall.function?.name) {
+              block.name = toolCall.function.name;
+            }
+            let toolDelta = "";
+            if (toolCall.function?.arguments) {
+              toolDelta = toolCall.function.arguments;
+              block.partialArgs = (block.partialArgs ?? "") + toolDelta;
+              block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
+            }
+            input.stream.push({
+              type: "toolcall_delta",
+              contentIndex: indexOf(block),
+              delta: toolDelta,
+              partial: input.output,
+            });
+          }
+        }
+      });
+
+    yield* readSseChunks(input.body, applyChunk);
 
     for (const block of blocks) {
-      finishBlock(block);
+      yield* finishBlock(block);
     }
 
     if (input.options?.signal?.aborted) {
-      throw new Error("Request was aborted");
+      return yield* streamFailure(new Error("Request was aborted"));
     }
     if (input.output.stopReason === "error") {
-      throw new Error(input.output.errorMessage ?? "Provider returned an error stop reason");
+      return yield* streamFailure(
+        new Error(input.output.errorMessage ?? "Provider returned an error stop reason"),
+      );
     }
     if (!hasFinishReason) {
-      throw new Error("Stream ended without finish_reason");
+      return yield* streamFailure(new Error("Stream ended without finish_reason"));
     }
-    input.stream.push({
-      type: "done",
-      reason: doneReason(input.output.stopReason),
-      message: input.output,
+    yield* tryStreamSync(() => {
+      input.stream.push({
+        type: "done",
+        reason: doneReason(input.output.stopReason),
+        message: input.output,
+      });
+      input.stream.end();
     });
-    input.stream.end();
-  } catch (error) {
-    if (response?.body && !response.body.locked) {
-      void response.body.cancel().catch(() => {});
-    }
-    for (const block of input.output.content as StreamingBlock[]) {
-      if (block.type === "toolCall") {
-        delete (block as StreamingToolCallBlock).partialArgs;
-        delete (block as StreamingToolCallBlock).streamIndex;
-      }
-    }
-    const reason = input.options?.signal?.aborted || isAbortError(error) ? "aborted" : "error";
-    input.output.stopReason = reason;
-    input.output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-    input.stream.push({ type: "error", reason, error: input.output });
-    input.stream.end();
-  }
-};
+  },
+);
 
-const callWorkersAi = async ({
+const callWorkersAi = Effect.fn("PiAgentModel.callWorkersAi")(function* ({
   ai,
   gatewayId,
   requestedModel,
@@ -479,90 +608,115 @@ const callWorkersAi = async ({
   model,
   options,
 }: {
-  readonly ai: unknown;
-  readonly gatewayId: string;
-  readonly requestedModel: string;
+  readonly ai: WorkersAiRunBinding;
+  readonly gatewayId: AiGatewayId;
+  readonly requestedModel: WorkersAiModelId;
   readonly context: PiContext;
-  readonly model: Model<Api>;
+  readonly model: Model<"openai-completions">;
   readonly options: SimpleStreamOptions | undefined;
-}): Promise<Response> => {
-  try {
-    const payload: Record<string, unknown> = {
-      messages: toWorkersAiMessages(model, context),
-      stream: true,
-      stream_options: { include_usage: true },
-    };
-    if (context.tools && context.tools.length > 0) {
-      payload.tools = context.tools.map(toWorkersAiTool);
-    }
-    if (options?.maxTokens) {
-      payload.max_completion_tokens = options.maxTokens;
-    }
-    if (options?.temperature !== undefined) {
-      payload.temperature = options.temperature;
-    }
-    applyReasoningEffort(payload, model, options?.reasoning);
+}): Effect.fn.Return<Response, ModelCallFailed> {
+  const payload: Record<string, unknown> = {
+    messages: toWorkersAiMessages(model, context),
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  if (context.tools && context.tools.length > 0) {
+    payload.tools = context.tools.map(toWorkersAiTool);
+  }
+  if (options?.maxTokens) {
+    payload.max_completion_tokens = options.maxTokens;
+  }
+  if (options?.temperature !== undefined) {
+    payload.temperature = options.temperature;
+  }
+  applyReasoningEffort(payload, model, options?.reasoning);
 
-    const overridden = await options?.onPayload?.(payload, model);
-    const finalPayload =
-      overridden === undefined ? payload : (overridden as Record<string, unknown>);
-    const extraHeaders: Record<string, string> = {};
-    if (options?.sessionId) {
-      extraHeaders["x-session-affinity"] = options.sessionId;
-    }
-    if (options?.headers) {
-      Object.assign(extraHeaders, options.headers);
-    }
+  const overridden = yield* Effect.tryPromise({
+    try: () => Promise.resolve(options?.onPayload?.(payload, model)),
+    catch: (cause) =>
+      new ModelCallFailed({
+        message:
+          cause instanceof Error ? cause.message : "Cloudflare AI Gateway payload hook failed.",
+        cause,
+      }),
+  });
+  const finalPayload = overridden === undefined ? payload : (overridden as Record<string, unknown>);
+  const extraHeaders: Record<string, string> = {};
+  if (options?.sessionId) {
+    extraHeaders["x-session-affinity"] = options.sessionId;
+  }
+  if (options?.headers) {
+    Object.assign(extraHeaders, options.headers);
+  }
 
-    const response = await (ai as { run: (...args: Array<unknown>) => Promise<Response> }).run(
-      requestedModel,
-      finalPayload,
-      {
+  const response = yield* Effect.tryPromise({
+    try: () =>
+      ai.run(requestedModel, finalPayload, {
         gateway: { id: gatewayId },
         returnRawResponse: true,
         ...(options?.signal ? { signal: options.signal } : {}),
         ...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
-      },
-    );
-    await options?.onResponse?.(
-      { status: response.status, headers: headersToRecord(response.headers) },
-      model,
-    );
-    if (!response.ok) {
-      const errorBody = await safeReadText(response);
-      throw new Error(
-        `Cloudflare AI Gateway returned ${response.status} ${response.statusText}` +
-          (errorBody ? `: ${errorBody}` : ""),
-      );
-    }
-    return response;
-  } catch (cause) {
-    if (isAbortError(cause)) {
-      throw cause;
-    }
-    throw new ModelCallFailed({
-      message: cause instanceof Error ? cause.message : "Cloudflare AI Gateway model call failed.",
-      cause,
+      }),
+    catch: (cause) =>
+      new ModelCallFailed({
+        message:
+          cause instanceof Error ? cause.message : "Cloudflare AI Gateway model call failed.",
+        cause,
+      }),
+  });
+  if (!(response instanceof Response)) {
+    return yield* new ModelCallFailed({
+      message: "Cloudflare AI Gateway did not return a raw Response.",
+      cause: response,
     });
   }
-};
+
+  yield* Effect.tryPromise({
+    try: () =>
+      Promise.resolve(
+        options?.onResponse?.(
+          { status: response.status, headers: headersToRecord(response.headers) },
+          model,
+        ),
+      ),
+    catch: (cause) =>
+      new ModelCallFailed({
+        message:
+          cause instanceof Error ? cause.message : "Cloudflare AI Gateway response hook failed.",
+        cause,
+      }),
+  });
+  if (!response.ok) {
+    const errorBody = yield* safeReadText(response);
+    return yield* new ModelCallFailed({
+      message:
+        `Cloudflare AI Gateway returned ${response.status} ${response.statusText}` +
+        (errorBody ? `: ${errorBody}` : ""),
+      cause: response,
+    });
+  }
+  return response;
+});
 
 const toWorkersAiMessages = (
-  model: Model<Api>,
+  model: Model<"openai-completions">,
   context: PiContext,
-): ReadonlyArray<WorkersAiMessage> =>
-  convertMessages(
-    model as unknown as Model<"openai-completions">,
-    context,
-    WORKERS_AI_COMPAT,
-  ) as unknown as ReadonlyArray<WorkersAiMessage>;
+): ReadonlyArray<WorkersAiMessage> => convertMessages(model, context, WORKERS_AI_COMPAT);
 
-const assertOpenAiCompletionsModel = (model: Model<Api>): void => {
-  if (model.api === "openai-completions") return;
-  throw new Error(
-    `PiAgentModel requires an openai-completions Pi model for Workers AI payload conversion; received ${model.api}.`,
-  );
-};
+const requireOpenAiCompletionsModel = Effect.fn("PiAgentModel.requireOpenAiCompletionsModel")(
+  function* (model: Model<Api>): Effect.fn.Return<Model<"openai-completions">, InvalidPiModel> {
+    if (model.api === "openai-completions") {
+      // `convertMessages` is typed for `Model<'openai-completions'>` but only
+      // reads provider/id/reasoning, which our validated model has. This
+      // mirrors Flue's Workers AI provider boundary.
+      return model as unknown as Model<"openai-completions">;
+    }
+    return yield* new InvalidPiModel({
+      api: model.api,
+      message: `PiAgentModel requires an openai-completions Pi model for Workers AI payload conversion; received ${model.api}.`,
+    });
+  },
+);
 
 const toWorkersAiTool = (tool: Tool): WorkersAiTool => ({
   type: "function",
@@ -604,13 +758,8 @@ const mapFinishReason = (
 const doneReason = (reason: StopReason): "stop" | "length" | "toolUse" =>
   reason === "length" || reason === "toolUse" ? reason : "stop";
 
-const toUsage = (value: unknown): Usage => {
-  const raw = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-  const promptDetails =
-    typeof raw.prompt_tokens_details === "object" && raw.prompt_tokens_details !== null
-      ? (raw.prompt_tokens_details as Record<string, unknown>)
-      : {};
-  const cacheRead = numberOrZero(promptDetails.cached_tokens ?? raw.cache_read_tokens);
+const toUsage = (raw: WorkersAiUsage): Usage => {
+  const cacheRead = numberOrZero(raw.prompt_tokens_details?.cached_tokens ?? raw.cache_read_tokens);
   const promptTokens = numberOrZero(raw.prompt_tokens ?? raw.input_tokens);
   const output = numberOrZero(raw.completion_tokens ?? raw.output_tokens);
   const input = Math.max(0, promptTokens - cacheRead);
@@ -722,42 +871,81 @@ const escapeXmlText = (value: unknown): string =>
 const escapeXmlAttribute = (value: unknown): string =>
   escapeXmlText(value).replaceAll('"', "&quot;");
 
-async function* iterateSseChunks(body: ReadableStream<Uint8Array>): AsyncIterable<unknown> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finished = false;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        finished = true;
-        buffer += decoder.decode();
-        if (buffer.trim().length > 0) {
-          yield* parseSseEvents(buffer);
-        }
-        return;
+const readSseChunks = Effect.fn("PiAgentModel.readSseChunks")(function* (
+  body: ReadableStream<Uint8Array>,
+  onChunk: SseChunkHandler,
+): Effect.fn.Return<void, ModelStreamFailed> {
+  return yield* Effect.acquireUseRelease(
+    Effect.try({
+      try: (): SseReaderState => ({
+        reader: body.getReader(),
+        decoder: new TextDecoder(),
+        buffer: "",
+        finished: false,
+      }),
+      catch: modelStreamFailure,
+    }),
+    (state) => readSseReader(state, onChunk),
+    (state) => releaseSseReader(state),
+  );
+});
+
+const readSseReader = Effect.fn("PiAgentModel.readSseReader")(function* (
+  state: SseReaderState,
+  onChunk: SseChunkHandler,
+): Effect.fn.Return<void, ModelStreamFailed> {
+  while (true) {
+    const { done, value } = yield* Effect.tryPromise({
+      try: () => state.reader.read(),
+      catch: modelStreamFailure,
+    });
+    if (done) {
+      state.finished = true;
+      state.buffer += state.decoder.decode();
+      if (state.buffer.trim().length > 0) {
+        yield* readSseBlock(state.buffer, onChunk);
       }
-      buffer += decoder.decode(value, { stream: true });
-      let boundary = findSseBoundary(buffer);
-      while (boundary) {
-        const block = buffer.slice(0, boundary.index);
-        buffer = buffer.slice(boundary.index + boundary.width);
-        yield* parseSseEvents(block);
-        boundary = findSseBoundary(buffer);
-      }
+      return;
     }
-  } finally {
-    if (!finished) {
-      try {
-        await reader.cancel();
-      } catch {}
+    if (!(value instanceof Uint8Array)) {
+      return yield* streamFailure(new Error("Workers AI stream reader returned non-byte data."));
     }
-    try {
-      reader.releaseLock();
-    } catch {}
+    state.buffer += state.decoder.decode(value, { stream: true });
+    let boundary = findSseBoundary(state.buffer);
+    while (boundary) {
+      const block = state.buffer.slice(0, boundary.index);
+      state.buffer = state.buffer.slice(boundary.index + boundary.width);
+      yield* readSseBlock(block, onChunk);
+      boundary = findSseBoundary(state.buffer);
+    }
   }
-}
+});
+
+const readSseBlock = Effect.fn("PiAgentModel.readSseBlock")(function* (
+  block: string,
+  onChunk: SseChunkHandler,
+): Effect.fn.Return<void, ModelStreamFailed> {
+  const chunks = yield* parseSseEvents(block);
+  for (const chunk of chunks) {
+    yield* onChunk(chunk);
+  }
+});
+
+const releaseSseReader = (state: SseReaderState): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    if (!state.finished) {
+      yield* Effect.tryPromise({
+        try: async () => {
+          await state.reader.cancel();
+        },
+        catch: () => undefined,
+      }).pipe(Effect.orElseSucceed(() => undefined));
+    }
+    yield* Effect.try({
+      try: () => state.reader.releaseLock(),
+      catch: () => undefined,
+    }).pipe(Effect.orElseSucceed(() => undefined));
+  });
 
 const findSseBoundary = (
   buffer: string,
@@ -770,29 +958,28 @@ const findSseBoundary = (
   return lf < crlf ? { index: lf, width: 2 } : { index: crlf, width: 4 };
 };
 
-function* parseSseEvents(block: string): IterableIterator<unknown> {
-  const dataLines: Array<string> = [];
-  let start = 0;
-  while (start <= block.length) {
-    const newline = block.indexOf("\n", start);
-    const end = newline === -1 ? block.length : newline;
-    const lineEnd = end > start && block.charCodeAt(end - 1) === 13 ? end - 1 : end;
-    const line = block.slice(start, lineEnd);
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
+const parseSseEvents = (
+  block: string,
+): Effect.Effect<ReadonlyArray<ChatCompletionChunk>, ModelStreamFailed> =>
+  tryStreamSync(() => {
+    const dataLines: Array<string> = [];
+    let start = 0;
+    while (start <= block.length) {
+      const newline = block.indexOf("\n", start);
+      const end = newline === -1 ? block.length : newline;
+      const lineEnd = end > start && block.charCodeAt(end - 1) === 13 ? end - 1 : end;
+      const line = block.slice(start, lineEnd);
+      if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+      if (newline === -1) break;
+      start = newline + 1;
     }
-    if (newline === -1) break;
-    start = newline + 1;
-  }
-  if (dataLines.length === 0) return;
-  const data = dataLines.join("\n");
-  if (data === "" || data === "[DONE]") return;
-  try {
-    yield JSON.parse(data) as unknown;
-  } catch {
-    console.error(`Workers AI: dropping unparseable SSE data payload: ${data.slice(0, 200)}`);
-  }
-}
+    if (dataLines.length === 0) return [];
+    const data = dataLines.join("\n");
+    if (data === "" || data === "[DONE]") return [];
+    return [Schema.decodeUnknownSync(ChatCompletionChunkFromJsonString)(data)];
+  });
 
 const pickReasoning = (
   delta: ChatCompletionDelta,
@@ -843,13 +1030,19 @@ const headersToRecord = (headers: Headers): Record<string, string> => {
   return out;
 };
 
-const safeReadText = async (response: Response): Promise<string | undefined> => {
-  try {
-    return await response.text();
-  } catch {
-    return undefined;
-  }
-};
+const safeReadText = (response: Response): Effect.Effect<string | undefined> =>
+  Effect.tryPromise({
+    try: () => response.text(),
+    catch: () => undefined,
+  }).pipe(Effect.orElseSucceed(() => undefined));
+
+const cancelResponseBody = (response: Response): Effect.Effect<void> =>
+  Effect.tryPromise({
+    try: async () => {
+      if (response.body && !response.body.locked) await response.body.cancel();
+    },
+    catch: () => undefined,
+  }).pipe(Effect.orElseSucceed(() => undefined));
 
 const emptyUsage: Usage = {
   input: 0,

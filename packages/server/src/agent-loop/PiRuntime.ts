@@ -1,0 +1,35 @@
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as ManagedRuntime from "effect/ManagedRuntime";
+import { PiAgentModel } from "./PiAgentModel.ts";
+
+export interface Interface {
+  readonly streamFn: StreamFn;
+}
+
+export class Service extends Context.Service<Service, Interface>()("@denora/server/PiRuntime") {}
+
+export const layer: Layer.Layer<Service, never, PiAgentModel.Service> = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const modelService = yield* PiAgentModel.Service;
+    const runtime = yield* Effect.acquireRelease(
+      Effect.sync(() => ManagedRuntime.make(Layer.succeed(PiAgentModel.Service, modelService))),
+      (runtime) => runtime.disposeEffect,
+    );
+
+    const streamFn: StreamFn = (model, context, options) =>
+      runtime.runPromise(
+        Effect.gen(function* () {
+          const service = yield* PiAgentModel.Service;
+          return yield* service.stream({ model, context, options });
+        }),
+      );
+
+    return Service.of({ streamFn });
+  }),
+);
+
+export * as PiRuntime from "./PiRuntime.ts";

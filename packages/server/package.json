@@ -40,6 +40,12 @@
       "import": "./src/agent-loop/PiAgentRuntime.ts",
       "default": "./src/agent-loop/PiAgentRuntime.ts"
     },
+    "./agent-loop/PiRuntime": {
+      "types": "./src/agent-loop/PiRuntime.ts",
+      "bun": "./src/agent-loop/PiRuntime.ts",
+      "import": "./src/agent-loop/PiRuntime.ts",
+      "default": "./src/agent-loop/PiRuntime.ts"
+    },
     "./persistence/AlchemyDb": {
       "types": "./src/persistence/AlchemyDb.ts",
       "bun": "./src/persistence/AlchemyDb.ts",

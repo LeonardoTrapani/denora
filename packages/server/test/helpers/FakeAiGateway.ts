@@ -1,6 +1,6 @@
 import type * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
-import type * as Layer from "effect/Layer";
+import * as Layer from "effect/Layer";
 import { PiAgentModel, type AiGatewayModelOptions } from "../../src/agent-loop/PiAgentModel.ts";
 
 export interface Call {
@@ -36,8 +36,10 @@ export type Script =
     };
 
 export interface Fake {
+  readonly ai: Effect.Success<Cloudflare.AiGatewayClient["raw"]>;
   readonly client: Cloudflare.AiGatewayClient;
   readonly calls: Call[];
+  readonly gatewayId: string;
   readonly setScript: (script: Script) => void;
 }
 
@@ -73,8 +75,10 @@ export const make = (
   } as unknown as Cloudflare.AiGatewayClient;
 
   return {
+    ai: raw as Effect.Success<Cloudflare.AiGatewayClient["raw"]>,
     client,
     calls,
+    gatewayId,
     setScript: (next) => {
       currentScript = next;
     },
@@ -106,7 +110,17 @@ export const layer = (
   fake: Fake,
   config?: AiGatewayModelOptions,
 ): Layer.Layer<PiAgentModel.Service> =>
-  PiAgentModel.layerFromAiGateway(fake.client, config) as Layer.Layer<PiAgentModel.Service>;
+  PiAgentModel.layer(config).pipe(
+    Layer.provide(
+      Layer.succeed(
+        PiAgentModel.AiGateway,
+        PiAgentModel.AiGateway.of({
+          ai: fake.ai,
+          id: PiAgentModel.AiGatewayId.make(fake.gatewayId),
+        }),
+      ),
+    ),
+  );
 
 const createSseResponse = (
   chunks: ReadonlyArray<SseChunk>,

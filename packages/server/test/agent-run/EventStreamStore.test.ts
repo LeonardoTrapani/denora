@@ -50,4 +50,30 @@ describe("EventStreamStore", () => {
       assert.strictEqual(error._tag, "StreamClosed");
     }),
   );
+
+  it.effect("appends an event idempotently by key", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      yield* store.createStream("runs/run_once");
+
+      const first = yield* store.appendEventOnce("runs/run_once", "terminal", {
+        type: "run_end",
+      });
+      const replay = yield* store.appendEventOnce("runs/run_once", "terminal", {
+        type: "run_end",
+      });
+      const conflict = yield* store
+        .appendEventOnce("runs/run_once", "terminal", { type: "other" })
+        .pipe(Effect.flip);
+      const read = yield* store.readEvents("runs/run_once");
+
+      assert.strictEqual(first, "0000000000000000_0000000000000000");
+      assert.strictEqual(replay, first);
+      assert.strictEqual(conflict._tag, "EventStorageFailed");
+      assert.deepStrictEqual(
+        read.events.map((event) => event.data),
+        [{ type: "run_end" }],
+      );
+    }),
+  );
 });

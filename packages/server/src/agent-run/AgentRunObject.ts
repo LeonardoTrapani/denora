@@ -10,6 +10,7 @@ import {
   EventStorageFailed,
   makeSqliteEventStreamStore,
 } from "./EventStreamStore.ts";
+import { makeSqliteAgentRunCoordinator } from "./AgentRunCoordinator.ts";
 import { AgentRunLifecycle, type CreateRunInput, type CreateRunResult } from "./Lifecycle.ts";
 import { handleRunObjectRequest, internalErrorResponse } from "./StreamProtocol.ts";
 
@@ -41,23 +42,25 @@ export const AgentRunObjectLive = AgentRunObject.make(
         // Stream storage is required for every request; initialization failure means
         // this Durable Object instance has unavailable or corrupt SQLite state.
         const store = yield* makeSqliteEventStreamStore(state.storage.sql).pipe(Effect.orDie);
+        const coordinator = yield* makeSqliteAgentRunCoordinator(state.storage.sql, store).pipe(
+          Effect.orDie,
+        );
 
         return {
           create: (input: CreateRunInput) =>
-            AgentRunLifecycle.startRun(store, {
-              ...input,
-              scheduleExecution: scheduleRunAlarm(state, input),
+            Effect.gen(function* () {
+              const created = yield* AgentRunLifecycle.createRun(store, input);
+              const admission = yield* coordinator.admitRun(input);
+              if (created.created || admission.admitted) yield* scheduleRunAlarm(state);
+              return created;
             }),
           alarm: () =>
             Effect.gen(function* () {
-              const scheduled = yield* state.storage
-                .get<CreateRunInput>(RUN_ALARM_STORAGE_KEY)
-                .pipe(durableObjectStorageFailure("read scheduled agent run input"));
-              if (scheduled === undefined) {
-                yield* Effect.logError("agent run alarm fired without persisted run input");
-                return;
-              }
-              yield* AgentRunLifecycle.executeRun(store, { ...scheduled, pi });
+              const result = yield* coordinator.reconcile({
+                pi,
+                scheduleWake: (delayMs) => scheduleRunAlarm(state, delayMs),
+              });
+              if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
             }),
           fetch: Effect.gen(function* () {
             const request = yield* HttpServerRequest.HttpServerRequest;
@@ -82,8 +85,6 @@ export const AgentRunObjectLive = AgentRunObject.make(
   ),
 );
 
-const RUN_ALARM_STORAGE_KEY = "agent-run/alarm-input";
-
 const durableObjectStorageFailure =
   (operation: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, EventStorageFailed, R> =>
@@ -91,15 +92,10 @@ const durableObjectStorageFailure =
 
 const scheduleRunAlarm = (
   state: Cloudflare.DurableObjectState["Service"],
-  input: CreateRunInput,
-): ((runId: string) => Effect.Effect<void, EventStorageFailed>) =>
-  Effect.fn("AgentRunObject.scheduleRunAlarm")(function* () {
-    yield* state.storage
-      .put(RUN_ALARM_STORAGE_KEY, input)
-      .pipe(durableObjectStorageFailure("persist scheduled agent run input"));
-    yield* state.storage
-      .setAlarm(Date.now())
-      .pipe(durableObjectStorageFailure("schedule agent run alarm"));
-  });
+  delayMs = 0,
+): Effect.Effect<void, EventStorageFailed> =>
+  state.storage
+    .setAlarm(Date.now() + delayMs)
+    .pipe(durableObjectStorageFailure("schedule agent run alarm"));
 
 export * as AgentRunObjectModule from "./AgentRunObject.ts";

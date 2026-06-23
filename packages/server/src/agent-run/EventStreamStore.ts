@@ -20,6 +20,26 @@ CREATE TABLE IF NOT EXISTS denora_event_stream_entries (
   PRIMARY KEY (path, seq)
 )`;
 
+const CREATE_EVENT_KEYS_TABLE = `
+CREATE TABLE IF NOT EXISTS denora_event_stream_keys (
+  path    TEXT NOT NULL,
+  key     TEXT NOT NULL,
+  seq     INTEGER NOT NULL,
+  data    TEXT NOT NULL,
+  PRIMARY KEY (path, key),
+  UNIQUE (path, seq)
+)`;
+
+const CREATE_EVENT_KEY_TRIGGER = `
+CREATE TRIGGER IF NOT EXISTS denora_event_stream_key_append
+AFTER INSERT ON denora_event_stream_keys
+BEGIN
+  INSERT INTO denora_event_stream_entries (path, seq, data)
+  VALUES (NEW.path, NEW.seq, NEW.data);
+  UPDATE denora_event_streams SET next_offset = next_offset + 1
+  WHERE path = NEW.path;
+END`;
+
 export const DEFAULT_READ_LIMIT = 100;
 export const MAX_READ_LIMIT = 1000;
 
@@ -68,6 +88,11 @@ export interface EventStreamMeta {
 export interface EventStreamStore {
   readonly createStream: (path: string) => Effect.Effect<void, EventStreamError>;
   readonly appendEvent: (path: string, event: unknown) => Effect.Effect<string, EventStreamError>;
+  readonly appendEventOnce: (
+    path: string,
+    key: string,
+    event: unknown,
+  ) => Effect.Effect<string, EventStreamError>;
   readonly readEvents: (
     path: string,
     opts?: { readonly offset?: string | undefined; readonly limit?: number | undefined },
@@ -120,6 +145,11 @@ interface UpdateRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly next_offset: number;
 }
 
+interface EventKeyRow extends Record<string, Cloudflare.SqlStorageValue> {
+  readonly seq: number;
+  readonly data: string;
+}
+
 const subscribeToPath = (
   listenersByPath: Map<string, Set<() => void>>,
   path: string,
@@ -160,6 +190,12 @@ export const makeSqliteEventStreamStore = Effect.fn("EventStreamStore.makeSqlite
     yield* sql
       .exec(CREATE_ENTRIES_TABLE)
       .pipe(storageFailure("create entries table"), Effect.asVoid);
+    yield* sql
+      .exec(CREATE_EVENT_KEYS_TABLE)
+      .pipe(storageFailure("create event keys table"), Effect.asVoid);
+    yield* sql
+      .exec(CREATE_EVENT_KEY_TRIGGER)
+      .pipe(storageFailure("create event key trigger"), Effect.asVoid);
 
     const listenersByPath = new Map<string, Set<() => void>>();
 
@@ -239,6 +275,68 @@ export const makeSqliteEventStreamStore = Effect.fn("EventStreamStore.makeSqlite
       return formatOffset(seq);
     });
 
+    const appendEventOnce = Effect.fn("EventStreamStore.appendSqliteEventOnce")(function* (
+      path: string,
+      key: string,
+      event: unknown,
+    ): Effect.fn.Return<string, EventStreamError> {
+      const data = yield* Effect.try({
+        try: () => JSON.stringify(event),
+        catch: (cause) => new EventSerializationFailed({ cause }),
+      });
+
+      if (data === undefined) {
+        return yield* new EventSerializationFailed({
+          cause: new TypeError("Event is not JSON serializable"),
+        });
+      }
+
+      const insertedCursor = yield* sql
+        .exec<EventKeyRow>(
+          `INSERT OR IGNORE INTO denora_event_stream_keys (path, key, seq, data)
+           SELECT path, ?, next_offset, ? FROM denora_event_streams
+           WHERE path = ? AND closed = 0
+           RETURNING seq, data`,
+          key,
+          data,
+          path,
+        )
+        .pipe(storageFailure("insert event key"));
+      const inserted = yield* insertedCursor
+        .toArray()
+        .pipe(storageFailure("read inserted event key"));
+      const insertedRow = inserted[0];
+      if (insertedRow !== undefined) {
+        notifyListeners(listenersByPath, path);
+        return formatOffset(insertedRow.seq);
+      }
+
+      const existingCursor = yield* sql
+        .exec<EventKeyRow>(
+          `SELECT seq, data FROM denora_event_stream_keys WHERE path = ? AND key = ?`,
+          path,
+          key,
+        )
+        .pipe(storageFailure("read existing event key"));
+      const existing = yield* existingCursor
+        .toArray()
+        .pipe(storageFailure("collect existing event key"));
+      const existingRow = existing[0];
+      if (existingRow !== undefined) {
+        if (existingRow.data !== data) {
+          return yield* new EventStorageFailed({
+            operation: "append event once",
+            cause: new Error(`Event key ${key} already has a conflicting payload.`),
+          });
+        }
+        return formatOffset(existingRow.seq);
+      }
+
+      const meta = yield* getStreamMeta(path);
+      if (meta === null) return yield* new StreamNotFound({ path });
+      return yield* new StreamClosed({ path });
+    });
+
     const readEvents = Effect.fn("EventStreamStore.readSqliteEvents")(function* (
       path: string,
       opts?: { readonly offset?: string | undefined; readonly limit?: number | undefined },
@@ -302,6 +400,7 @@ export const makeSqliteEventStreamStore = Effect.fn("EventStreamStore.makeSqlite
     return {
       createStream,
       appendEvent,
+      appendEventOnce,
       readEvents,
       closeStream,
       getStreamMeta,
@@ -352,6 +451,46 @@ export const makeInMemoryEventStreamStore = (): EventStreamStore => {
     return formatOffset(seq);
   });
 
+  const eventKeys = new Map<string, { seq: number; data: string }>();
+
+  const appendEventOnce = Effect.fn("EventStreamStore.appendInMemoryEventOnce")(function* (
+    path: string,
+    key: string,
+    event: unknown,
+  ): Effect.fn.Return<string, EventStreamError> {
+    const data = yield* Effect.try({
+      try: () => JSON.stringify(event),
+      catch: (cause) => new EventSerializationFailed({ cause }),
+    });
+    if (data === undefined) {
+      return yield* new EventSerializationFailed({
+        cause: new TypeError("Event is not JSON serializable"),
+      });
+    }
+
+    const eventKey = `${path}:${key}`;
+    const existing = eventKeys.get(eventKey);
+    if (existing !== undefined) {
+      if (existing.data !== data) {
+        return yield* new EventStorageFailed({
+          operation: "append event once",
+          cause: new Error(`Event key ${key} already has a conflicting payload.`),
+        });
+      }
+      return formatOffset(existing.seq);
+    }
+
+    const stream = streams.get(path);
+    if (stream === undefined) return yield* new StreamNotFound({ path });
+    if (stream.closed) return yield* new StreamClosed({ path });
+    const seq = stream.nextOffset;
+    stream.nextOffset += 1;
+    eventKeys.set(eventKey, { seq, data });
+    entries.get(path)?.push({ seq, data });
+    notifyListeners(listenersByPath, path);
+    return formatOffset(seq);
+  });
+
   const readEvents = Effect.fn("EventStreamStore.readInMemoryEvents")(function* (
     path: string,
     opts?: { readonly offset?: string | undefined; readonly limit?: number | undefined },
@@ -393,6 +532,7 @@ export const makeInMemoryEventStreamStore = (): EventStreamStore => {
   return {
     createStream,
     appendEvent,
+    appendEventOnce,
     readEvents,
     closeStream,
     getStreamMeta,

@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import {
   type EventStreamError,
   type EventStreamStore,
+  EventStorageFailed,
   parseOffset,
   runStreamPath,
 } from "./EventStreamStore.ts";
@@ -35,6 +36,16 @@ export interface StartRunInput extends CreateRunInput {
 
 export interface ExecuteRunInput extends CreateRunInput {
   readonly pi: PiRuntimeInterface;
+}
+
+export interface ExecuteRunAttemptInput extends ExecuteRunInput {}
+
+export interface ExecuteRunAttemptResult {
+  readonly terminalEvent: RunEvent;
+  readonly durationMs: number;
+  readonly isError: boolean;
+  readonly result?: unknown;
+  readonly error?: { readonly message: string } | undefined;
 }
 
 export const createRun = Effect.fn("AgentRunLifecycle.createRun")(function* (
@@ -96,9 +107,30 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
   store: EventStreamStore,
   input: ExecuteRunInput,
 ): Effect.fn.Return<void, EventStreamError> {
+  const result = yield* executeRunAttempt(store, input);
+  const streamPath = runStreamPath(input.runId);
+  yield* store.appendEvent(streamPath, result.terminalEvent).pipe(Effect.asVoid);
+  yield* store
+    .closeStream(streamPath)
+    .pipe(Effect.catch((error) => Effect.logError("agent run stream close failed", { error })));
+});
+
+export const executeRunAttempt = Effect.fn("AgentRunLifecycle.executeRunAttempt")(function* (
+  store: EventStreamStore,
+  input: ExecuteRunAttemptInput,
+): Effect.fn.Return<ExecuteRunAttemptResult, EventStreamError> {
   const streamPath = runStreamPath(input.runId);
   const meta = yield* store.getStreamMeta(streamPath);
-  if (meta === null || meta.closed) return;
+  if (meta === null)
+    return yield* new EventStorageFailed({
+      operation: "execute agent run attempt",
+      cause: new Error(`Agent run stream ${streamPath} does not exist.`),
+    });
+  if (meta.closed)
+    return yield* new EventStorageFailed({
+      operation: "execute agent run attempt",
+      cause: new Error(`Agent run stream ${streamPath} is closed.`),
+    });
 
   let eventIndex = (yield* parseOffset(meta.nextOffset)) + 1;
   const startedAtMs = Date.now();
@@ -127,11 +159,7 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
 
   const fanout = subscribeRunFanout(store, streamPath, subscribers);
 
-  const closeStream = store
-    .closeStream(streamPath)
-    .pipe(Effect.catch((error) => Effect.logError("agent run stream close failed", { error })));
-
-  yield* AgentRunSession.execute({
+  return yield* AgentRunSession.execute({
     runId: input.runId,
     input: input.input,
     streamFn: input.pi.streamFn,
@@ -143,21 +171,14 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
           .flush()
           .pipe(
             Effect.flatMap(() =>
-              appendFailedRunEnd(
-                store,
-                streamPath,
-                input.runId,
-                eventIndex++,
-                startedAtMs,
-                error.message,
-              ),
+              makeFailedRunEnd(input.runId, eventIndex++, startedAtMs, error.message),
             ),
           ),
       onSuccess: (result) =>
         Effect.gen(function* () {
           yield* fanout.flush();
           const timestamp = DateTime.formatIso(yield* DateTime.now);
-          yield* store.appendEvent(streamPath, {
+          const terminalEvent = {
             v: 3,
             type: "run_end",
             runId: input.runId,
@@ -169,7 +190,13 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
               assistantText: result.assistantText,
               messageCount: result.messages.length,
             },
-          });
+          } satisfies RunEvent;
+          return {
+            terminalEvent,
+            durationMs: terminalEvent.durationMs as number,
+            isError: false,
+            result: terminalEvent.result,
+          } satisfies ExecuteRunAttemptResult;
         }),
     }),
     Effect.onError(() =>
@@ -179,35 +206,19 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
             error,
           }),
         ),
-        Effect.flatMap(() =>
-          appendFailedRunEnd(
-            store,
-            streamPath,
-            input.runId,
-            eventIndex++,
-            startedAtMs,
-            "Agent run execution failed.",
-          ),
-        ),
-        Effect.catch((error) =>
-          Effect.logError("agent run terminal failure event append failed", { error }),
-        ),
       ),
     ),
-    Effect.ensuring(closeStream),
   );
 });
 
-const appendFailedRunEnd = Effect.fn("AgentRunLifecycle.appendFailedRunEnd")(function* (
-  store: EventStreamStore,
-  streamPath: string,
+const makeFailedRunEnd = Effect.fn("AgentRunLifecycle.makeFailedRunEnd")(function* (
   runId: string,
   eventIndex: number,
   startedAtMs: number,
   message: string,
-): Effect.fn.Return<void, EventStreamError> {
+): Effect.fn.Return<ExecuteRunAttemptResult> {
   const timestamp = DateTime.formatIso(yield* DateTime.now);
-  yield* store.appendEvent(streamPath, {
+  const terminalEvent = {
     v: 3,
     type: "run_end",
     runId,
@@ -217,7 +228,14 @@ const appendFailedRunEnd = Effect.fn("AgentRunLifecycle.appendFailedRunEnd")(fun
     result: null,
     durationMs: Math.max(0, Date.now() - startedAtMs),
     error: { message },
-  });
+  } satisfies RunEvent;
+  return {
+    terminalEvent,
+    durationMs: terminalEvent.durationMs as number,
+    isError: true,
+    result: null,
+    error: { message },
+  } satisfies ExecuteRunAttemptResult;
 });
 
 const subscribeRunFanout = (

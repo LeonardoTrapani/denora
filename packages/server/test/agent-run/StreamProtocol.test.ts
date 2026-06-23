@@ -28,6 +28,18 @@ const parseSseFrames = (body: string): Array<{ event: string; data: string }> =>
 
 const countOccurrences = (input: string, needle: string): number => input.split(needle).length - 1;
 
+const runEvent = (
+  runId: string,
+  eventIndex: number,
+  event: Record<string, unknown> = { type: "agent_start" },
+) => ({
+  v: 3,
+  runId,
+  eventIndex,
+  timestamp: `2026-01-01T00:00:${String(eventIndex).padStart(2, "0")}.000Z`,
+  ...event,
+});
+
 const collectSseFor = (
   response: Response,
   controller: AbortController,
@@ -63,10 +75,13 @@ describe("StreamProtocol", () => {
     Effect.gen(function* () {
       const store = makeInMemoryEventStreamStore();
       yield* store.createStream("runs/run_protocol");
-      const offset = yield* store.appendEvent("runs/run_protocol", {
+      const start = runEvent("run_protocol", 0, {
         type: "run_start",
+        workflowName: "denora.agent-run",
+        startedAt: "2026-01-01T00:00:00.000Z",
         input: null,
       });
+      const offset = yield* store.appendEvent("runs/run_protocol", start);
 
       const head = yield* handleStreamHead(store, "runs/run_protocol");
       assert.strictEqual(head.status, 200);
@@ -79,9 +94,7 @@ describe("StreamProtocol", () => {
       });
       assert.strictEqual(response.status, 200);
       assert.strictEqual(response.headers.get("Stream-Next-Offset"), offset);
-      assert.deepStrictEqual(yield* Effect.promise(() => response.json()), [
-        { type: "run_start", input: null },
-      ]);
+      assert.deepStrictEqual(yield* Effect.promise(() => response.json()), [start]);
     }),
   );
 
@@ -89,7 +102,7 @@ describe("StreamProtocol", () => {
     Effect.gen(function* () {
       const store = makeInMemoryEventStreamStore();
       yield* store.createStream("runs/run_etag");
-      yield* store.appendEvent("runs/run_etag", { type: "event" });
+      yield* store.appendEvent("runs/run_etag", runEvent("run_etag", 0));
 
       const first = yield* handleStreamRead({
         store,
@@ -133,9 +146,18 @@ describe("StreamProtocol", () => {
       yield* store.createStream("runs/run_tail_long_poll");
       yield* store.createStream("runs/run_tail_sse");
       for (let index = 0; index < 5; index++) {
-        yield* store.appendEvent("runs/run_tail_catchup", { index });
-        yield* store.appendEvent("runs/run_tail_long_poll", { index });
-        yield* store.appendEvent("runs/run_tail_sse", { index });
+        yield* store.appendEvent(
+          "runs/run_tail_catchup",
+          runEvent("run_tail_catchup", index, { type: "text_delta", text: String(index), index }),
+        );
+        yield* store.appendEvent(
+          "runs/run_tail_long_poll",
+          runEvent("run_tail_long_poll", index, { type: "text_delta", text: String(index), index }),
+        );
+        yield* store.appendEvent(
+          "runs/run_tail_sse",
+          runEvent("run_tail_sse", index, { type: "text_delta", text: String(index), index }),
+        );
       }
       yield* store.closeStream("runs/run_tail_sse");
 
@@ -160,18 +182,24 @@ describe("StreamProtocol", () => {
       const frames = parseSseFrames(yield* Effect.promise(() => sse.text()));
       const dataFrame = frames.find((frame) => frame.event === "data");
 
-      assert.deepStrictEqual(yield* Effect.promise(() => catchUp.json()), [
-        { index: 3 },
-        { index: 4 },
-      ]);
-      assert.deepStrictEqual(yield* Effect.promise(() => longPoll.json()), [
-        { index: 3 },
-        { index: 4 },
-      ]);
-      assert.deepStrictEqual(dataFrame === undefined ? undefined : JSON.parse(dataFrame.data), [
-        { index: 3 },
-        { index: 4 },
-      ]);
+      assert.deepStrictEqual(
+        ((yield* Effect.promise(() => catchUp.json())) as Array<{ index: number }>).map(
+          (event) => event.index,
+        ),
+        [3, 4],
+      );
+      assert.deepStrictEqual(
+        ((yield* Effect.promise(() => longPoll.json())) as Array<{ index: number }>).map(
+          (event) => event.index,
+        ),
+        [3, 4],
+      );
+      assert.deepStrictEqual(
+        (JSON.parse(dataFrame?.data ?? "[]") as Array<{ index: number }>).map(
+          (event) => event.index,
+        ),
+        [3, 4],
+      );
     }),
   );
 
@@ -179,7 +207,7 @@ describe("StreamProtocol", () => {
     Effect.gen(function* () {
       const store = makeInMemoryEventStreamStore();
       yield* store.createStream("runs/run_now_catchup");
-      yield* store.appendEvent("runs/run_now_catchup", { type: "old" });
+      yield* store.appendEvent("runs/run_now_catchup", runEvent("run_now_catchup", 0));
 
       const catchUp = yield* handleStreamRead({
         store,
@@ -196,7 +224,7 @@ describe("StreamProtocol", () => {
             const meta = yield* store.getStreamMeta(path);
             if (!appendedLongPollEvent && path === "runs/run_now_long_poll") {
               appendedLongPollEvent = true;
-              yield* store.appendEvent(path, { type: "new" });
+              yield* store.appendEvent(path, runEvent("run_now_long_poll", 0));
             }
             return meta;
           }),
@@ -211,7 +239,10 @@ describe("StreamProtocol", () => {
       assert.strictEqual(catchUp.headers.get("etag"), null);
       assert.deepStrictEqual(yield* Effect.promise(() => catchUp.json()), []);
       assert.strictEqual(longPoll.status, 200);
-      assert.deepStrictEqual(yield* Effect.promise(() => longPoll.json()), [{ type: "new" }]);
+      assert.strictEqual(
+        ((yield* Effect.promise(() => longPoll.json())) as Array<{ type: string }>)[0]?.type,
+        "agent_start",
+      );
     }),
   );
 
@@ -219,10 +250,13 @@ describe("StreamProtocol", () => {
     Effect.gen(function* () {
       const store = makeInMemoryEventStreamStore();
       yield* store.createStream("runs/run_sse");
-      const offset = yield* store.appendEvent("runs/run_sse", {
+      const start = runEvent("run_sse", 0, {
         type: "run_start",
+        workflowName: "denora.agent-run",
+        startedAt: "2026-01-01T00:00:00.000Z",
         input: null,
       });
+      const offset = yield* store.appendEvent("runs/run_sse", start);
       yield* store.closeStream("runs/run_sse");
 
       const response = yield* handleStreamRead({
@@ -236,7 +270,7 @@ describe("StreamProtocol", () => {
       assert.strictEqual(response.headers.get("content-type"), "text/event-stream");
       const body = yield* Effect.promise(() => response.text());
       assert.include(body, "event: data\n");
-      assert.include(body, 'data:[{"type":"run_start","input":null}]\n\n');
+      assert.include(body, `data:${JSON.stringify([start])}\n\n`);
       assert.include(body, "event: control\n");
       assert.include(body, `data:{"streamNextOffset":"${offset}","streamClosed":true}\n\n`);
       assert.strictEqual(countOccurrences(body, "event: control\n"), 1);
@@ -381,7 +415,14 @@ describe("StreamProtocol", () => {
       const base = makeInMemoryEventStreamStore();
       yield* base.createStream("runs/run_sse_backpressure");
       for (let index = 0; index < 250; index++) {
-        yield* base.appendEvent("runs/run_sse_backpressure", { index });
+        yield* base.appendEvent(
+          "runs/run_sse_backpressure",
+          runEvent("run_sse_backpressure", index, {
+            type: "text_delta",
+            text: String(index),
+            index,
+          }),
+        );
       }
       let readCount = 0;
       const store = {

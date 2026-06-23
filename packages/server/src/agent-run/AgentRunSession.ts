@@ -4,7 +4,7 @@ import {
   type AgentMessage,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { redactRunEventImages, type RunEvent, toTurnMessage } from "./RunEventContract.ts";
@@ -48,6 +48,7 @@ class AgentRunSession {
   private readonly eventCallback: RunEventCallback;
   private readonly input: ExecuteInput;
   private activeTurnId: string | undefined;
+  private activeTurnStartedAt: number | undefined;
   private readonly activeToolCalls = new Map<
     string,
     { readonly startedAt: number; readonly toolName: string }
@@ -100,6 +101,7 @@ class AgentRunSession {
         break;
       case "turn_start":
         this.activeTurnId ??= generateTurnId();
+        this.activeTurnStartedAt = Date.now();
         await this.emit({ type: "turn_start", turnId: this.activeTurnId, purpose: "agent" });
         break;
       case "message_start": {
@@ -137,7 +139,11 @@ class AgentRunSession {
             type: "turn",
             turnId,
             purpose: "agent",
-            response: { output: toTurnMessage(event.message) },
+            durationMs: this.turnDurationMs(),
+            request: requestInfoFrom(event.message),
+            response: responseInfoFrom(event.message),
+            isError:
+              event.message.stopReason === "error" || event.message.errorMessage !== undefined,
           });
         }
         await this.emit({ type: "message_end", message: event.message, turnId });
@@ -179,11 +185,13 @@ class AgentRunSession {
           toolResults: event.toolResults,
         });
         this.activeTurnId = undefined;
+        this.activeTurnStartedAt = undefined;
         break;
       }
       case "agent_end":
         await this.emit({ type: "agent_end", messages: event.messages });
         this.activeTurnId = undefined;
+        this.activeTurnStartedAt = undefined;
         break;
     }
   }
@@ -198,7 +206,29 @@ class AgentRunSession {
     };
     return Effect.runPromise(this.eventCallback(decorated));
   }
+
+  private turnDurationMs(): number {
+    return this.activeTurnStartedAt === undefined
+      ? 0
+      : Math.max(0, Date.now() - this.activeTurnStartedAt);
+  }
 }
+
+const requestInfoFrom = (message: AssistantMessage): Record<string, unknown> => ({
+  providerId: message.provider,
+  providerName: message.provider,
+  requestedModel: message.model,
+  api: message.api,
+});
+
+const responseInfoFrom = (message: AssistantMessage): Record<string, unknown> => ({
+  ...(message.responseId === undefined ? {} : { responseId: message.responseId }),
+  ...(message.responseModel === undefined ? {} : { responseModel: message.responseModel }),
+  output: toTurnMessage(message),
+  usage: message.usage,
+  finishReason: message.stopReason,
+  ...(message.errorMessage === undefined ? {} : { error: { message: message.errorMessage } }),
+});
 
 const DEFAULT_MODEL_ID = "@cf/meta/llama-3.1-8b-instruct";
 

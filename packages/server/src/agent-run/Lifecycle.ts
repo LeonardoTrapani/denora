@@ -7,8 +7,14 @@ import {
   runStreamPath,
 } from "./EventStreamStore.ts";
 import { AgentRunSession, type RunEvent } from "./AgentRunSession.ts";
-import { isBufferedRunEvent, isStreamExcludedRunEvent } from "./RunEventContract.ts";
+import {
+  isBufferedRunEvent,
+  isStreamExcludedRunEvent,
+  redactRunEventImages,
+} from "./RunEventContract.ts";
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
+
+const BUFFERED_EVENT_FLUSH_INTERVAL_MS = 3_000;
 
 export interface CreateRunInput {
   readonly runId: string;
@@ -53,15 +59,19 @@ export const createRun = Effect.fn("AgentRunLifecycle.createRun")(function* (
 
   yield* store.createStream(streamPath);
   const timestamp = DateTime.formatIso(yield* DateTime.now);
-  const offset = yield* store.appendEvent(streamPath, {
-    v: 1,
-    type: "run_start",
-    runId: input.runId,
-    workflowName: "denora.agent-run",
-    startedAt: timestamp,
-    timestamp,
-    eventIndex: 0,
-  });
+  const offset = yield* store.appendEvent(
+    streamPath,
+    redactRunEventImages({
+      v: 3,
+      type: "run_start",
+      runId: input.runId,
+      workflowName: "denora.agent-run",
+      startedAt: timestamp,
+      input: input.input,
+      timestamp,
+      eventIndex: 0,
+    }),
+  );
 
   return { runId: input.runId, streamPath, offset, created: true };
 });
@@ -111,43 +121,31 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
   if (meta === null || meta.closed) return;
 
   let eventIndex = (yield* parseOffset(meta.nextOffset)) + 1;
-  let bufferedEvents: RunEvent[] = [];
+  const startedAtMs = Date.now();
+  const subscribers = new Set<(event: RunEvent) => Effect.Effect<void, EventStreamError>>();
 
-  const appendDecoratedRunEvent = Effect.fn("AgentRunLifecycle.appendDecoratedRunEvent")(function* (
+  const decorateRunEvent = Effect.fn("AgentRunLifecycle.decorateRunEvent")(function* (
     event: RunEvent,
-  ): Effect.fn.Return<void, EventStreamError> {
+  ): Effect.fn.Return<RunEvent> {
     const timestamp = DateTime.formatIso(yield* DateTime.now);
-    yield* store.appendEvent(streamPath, {
+    return {
       ...event,
       runId: input.runId,
-      v: 1,
+      v: 3,
       eventIndex: eventIndex++,
       timestamp,
-    });
+    };
   });
 
-  const flushBufferedRunEvents = Effect.fn("AgentRunLifecycle.flushBufferedRunEvents")(
-    function* (): Effect.fn.Return<void, EventStreamError> {
-      if (bufferedEvents.length === 0) return;
-      const batch = bufferedEvents;
-      bufferedEvents = [];
-      for (const event of batch) {
-        yield* appendDecoratedRunEvent(event);
-      }
-    },
-  );
-
-  const appendRunEvent = Effect.fn("AgentRunLifecycle.appendRunEvent")(function* (
+  const emitRunEvent = Effect.fn("AgentRunLifecycle.emitRunEvent")(function* (
     event: RunEvent,
   ): Effect.fn.Return<void, EventStreamError> {
     if (isStreamExcludedRunEvent(event)) return;
-    if (isBufferedRunEvent(event)) {
-      bufferedEvents.push(event);
-      return;
-    }
-    yield* flushBufferedRunEvents();
-    yield* appendDecoratedRunEvent(event);
+    const decorated = yield* decorateRunEvent(event);
+    for (const subscriber of subscribers) yield* subscriber(decorated);
   });
+
+  const fanout = subscribeRunFanout(store, streamPath, subscribers);
 
   const closeStream = store
     .closeStream(streamPath)
@@ -157,26 +155,36 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
     runId: input.runId,
     input: input.input,
     streamFn: input.pi.streamFn,
-    onAgentEvent: appendRunEvent,
+    onAgentEvent: emitRunEvent,
   }).pipe(
     Effect.matchEffect({
       onFailure: (error) =>
-        flushBufferedRunEvents().pipe(
-          Effect.flatMap(() =>
-            appendFailedRunEnd(store, streamPath, input.runId, eventIndex++, error.message),
+        fanout
+          .flush()
+          .pipe(
+            Effect.flatMap(() =>
+              appendFailedRunEnd(
+                store,
+                streamPath,
+                input.runId,
+                eventIndex++,
+                startedAtMs,
+                error.message,
+              ),
+            ),
           ),
-        ),
       onSuccess: (result) =>
         Effect.gen(function* () {
-          yield* flushBufferedRunEvents();
+          yield* fanout.flush();
           const timestamp = DateTime.formatIso(yield* DateTime.now);
           yield* store.appendEvent(streamPath, {
-            v: 1,
+            v: 3,
             type: "run_end",
             runId: input.runId,
             eventIndex: eventIndex++,
             timestamp,
-            outcome: "completed",
+            isError: false,
+            durationMs: Math.max(0, Date.now() - startedAtMs),
             result: {
               assistantText: result.assistantText,
               messageCount: result.messages.length,
@@ -185,7 +193,7 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
         }),
     }),
     Effect.onError(() =>
-      flushBufferedRunEvents().pipe(
+      fanout.flush().pipe(
         Effect.catch((error) =>
           Effect.logError("agent run buffered event flush before terminal failure failed", {
             error,
@@ -197,6 +205,7 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
             streamPath,
             input.runId,
             eventIndex++,
+            startedAtMs,
             "Agent run execution failed.",
           ),
         ),
@@ -214,18 +223,104 @@ const appendFailedRunEnd = Effect.fn("AgentRunLifecycle.appendFailedRunEnd")(fun
   streamPath: string,
   runId: string,
   eventIndex: number,
+  startedAtMs: number,
   message: string,
 ): Effect.fn.Return<void, EventStreamError> {
   const timestamp = DateTime.formatIso(yield* DateTime.now);
   yield* store.appendEvent(streamPath, {
-    v: 1,
+    v: 3,
     type: "run_end",
     runId,
     eventIndex,
     timestamp,
-    outcome: "failed",
+    isError: true,
+    result: null,
+    durationMs: Math.max(0, Date.now() - startedAtMs),
     error: { message },
   });
 });
+
+const subscribeRunFanout = (
+  store: EventStreamStore,
+  streamPath: string,
+  subscribers: Set<(event: RunEvent) => Effect.Effect<void, EventStreamError>>,
+): { readonly flush: () => Effect.Effect<void, EventStreamError> } => {
+  let bufferedEvents: RunEvent[] = [];
+  let bufferTimer: ReturnType<typeof setTimeout> | undefined;
+  let timerFlush: Promise<void> | undefined;
+  let timerFailure: EventStreamError | undefined;
+  let active = true;
+
+  const clearBufferTimer = () => {
+    if (bufferTimer === undefined) return;
+    clearTimeout(bufferTimer);
+    bufferTimer = undefined;
+  };
+
+  const flushBufferedEventsNow = Effect.fn("AgentRunLifecycle.flushBufferedEventsNow")(
+    function* (): Effect.fn.Return<void, EventStreamError> {
+      clearBufferTimer();
+      if (bufferedEvents.length === 0) return;
+      const batch = bufferedEvents;
+      bufferedEvents = [];
+      for (const event of batch) yield* store.appendEvent(streamPath, event).pipe(Effect.asVoid);
+    },
+  );
+
+  const scheduleBufferFlush = () => {
+    if (bufferTimer !== undefined || !active) return;
+    bufferTimer = setTimeout(() => {
+      bufferTimer = undefined;
+      timerFlush = Effect.runPromise(flushBufferedEventsNow())
+        .catch((error: unknown) => {
+          if (isEventStreamError(error)) timerFailure = error;
+          console.error("[denora:event-stream] buffered appendEvent failed:", error);
+        })
+        .finally(() => {
+          timerFlush = undefined;
+          if (active && bufferedEvents.length > 0 && timerFailure === undefined)
+            scheduleBufferFlush();
+        });
+    }, BUFFERED_EVENT_FLUSH_INTERVAL_MS);
+  };
+
+  const appendEvent = Effect.fn("AgentRunLifecycle.fanoutAppendEvent")(function* (
+    event: RunEvent,
+  ): Effect.fn.Return<void, EventStreamError> {
+    if (isBufferedRunEvent(event)) {
+      bufferedEvents.push(event);
+      scheduleBufferFlush();
+      return;
+    }
+    yield* flushBufferedEvents(false);
+    yield* store.appendEvent(streamPath, event).pipe(Effect.asVoid);
+  });
+
+  const flushBufferedEvents = Effect.fn("AgentRunLifecycle.flushBufferedEvents")(function* (
+    final: boolean,
+  ): Effect.fn.Return<void, EventStreamError> {
+    if (final) active = false;
+    clearBufferTimer();
+    const inFlight = timerFlush;
+    if (inFlight !== undefined) yield* Effect.promise(() => inFlight);
+    if (timerFailure !== undefined) return yield* timerFailure;
+    yield* flushBufferedEventsNow();
+  });
+
+  subscribers.add(appendEvent);
+
+  return {
+    flush: () =>
+      flushBufferedEvents(true).pipe(
+        Effect.ensuring(Effect.sync(() => subscribers.delete(appendEvent))),
+      ),
+  };
+};
+
+const isEventStreamError = (error: unknown): error is EventStreamError =>
+  typeof error === "object" &&
+  error !== null &&
+  "_tag" in error &&
+  typeof (error as { readonly _tag?: unknown })._tag === "string";
 
 export * as AgentRunLifecycle from "./Lifecycle.ts";

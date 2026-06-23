@@ -59,6 +59,8 @@ describe("AgentRunLifecycle", () => {
       const replay = yield* store.readEvents(streamPath, { offset: "-1" });
       const events = replay.events.map((event) => event.data as Record<string, unknown>);
       assert.strictEqual(events[0]?.type, "run_start");
+      assert.strictEqual(events[0]?.v, 3);
+      assert.deepStrictEqual(events[0]?.input, { prompt: "hello" });
       assert.includeMembers(
         events.map((event) => event.type),
         ["agent_start", "text_delta", "turn", "agent_end", "run_end"],
@@ -76,7 +78,9 @@ describe("AgentRunLifecycle", () => {
         events.map((event) => event.eventIndex),
         events.map((_, index) => index),
       );
-      assert.strictEqual(events.find((event) => event.type === "run_end")?.outcome, "completed");
+      const runEnd = events.find((event) => event.type === "run_end");
+      assert.strictEqual(runEnd?.isError, false);
+      assert.isNumber(runEnd?.durationMs);
       assert.strictEqual(modelCalls, 1);
 
       const duplicate = yield* AgentRunLifecycle.startRun(store, {
@@ -86,6 +90,73 @@ describe("AgentRunLifecycle", () => {
       });
       assert.isFalse(duplicate.created);
       assert.strictEqual(modelCalls, 1);
+    }),
+  );
+
+  it.effect("flushes buffered streaming deltas while a run is still open", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      const runId = `run_${crypto.randomUUID()}`;
+      const streamPath = runStreamPath(runId);
+      let stream: ReturnType<typeof createAssistantMessageEventStream> | undefined;
+      const message: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "still streaming" }],
+        api: "openai-completions",
+        provider: "cloudflare-workers-ai",
+        model: "@cf/meta/llama-3.1-8b-instruct",
+        usage: emptyUsage,
+        stopReason: "stop",
+        timestamp: Date.now(),
+      };
+      const pi: PiRuntimeInterface = {
+        streamFn: (() => {
+          stream = createAssistantMessageEventStream();
+          return stream;
+        }) satisfies StreamFn,
+      };
+
+      yield* AgentRunLifecycle.startRun(store, {
+        runId,
+        input: { prompt: "hello" },
+        scheduleExecution: () =>
+          AgentRunLifecycle.executeRun(store, { runId, input: { prompt: "hello" }, pi }).pipe(
+            Effect.forkDetach({ startImmediately: true }),
+            Effect.asVoid,
+          ),
+      });
+
+      yield* waitForStream(() => stream);
+      stream?.push({ type: "start", partial: { ...message, content: [] } });
+      stream?.push({ type: "text_start", contentIndex: 0, partial: message });
+      stream?.push({
+        type: "text_delta",
+        contentIndex: 0,
+        delta: "still streaming",
+        partial: message,
+      });
+
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 3_100)));
+      const replay = yield* store.readEvents(streamPath, { offset: "-1" });
+      const openEvents = replay.events.map((event) => event.data as Record<string, unknown>);
+      assert.include(
+        openEvents.map((event) => event.type),
+        "text_delta",
+      );
+      assert.notInclude(
+        openEvents.map((event) => event.type),
+        "run_end",
+      );
+
+      stream?.push({
+        type: "text_end",
+        contentIndex: 0,
+        content: "still streaming",
+        partial: message,
+      });
+      stream?.push({ type: "done", reason: "stop", message });
+      stream?.end();
+      yield* waitForClosed(store, streamPath);
     }),
   );
 });
@@ -98,6 +169,16 @@ const waitForClosed = (store: ReturnType<typeof makeInMemoryEventStreamStore>, p
       yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
     }
     throw new Error(`Timed out waiting for stream ${path} to close.`);
+  });
+
+const waitForStream = <A>(get: () => A | undefined) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const value = get();
+      if (value !== undefined) return value;
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+    throw new Error("Timed out waiting for stream.");
   });
 
 const emptyUsage = {

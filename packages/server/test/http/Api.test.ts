@@ -132,7 +132,7 @@ describe("Api http surface", () => {
             HttpClientRequest.bodyJsonUnsafe({ runId, input: { prompt: "hello" } }),
           ),
         );
-        assert.strictEqual(created.status, 200);
+        assert.strictEqual(created.status, 202);
         const createdBody = (yield* created.json) as {
           readonly runId: string;
           readonly streamUrl: string;
@@ -142,12 +142,16 @@ describe("Api http surface", () => {
         assert.strictEqual(createdBody.runId, runId);
         assert.strictEqual(createdBody.streamPath, `runs/${runId}`);
         assert.strictEqual(createdBody.offset, "0000000000000000_0000000000000000");
+        assert.strictEqual(created.headers.location, createdBody.streamUrl);
+        assert.strictEqual(created.headers["stream-next-offset"], createdBody.offset);
 
         const { response: replay, events } = yield* waitForRunReplay(client, runId);
         assert.strictEqual(replay.status, 200);
         assert.strictEqual(replay.headers["stream-closed"], "true");
         assert.strictEqual(events[0]?.type, "run_start");
         assert.strictEqual(events[0]?.runId, runId);
+        assert.strictEqual(events[0]?.v, 3);
+        assert.deepStrictEqual(events[0]?.input, { prompt: "hello" });
         assert.includeMembers(
           events.map((event) => event.type),
           [
@@ -167,7 +171,8 @@ describe("Api http surface", () => {
         assert.strictEqual(textDelta?.text, "hello");
         const runEnd = events.find((event) => event.type === "run_end");
         assert.strictEqual(runEnd?.runId, runId);
-        assert.strictEqual(runEnd?.outcome, "completed");
+        assert.strictEqual(runEnd?.isError, false);
+        assert.isNumber(runEnd?.durationMs);
       }).pipe(Effect.provide(appLayer())),
     );
 
@@ -182,7 +187,7 @@ describe("Api http surface", () => {
             HttpClientRequest.bodyJsonUnsafe({ runId, input: { prompt: "hello" } }),
           ),
         );
-        assert.strictEqual(created.status, 200);
+        assert.strictEqual(created.status, 202);
         yield* waitForRunReplay(client, runId);
 
         const head = yield* client.execute(
@@ -227,7 +232,7 @@ describe("Api http surface", () => {
             }),
           ),
         );
-        assert.strictEqual(created.status, 200);
+        assert.strictEqual(created.status, 202);
 
         const { events } = yield* waitForRunReplay(client, runId);
         const replayJson = JSON.stringify(events);
@@ -235,7 +240,7 @@ describe("Api http surface", () => {
 
         assert.include(JSON.stringify(fake.calls[0]?.payload), IMAGE_BYTES);
         assert.notInclude(replayJson, IMAGE_BYTES);
-        assert.notProperty(runStart ?? {}, "input");
+        assert.property(runStart ?? {}, "input");
       }).pipe(Effect.provide(appLayer(fake)));
     });
 

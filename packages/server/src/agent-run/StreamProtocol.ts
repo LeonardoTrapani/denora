@@ -18,12 +18,14 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import {
+  EventStorageFailed,
   type EventStreamError,
   type EventStreamReadResult,
   type EventStreamStore,
   formatOffset,
   parseOffset,
 } from "./EventStreamStore.ts";
+import { PublicRunEvent } from "./RunEventContract.ts";
 
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 30_000;
 const DEFAULT_SSE_HEARTBEAT_MS = 15_000;
@@ -189,7 +191,7 @@ export const handleStreamRead = Effect.fn("StreamProtocol.handleStreamRead")(fun
     );
   }
 
-  return catchUpResponse(request, path, readOffset, result);
+  return yield* catchUpResponse(request, path, readOffset, result);
 });
 
 const resolveReadOffset = Effect.fn("StreamProtocol.resolveReadOffset")(function* (
@@ -335,9 +337,16 @@ const sseFrames = (
             waitingForWake = false;
           }
 
-          const result = yield* store.readEvents(path, { offset: currentOffset });
+          const result = yield* store
+            .readEvents(path, { offset: currentOffset })
+            .pipe(
+              Effect.tapError((error) =>
+                Effect.logError(`[denora] SSE stream read failed for ${path}`, { error, path }),
+              ),
+            );
           if (result.events.length > 0) {
-            frames.push(`event: data\n${encodeSseData(JSON.stringify(publicEventData(result)))}`);
+            const data = yield* publicEventData(path, result);
+            frames.push(`event: data\n${encodeSseData(JSON.stringify(data))}`);
           }
 
           const streamClosed = result.closed && result.upToDate;
@@ -434,12 +443,12 @@ const validateReadParams = Effect.fn("StreamProtocol.validateReadParams")(functi
   }
 });
 
-const catchUpResponse = (
+const catchUpResponse = Effect.fn("StreamProtocol.catchUpResponse")(function* (
   request: Request,
   path: string,
   offsetParam: string,
   result: EventStreamReadResult,
-): Response => {
+): Effect.fn.Return<Response, EventStorageFailed> {
   const isClosed = result.closed && result.upToDate;
   const etag =
     offsetParam === "now"
@@ -448,6 +457,7 @@ const catchUpResponse = (
   if (etag !== undefined && request.headers.get("if-none-match") === etag) {
     return new Response(null, { status: 304, headers: { etag, ...SECURITY_HEADERS } });
   }
+  const data = yield* publicEventData(path, result);
   const headers: Record<string, string> = {
     "content-type": "application/json",
     [STREAM_NEXT_OFFSET]: result.nextOffset,
@@ -457,15 +467,15 @@ const catchUpResponse = (
   if (etag !== undefined) headers.etag = etag;
   if (result.upToDate) headers[STREAM_UP_TO_DATE] = "true";
   if (isClosed) headers[STREAM_CLOSED] = "true";
-  return new Response(JSON.stringify(publicEventData(result)), { status: 200, headers });
-};
+  return new Response(JSON.stringify(data), { status: 200, headers });
+});
 
 const longPollDataResponse = Effect.fn("StreamProtocol.longPollDataResponse")(function* (
   result: EventStreamReadResult,
   path: string,
   offsetParam: string,
   clientCursor: string | undefined,
-): Effect.fn.Return<Response> {
+): Effect.fn.Return<Response, EventStorageFailed> {
   const isClosed = result.closed && result.upToDate;
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -478,7 +488,8 @@ const longPollDataResponse = Effect.fn("StreamProtocol.longPollDataResponse")(fu
   if (isClosed) headers[STREAM_CLOSED] = "true";
   if (offsetParam !== "now")
     headers.etag = generateETag(path, offsetParam, result.nextOffset, isClosed);
-  return new Response(JSON.stringify(publicEventData(result)), { status: 200, headers });
+  const data = yield* publicEventData(path, result);
+  return new Response(JSON.stringify(data), { status: 200, headers });
 });
 
 const longPollEmptyResponse = Effect.fn("StreamProtocol.longPollEmptyResponse")(function* (
@@ -496,8 +507,29 @@ const longPollEmptyResponse = Effect.fn("StreamProtocol.longPollEmptyResponse")(
   return new Response(null, { status: 204, headers });
 });
 
-const publicEventData = (result: EventStreamReadResult): ReadonlyArray<unknown> =>
-  result.events.map((event) => event.data);
+const publicEventData = Effect.fn("StreamProtocol.publicEventData")(function* (
+  path: string,
+  result: EventStreamReadResult,
+): Effect.fn.Return<ReadonlyArray<unknown>, EventStorageFailed> {
+  const decode = Schema.decodeUnknownEffect(PublicRunEvent);
+  return yield* Effect.forEach(result.events, (event) =>
+    decode(event.data).pipe(
+      Effect.catch((cause) =>
+        Effect.gen(function* () {
+          yield* Effect.logError("invalid public run stream event", {
+            path,
+            offset: event.offset,
+            cause,
+          });
+          return yield* new EventStorageFailed({
+            operation: "validate public stream event",
+            cause,
+          });
+        }),
+      ),
+    ),
+  );
+});
 
 const invalidRequestResponse = (error: StreamRequestValidationError): Response =>
   new Response(JSON.stringify(invalidRequestBody(error)), {

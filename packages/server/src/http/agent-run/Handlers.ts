@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
 import { AgentRuns } from "../../agent-run/AgentRuns.ts";
 import { DenoraApi } from "../Api.ts";
@@ -19,12 +20,22 @@ export const layer = HttpApiBuilder.group(DenoraApi, "AgentRun", (handlers) =>
         userId: user.id,
       });
 
-      return new CreateAgentRunResponse({
+      const body = new CreateAgentRunResponse({
         runId: created.runId,
         streamPath: created.streamPath,
         streamUrl: streamUrl(request, created.runId),
         offset: created.offset,
       });
+      return HttpServerResponse.fromWeb(
+        new Response(JSON.stringify(body), {
+          status: 202,
+          headers: {
+            "content-type": "application/json",
+            Location: body.streamUrl,
+            "Stream-Next-Offset": body.offset,
+          },
+        }),
+      );
     }),
   ),
 );

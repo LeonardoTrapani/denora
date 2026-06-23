@@ -1,10 +1,72 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import * as Schema from "effect/Schema";
 
 export interface RunEvent {
   readonly type: string;
   readonly [key: string]: unknown;
 }
+
+const PublicEventIndex = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const PublicRunEventRest = Schema.Record(Schema.String, Schema.Unknown);
+const publicRunEventEnvelope = {
+  v: Schema.Literal(3),
+  runId: Schema.String,
+  eventIndex: PublicEventIndex,
+  timestamp: Schema.String,
+};
+
+const PublicRunStartEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicRunEventEnvelope,
+    type: Schema.Literal("run_start"),
+    workflowName: Schema.String,
+    startedAt: Schema.String,
+    input: Schema.Unknown,
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicRunEndEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicRunEventEnvelope,
+    type: Schema.Literal("run_end"),
+    runId: Schema.String,
+    isError: Schema.Boolean,
+    durationMs: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+    result: Schema.Unknown,
+    error: Schema.optionalKey(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicRunAgentEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicRunEventEnvelope,
+    type: Schema.Literals([
+      "agent_start",
+      "agent_end",
+      "turn_start",
+      "turn_messages",
+      "message_start",
+      "message_end",
+      "text_delta",
+      "thinking_start",
+      "thinking_delta",
+      "thinking_end",
+      "tool_start",
+      "tool",
+      "turn",
+    ]),
+  }),
+  [PublicRunEventRest],
+);
+
+export const PublicRunEvent = Schema.Union([
+  PublicRunStartEvent,
+  PublicRunEndEvent,
+  PublicRunAgentEvent,
+]);
 
 type ProviderTextOrImageContent = Exclude<UserMessage["content"], string>[number];
 type ProviderContentBlock =
@@ -69,6 +131,10 @@ export const isBufferedRunEvent = (event: RunEvent): boolean =>
 
 export const redactRunEventImages = (event: RunEvent): RunEvent => {
   switch (event.type) {
+    case "run_start": {
+      const input = redactUnknownImages(event.input);
+      return input === event.input ? event : { ...event, input };
+    }
     case "message_start":
     case "message_end": {
       const message = redactMessageImages(event.message as AgentMessage | undefined);
@@ -180,6 +246,35 @@ const redactToolResultImages = (result: unknown): unknown => {
   if (!Array.isArray(content)) return result;
   const redacted = redactContentImages(content);
   return redacted === content ? result : { ...result, content: redacted };
+};
+
+const redactUnknownImages = (value: unknown): unknown => {
+  if (Array.isArray(value)) return redactArrayImages(value);
+  if (value === null || typeof value !== "object") return value;
+
+  const record = value as Record<string, unknown>;
+  if (record.type === "image" && typeof record.data === "string") {
+    return record.data === IMAGE_DATA_OMITTED ? value : { ...record, data: IMAGE_DATA_OMITTED };
+  }
+
+  let changed = false;
+  const next: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) {
+    const redacted = redactUnknownImages(child);
+    if (redacted !== child) changed = true;
+    next[key] = redacted;
+  }
+  return changed ? next : value;
+};
+
+const redactArrayImages = (values: ReadonlyArray<unknown>): ReadonlyArray<unknown> => {
+  let changed = false;
+  const redacted = values.map((value) => {
+    const result = redactUnknownImages(value);
+    if (result !== value) changed = true;
+    return result;
+  });
+  return changed ? redacted : values;
 };
 
 const redactContentImages = <T>(content: T[]): T[] => {

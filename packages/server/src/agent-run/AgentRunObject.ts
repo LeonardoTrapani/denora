@@ -5,6 +5,8 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { PiAgentModel } from "../agent-loop/PiAgentModel.ts";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
+import { Db } from "../persistence/Db.ts";
+import { AgentRunPersistence } from "./AgentRunPersistence.ts";
 import {
   type EventStreamError,
   EventStorageFailed,
@@ -38,9 +40,11 @@ export const AgentRunObjectLive = AgentRunObject.make(
       return yield* Effect.gen(function* () {
         const state = yield* Cloudflare.DurableObjectState;
         const pi = yield* PiRuntime.Service;
+        const persistence = yield* AgentRunPersistence.Service;
         // Stream storage is required for every request; initialization failure means
         // this Durable Object instance has unavailable or corrupt SQLite state.
-        const store = yield* makeSqliteEventStreamStore(state.storage.sql).pipe(Effect.orDie);
+        const sqliteStore = yield* makeSqliteEventStreamStore(state.storage.sql).pipe(Effect.orDie);
+        const store = AgentRunPersistence.mirrorEventStreamStore(sqliteStore, persistence);
 
         return {
           create: (input: CreateRunInput) =>
@@ -57,7 +61,15 @@ export const AgentRunObjectLive = AgentRunObject.make(
                 yield* Effect.logError("agent run alarm fired without a persisted run id");
                 return;
               }
-              yield* AgentRunLifecycle.executeScheduledRun(store, { runId, pi });
+              const input = yield* persistence.getRunInput(runId).pipe(
+                Effect.catch((error) =>
+                  Effect.gen(function* () {
+                    yield* Effect.logError("agent run input recovery failed", { runId, error });
+                    return undefined;
+                  }),
+                ),
+              );
+              yield* AgentRunLifecycle.executeRun(store, { runId, input, pi });
             }),
           fetch: Effect.gen(function* () {
             const request = yield* HttpServerRequest.HttpServerRequest;
@@ -77,7 +89,14 @@ export const AgentRunObjectLive = AgentRunObject.make(
             return HttpServerResponse.fromWeb(response);
           }),
         };
-      }).pipe(Effect.provide(piLayer));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            piLayer,
+            AgentRunPersistence.layer.pipe(Layer.provide(Db.hyperdriveLayer)),
+          ),
+        ),
+      );
     }).pipe(Effect.provide(Cloudflare.AiGatewayBindingLive)),
   ),
 );

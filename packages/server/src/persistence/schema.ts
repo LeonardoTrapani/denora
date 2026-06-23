@@ -1,4 +1,15 @@
-import { index, jsonb, pgEnum, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import {
+  index,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  primaryKey,
+  serial,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 
 export const records = pgTable("records", {
   id: text("id").primaryKey(),
@@ -89,6 +100,162 @@ export const agentRuns = pgTable(
     index("agent_runs_status_created_at_idx").on(table.status, table.createdAt),
     index("agent_runs_trigger_message_id_idx").on(table.triggerMessageId),
   ],
+);
+
+export const denoraRuns = pgTable(
+  "denora_runs",
+  {
+    runId: text("run_id").primaryKey(),
+    workflowName: text("workflow_name"),
+    status: text("status").notNull(),
+    startedAt: text("started_at").notNull(),
+    payload: text("payload"),
+    traceparent: text("traceparent"),
+    tracestate: text("tracestate"),
+    endedAt: text("ended_at"),
+    isError: integer("is_error"),
+    durationMs: integer("duration_ms"),
+    result: text("result"),
+    error: text("error"),
+  },
+  (table) => [
+    index("denora_runs_workflow_started_idx").on(table.workflowName, table.startedAt),
+    index("denora_runs_status_started_idx").on(table.status, table.startedAt, table.runId),
+  ],
+);
+
+export const denoraEventStreams = pgTable("denora_event_streams", {
+  path: text("path").primaryKey(),
+  nextOffset: integer("next_offset").notNull().default(0),
+  closed: integer("closed").notNull().default(0),
+});
+
+export const denoraEventStreamEntries = pgTable(
+  "denora_event_stream_entries",
+  {
+    path: text("path").notNull(),
+    seq: integer("seq").notNull(),
+    data: text("data").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.path, table.seq] })],
+);
+
+export const denoraEventStreamKeys = pgTable(
+  "denora_event_stream_keys",
+  {
+    path: text("path").notNull(),
+    key: text("key").notNull(),
+    seq: integer("seq").notNull(),
+    data: text("data").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.path, table.key] }),
+    uniqueIndex("denora_event_stream_keys_path_seq_idx").on(table.path, table.seq),
+  ],
+);
+
+export const denoraSessions = pgTable("denora_sessions", {
+  id: text("id").primaryKey(),
+  data: text("data").notNull(),
+});
+
+export const denoraSessionEntries = pgTable(
+  "denora_session_entries",
+  {
+    sessionId: text("session_id").notNull(),
+    entryId: text("entry_id").notNull(),
+    position: integer("position").notNull(),
+    data: text("data").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.sessionId, table.entryId] }),
+    index("denora_session_entries_session_position_idx").on(table.sessionId, table.position),
+  ],
+);
+
+export const denoraAgentTurnJournals = pgTable("denora_agent_turn_journals", {
+  submissionId: text("submission_id").primaryKey(),
+  sessionKey: text("session_key").notNull(),
+  kind: text("kind").notNull(),
+  attemptId: text("attempt_id").notNull(),
+  operationId: text("operation_id").notNull(),
+  turnId: text("turn_id").notNull(),
+  phase: text("phase").notNull(),
+  revision: integer("revision").notNull(),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  checkpointLeafId: text("checkpoint_leaf_id"),
+  toolRequestJson: text("tool_request_json"),
+  streamKey: text("stream_key"),
+  streamConsumedAt: integer("stream_consumed_at"),
+  committed: integer("committed").notNull().default(0),
+  committedLeafId: text("committed_leaf_id"),
+});
+
+export const denoraAgentStreamChunks = pgTable(
+  "denora_agent_stream_chunks",
+  {
+    streamKey: text("stream_key").notNull(),
+    segmentIndex: integer("segment_index").notNull(),
+    body: text("body").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.streamKey, table.segmentIndex] })],
+);
+
+export const denoraAgentSubmissions = pgTable(
+  "denora_agent_submissions",
+  {
+    sequence: serial("sequence").primaryKey(),
+    submissionId: text("submission_id").notNull(),
+    sessionKey: text("session_key").notNull(),
+    kind: text("kind").notNull(),
+    payload: text("payload").notNull(),
+    status: text("status").notNull(),
+    acceptedAt: integer("accepted_at").notNull(),
+    attemptId: text("attempt_id"),
+    inputAppliedAt: integer("input_applied_at"),
+    recoveryRequestedAt: integer("recovery_requested_at"),
+    startedAt: integer("started_at"),
+    settledAt: integer("settled_at"),
+    error: text("error"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxRetry: integer("max_retry").notNull().default(3),
+    timeoutAt: integer("timeout_at").notNull().default(0),
+    ownerId: text("owner_id"),
+    leaseExpiresAt: integer("lease_expires_at").notNull().default(0),
+    terminalEventKey: text("terminal_event_key"),
+    terminalEventJson: text("terminal_event_json"),
+    terminalEventOffset: text("terminal_event_offset"),
+  },
+  (table) => [
+    uniqueIndex("denora_agent_submissions_submission_id_idx").on(table.submissionId),
+    index("denora_agent_submissions_status_sequence_idx").on(table.status, table.sequence),
+    index("denora_agent_submissions_session_status_sequence_idx").on(
+      table.sessionKey,
+      table.status,
+      table.sequence,
+    ),
+  ],
+);
+
+export const denoraAgentSessionDeletions = pgTable("denora_agent_session_deletions", {
+  sessionKey: text("session_key").primaryKey(),
+  startedAt: integer("started_at").notNull(),
+});
+
+export const denoraAgentDispatchReceipts = pgTable("denora_agent_dispatch_receipts", {
+  dispatchId: text("dispatch_id").primaryKey(),
+  acceptedAt: integer("accepted_at").notNull(),
+});
+
+export const denoraAgentAttemptMarkers = pgTable(
+  "denora_agent_attempt_markers",
+  {
+    submissionId: text("submission_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.submissionId, table.attemptId] })],
 );
 
 export * as schema from "./schema.ts";

@@ -7,11 +7,13 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { AgentRunObject, AgentRunObjectLive, AiGateway } from "../agent-run/AgentRunObject.ts";
+import { AgentRunPersistence } from "../agent-run/AgentRunPersistence.ts";
 import { AgentRuns } from "../agent-run/AgentRuns.ts";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Routes } from "../http/Routes.ts";
 import { Telemetry } from "../observability/Telemetry.ts";
+import { Db } from "../persistence/Db.ts";
 
 export interface ObservabilityConfig {
   readonly logsDataset: unknown;
@@ -134,6 +136,8 @@ export default Resource.make(
     return {
       fetch: Routes.layer.pipe(
         Layer.provide(AgentRuns.layer(runObjects)),
+        Layer.provide(AgentRunPersistence.layer),
+        Layer.provide(Db.hyperdriveLayer),
         Layer.provide(AuthLive.layerFromConfig),
         Layer.provide([HttpPlatform.layer, Etag.layer]),
         Layer.provide(corsLayer),

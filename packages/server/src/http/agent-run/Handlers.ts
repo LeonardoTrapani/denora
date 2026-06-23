@@ -16,6 +16,8 @@ export const layer = HttpApiBuilder.group(DenoraApi, "AgentRun", (handlers) =>
       const agentRuns = yield* AgentRuns.Service;
       const created = yield* agentRuns.create({
         runId: payload.runId,
+        conversationId: payload.conversationId,
+        triggerMessageId: payload.triggerMessageId,
         input: payload.input,
         userId: user.id,
       });

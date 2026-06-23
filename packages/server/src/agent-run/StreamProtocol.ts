@@ -584,6 +584,12 @@ export const unauthorizedResponse = (): Response =>
     status: 401,
   });
 
+export const forbiddenResponse = (): Response =>
+  jsonErrorResponse({
+    body: errorBody("forbidden", "You do not have access to this Agent Run."),
+    status: 403,
+  });
+
 export const runIdRequiredResponse = (): Response =>
   jsonErrorResponse({
     body: errorBody("invalid_request", "Run id is required.", "run_id_required"),

@@ -8,6 +8,8 @@ export class CreateAgentRunPayload extends Schema.Class<CreateAgentRunPayload>(
   "CreateAgentRunPayload",
 )({
   runId: Schema.optional(Schema.String),
+  conversationId: Schema.optional(Schema.String),
+  triggerMessageId: Schema.optional(Schema.String),
   input: Schema.optional(Schema.Unknown),
 }) {}
 

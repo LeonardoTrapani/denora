@@ -37,11 +37,6 @@ export interface ExecuteRunInput extends CreateRunInput {
   readonly pi: PiRuntimeInterface;
 }
 
-export interface ExecuteScheduledRunInput {
-  readonly runId: string;
-  readonly pi: PiRuntimeInterface;
-}
-
 export const createRun = Effect.fn("AgentRunLifecycle.createRun")(function* (
   store: EventStreamStore,
   input: CreateRunInput,
@@ -95,21 +90,6 @@ export const startRun = Effect.fn("AgentRunLifecycle.startRun")(function* (
     );
   }
   return created;
-});
-
-export const executeScheduledRun = Effect.fn("AgentRunLifecycle.executeScheduledRun")(function* (
-  store: EventStreamStore,
-  input: ExecuteScheduledRunInput,
-): Effect.fn.Return<void, EventStreamError> {
-  const streamPath = runStreamPath(input.runId);
-  const meta = yield* store.getStreamMeta(streamPath);
-  if (meta === null || meta.closed) return;
-
-  // TODO(agent-run-storage): recover the private run input from a RunStore/RunRegistry
-  // record instead of the public durable stream. Flue stores input outside the
-  // public run event stream; Denora needs the same split before DO alarm recovery
-  // can resume input-bearing runs safely.
-  yield* executeRun(store, { runId: input.runId, input: undefined, pi: input.pi });
 });
 
 export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (

@@ -7,10 +7,15 @@ import type { HttpServerError } from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
+import {
+  AgentRunPersistence,
+  type Error as AgentRunPersistenceError,
+} from "./AgentRunPersistence.ts";
 import { type EventStreamError, makeInMemoryEventStreamStore } from "./EventStreamStore.ts";
 import { AgentRunLifecycle, type CreateRunInput, type CreateRunResult } from "./Lifecycle.ts";
 import {
   eventStreamErrorResponse,
+  forbiddenResponse,
   handleStreamHead,
   handleStreamRead,
   internalErrorResponse,
@@ -25,6 +30,8 @@ export class CreateAgentRunFailed extends Schema.TaggedErrorClass<CreateAgentRun
       "stream_closed",
       "event_serialization_failed",
       "event_storage_failed",
+      "persistence_failed",
+      "run_not_authorized",
     ]),
     message: Schema.String,
   },
@@ -35,6 +42,8 @@ export interface CreateAgentRunInput {
   readonly runId?: string | undefined;
   readonly input?: unknown;
   readonly userId?: string | undefined;
+  readonly conversationId?: string | undefined;
+  readonly triggerMessageId?: string | undefined;
 }
 
 export interface AgentRunObjectStub {
@@ -54,31 +63,76 @@ export interface Interface {
   ) => Effect.Effect<CreateRunResult, CreateAgentRunFailed>;
   readonly streamRequest: (
     runId: string,
+    userId: string,
     request: HttpServerRequest.HttpServerRequest,
   ) => Effect.Effect<HttpServerResponse.HttpServerResponse>;
 }
 
 export class Service extends Context.Service<Service, Interface>()("@denora/server/AgentRuns") {}
 
-export const layer = (objects: AgentRunObjectNamespace): Layer.Layer<Service> =>
-  Layer.succeed(
+export const layer = (
+  objects: AgentRunObjectNamespace,
+): Layer.Layer<Service, never, AgentRunPersistence.Service> =>
+  Layer.effect(
     Service,
-    Service.of({
-      create: (input) => {
-        const runId = input.runId ?? crypto.randomUUID();
-        return objects
-          .getByName(runId)
-          .create({ runId, input: input.input, userId: input.userId })
-          .pipe(
-            Effect.mapError(createAgentRunFailed),
-            Effect.catchCause(createAgentRunFailedFromCause),
-          );
-      },
-      streamRequest: (runId, request) =>
-        objects
-          .getByName(runId)
-          .fetch(request)
-          .pipe(
+    Effect.gen(function* () {
+      const persistence = yield* AgentRunPersistence.Service;
+
+      return Service.of({
+        create: (input) => {
+          const runId = input.runId ?? crypto.randomUUID();
+          if (input.userId === undefined) {
+            return Effect.fail(
+              new CreateAgentRunFailed({
+                reason: "run_not_authorized",
+                message: "Authenticated user is required to create an Agent Run.",
+              }),
+            );
+          }
+
+          return persistence
+            .registerRun({
+              runId,
+              input: input.input,
+              userId: input.userId,
+              conversationId: input.conversationId,
+              triggerMessageId: input.triggerMessageId,
+            })
+            .pipe(
+              Effect.flatMap((registered) =>
+                objects
+                  .getByName(runId)
+                  .create({ runId, input: registered.input, userId: input.userId })
+                  .pipe(
+                    Effect.map((created) => ({
+                      ...created,
+                      created: registered.created && created.created,
+                    })),
+                  ),
+              ),
+              Effect.mapError(createAgentRunFailed),
+              Effect.catchCause(createAgentRunFailedFromCause),
+            );
+        },
+        streamRequest: (runId, userId, request) =>
+          persistence.authorizeRun({ runId, userId }).pipe(
+            Effect.matchEffect({
+              onFailure: (error) => {
+                if (error._tag === "RunNotAuthorized") {
+                  return Effect.succeed(HttpServerResponse.fromWeb(forbiddenResponse()));
+                }
+                return Effect.gen(function* () {
+                  const traceId = crypto.randomUUID();
+                  yield* Effect.logError("agent run stream authorization failed", {
+                    runId,
+                    traceId,
+                    error,
+                  });
+                  return HttpServerResponse.fromWeb(internalErrorResponse(traceId));
+                });
+              },
+              onSuccess: () => objects.getByName(runId).fetch(request),
+            }),
             Effect.catchCause((cause) =>
               Effect.gen(function* () {
                 const traceId = crypto.randomUUID();
@@ -91,6 +145,7 @@ export const layer = (objects: AgentRunObjectNamespace): Layer.Layer<Service> =>
               }),
             ),
           ),
+      });
     }),
   );
 
@@ -122,7 +177,7 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
             ),
         }).pipe(Effect.mapError(createAgentRunFailed));
       },
-      streamRequest: (runId, request) =>
+      streamRequest: (runId, _userId, request) =>
         Effect.gen(function* () {
           const webRequest = yield* HttpServerRequest.toWeb(request);
           const path = `runs/${runId}`;
@@ -153,7 +208,22 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
   }),
 );
 
-const createAgentRunFailed = (error: EventStreamError): CreateAgentRunFailed => {
+const createAgentRunFailed = (
+  error: EventStreamError | AgentRunPersistenceError,
+): CreateAgentRunFailed => {
+  if (error._tag === "PersistenceFailed") {
+    return new CreateAgentRunFailed({
+      reason: "persistence_failed",
+      message: "Agent Run persistence failed.",
+    });
+  }
+  if (error._tag === "RunNotAuthorized") {
+    return new CreateAgentRunFailed({
+      reason: "run_not_authorized",
+      message: "Agent Run is not available for the authenticated user.",
+    });
+  }
+
   switch (error._tag) {
     case "InvalidStreamOffset":
       return new CreateAgentRunFailed({

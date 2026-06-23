@@ -56,16 +56,9 @@ const streamRoute = (
       return HttpServerResponse.fromWeb(methodNotAllowedResponse());
     }
 
-    yield* CurrentUser;
+    const user = yield* CurrentUser;
 
-    // TODO(agent-run-auth): add the Agent/Thread/Run registry before this route
-    // is considered safe. Flue resolves `/runs/:runId` through its RunStore,
-    // verifies the workflow exposes run middleware, then runs that middleware
-    // before serving the stream. Denora does not have the equivalent ownership
-    // record yet, so this is intentionally only session-gated for the current
-    // spike. Reference: ~/.local/share/opencode/repos/github.com/withastro/flue/
-    // packages/runtime/src/runtime/flue-app.ts runStreamReadHandler.
-    return yield* agentRuns.streamRequest(runId, request);
+    return yield* agentRuns.streamRequest(runId, user.id, request);
   });
 
 export * as AgentRunStreamRoutes from "./StreamRoutes.ts";

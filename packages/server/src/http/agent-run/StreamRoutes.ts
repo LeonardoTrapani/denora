@@ -1,9 +1,11 @@
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { Auth } from "../../auth/Auth.ts";
+import { CurrentUser } from "../../auth/User.ts";
 import { AgentRuns } from "../../agent-run/AgentRuns.ts";
 import {
   methodNotAllowedResponse,
@@ -11,11 +13,38 @@ import {
   unauthorizedResponse,
 } from "../../agent-run/StreamProtocol.ts";
 
-export const routes = HttpRouter.use((router) =>
-  router.add("*", "/runs/:runId", streamRoute, { uninterruptible: false }),
-);
+const streamAuthorizationLayer = HttpRouter.middleware<{ provides: CurrentUser }>()(
+  Effect.gen(function* () {
+    const auth = yield* Auth.Service;
 
-const streamRoute = (request: HttpServerRequest.HttpServerRequest) =>
+    return (httpEffect) =>
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const webRequest = yield* HttpServerRequest.toWeb(request);
+        const user = yield* auth.requireSession(webRequest).pipe(Effect.result);
+        if (Result.isFailure(user)) {
+          return HttpServerResponse.fromWeb(unauthorizedResponse());
+        }
+
+        return yield* Effect.provideService(httpEffect, CurrentUser, user.success);
+      });
+  }),
+).layer;
+
+export const routes = HttpRouter.use((router) =>
+  Effect.gen(function* () {
+    const agentRuns = yield* AgentRuns.Service;
+
+    yield* router.add("*", "/runs/:runId", (request) => streamRoute(request, agentRuns), {
+      uninterruptible: false,
+    });
+  }),
+).pipe(Layer.provide(streamAuthorizationLayer));
+
+const streamRoute = (
+  request: HttpServerRequest.HttpServerRequest,
+  agentRuns: AgentRuns.Interface,
+) =>
   Effect.gen(function* () {
     const params = yield* HttpRouter.params;
     const runId = params.runId;
@@ -27,14 +56,8 @@ const streamRoute = (request: HttpServerRequest.HttpServerRequest) =>
       return HttpServerResponse.fromWeb(methodNotAllowedResponse());
     }
 
-    const auth = yield* Auth.Service;
-    const webRequest = yield* HttpServerRequest.toWeb(request);
-    const user = yield* auth.requireSession(webRequest).pipe(Effect.result);
-    if (Result.isFailure(user)) {
-      return HttpServerResponse.fromWeb(unauthorizedResponse());
-    }
+    yield* CurrentUser;
 
-    const agentRuns = yield* AgentRuns.Service;
     // TODO(agent-run-auth): add the Agent/Thread/Run registry before this route
     // is considered safe. Flue resolves `/runs/:runId` through its RunStore,
     // verifies the workflow exposes run middleware, then runs that middleware

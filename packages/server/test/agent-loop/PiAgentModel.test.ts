@@ -12,7 +12,6 @@ import { PiAgentModel } from "../../src/agent-loop/PiAgentModel.ts";
 import { FakeAiGateway, type Fake } from "../helpers/FakeAiGateway.ts";
 
 const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct";
-const IMAGE_BYTES = "aGVsbG8taW1hZ2UtYnl0ZXM=";
 
 const testModel = {
   id: MODEL_ID,
@@ -530,23 +529,6 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
           }),
         }),
       ]);
-    }),
-  );
-
-  it.effect("redacts image bytes in toTurnContent", () =>
-    Effect.sync(() => {
-      const content = PiAgentModel.toTurnContent({
-        type: "image",
-        data: IMAGE_BYTES,
-        mimeType: "image/png",
-      });
-
-      assert.deepStrictEqual(content, {
-        type: "image",
-        data: PiAgentModel.IMAGE_DATA_OMITTED,
-        mimeType: "image/png",
-      });
-      assert.notInclude(JSON.stringify(content), IMAGE_BYTES);
     }),
   );
 });

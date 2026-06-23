@@ -20,8 +20,9 @@ import * as TestServer from "../helpers/TestServer.ts";
 // that treats any cookie containing "valid" as an authenticated session; the
 // real WorkOS seal/verify path is out of scope here.
 const validUser = makeDenoraUser();
+const IMAGE_BYTES = "aGVsbG8taW1hZ2UtYnl0ZXM=";
 
-const appLayer = () =>
+const appLayer = (fake = fakeGateway()) =>
   TestServer.layer(Routes.layer).pipe(
     Layer.provide([
       AuthMock.layer((request) =>
@@ -30,7 +31,7 @@ const appLayer = () =>
           : Option.none(),
       ),
       AgentRuns.inMemoryLayer.pipe(
-        Layer.provide(PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fakeGateway())))),
+        Layer.provide(PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fake)))),
       ),
       ServerConfigMock.layer(),
     ]),
@@ -199,6 +200,44 @@ describe("Api http surface", () => {
         assert.strictEqual(head.headers["cross-origin-resource-policy"], "cross-origin");
       }).pipe(Effect.provide(appLayer())),
     );
+
+    it.effect("keeps image bytes in model input but redacts public run stream events", () => {
+      const fake = fakeGateway();
+      return Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const runId = `run_${crypto.randomUUID()}`;
+
+        const created = yield* client.execute(
+          HttpClientRequest.post("/agent-runs").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({
+              runId,
+              input: {
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      { type: "text", text: "describe this image" },
+                      { type: "image", data: IMAGE_BYTES, mimeType: "image/png" },
+                    ],
+                    timestamp: Date.now(),
+                  },
+                ],
+              },
+            }),
+          ),
+        );
+        assert.strictEqual(created.status, 200);
+
+        const { events } = yield* waitForRunReplay(client, runId);
+        const replayJson = JSON.stringify(events);
+        const runStart = events.find((event) => event.type === "run_start");
+
+        assert.include(JSON.stringify(fake.calls[0]?.payload), IMAGE_BYTES);
+        assert.notInclude(replayJson, IMAGE_BYTES);
+        assert.notProperty(runStart ?? {}, "input");
+      }).pipe(Effect.provide(appLayer(fake)));
+    });
 
     it.effect("serves an empty 404 HEAD response for a missing run stream", () =>
       Effect.gen(function* () {

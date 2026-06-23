@@ -7,6 +7,7 @@ import {
   runStreamPath,
 } from "./EventStreamStore.ts";
 import { AgentRunSession, type RunEvent } from "./AgentRunSession.ts";
+import { isBufferedRunEvent, isStreamExcludedRunEvent } from "./RunEventContract.ts";
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
 
 export interface CreateRunInput {
@@ -60,10 +61,6 @@ export const createRun = Effect.fn("AgentRunLifecycle.createRun")(function* (
     startedAt: timestamp,
     timestamp,
     eventIndex: 0,
-    input: {
-      value: input.input ?? null,
-      createdByUserId: input.userId,
-    },
   });
 
   return { runId: input.runId, streamPath, offset, created: true };
@@ -98,9 +95,11 @@ export const executeScheduledRun = Effect.fn("AgentRunLifecycle.executeScheduled
   const meta = yield* store.getStreamMeta(streamPath);
   if (meta === null || meta.closed) return;
 
-  const replay = yield* store.readEvents(streamPath, { offset: "-1", limit: 1 });
-  const runInput = runInputFromStartEvent(replay.events[0]?.data);
-  yield* executeRun(store, { runId: input.runId, input: runInput, pi: input.pi });
+  // TODO(agent-run-storage): recover the private run input from a RunStore/RunRegistry
+  // record instead of the public durable stream. Flue stores input outside the
+  // public run event stream; Denora needs the same split before DO alarm recovery
+  // can resume input-bearing runs safely.
+  yield* executeRun(store, { runId: input.runId, input: undefined, pi: input.pi });
 });
 
 export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
@@ -112,18 +111,43 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
   if (meta === null || meta.closed) return;
 
   let eventIndex = (yield* parseOffset(meta.nextOffset)) + 1;
+  let bufferedEvents: RunEvent[] = [];
 
-  const appendRunEvent = (event: RunEvent) =>
-    Effect.gen(function* () {
-      const timestamp = DateTime.formatIso(yield* DateTime.now);
-      yield* store.appendEvent(streamPath, {
-        ...event,
-        runId: input.runId,
-        v: 1,
-        eventIndex: eventIndex++,
-        timestamp,
-      });
+  const appendDecoratedRunEvent = Effect.fn("AgentRunLifecycle.appendDecoratedRunEvent")(function* (
+    event: RunEvent,
+  ): Effect.fn.Return<void, EventStreamError> {
+    const timestamp = DateTime.formatIso(yield* DateTime.now);
+    yield* store.appendEvent(streamPath, {
+      ...event,
+      runId: input.runId,
+      v: 1,
+      eventIndex: eventIndex++,
+      timestamp,
     });
+  });
+
+  const flushBufferedRunEvents = Effect.fn("AgentRunLifecycle.flushBufferedRunEvents")(
+    function* (): Effect.fn.Return<void, EventStreamError> {
+      if (bufferedEvents.length === 0) return;
+      const batch = bufferedEvents;
+      bufferedEvents = [];
+      for (const event of batch) {
+        yield* appendDecoratedRunEvent(event);
+      }
+    },
+  );
+
+  const appendRunEvent = Effect.fn("AgentRunLifecycle.appendRunEvent")(function* (
+    event: RunEvent,
+  ): Effect.fn.Return<void, EventStreamError> {
+    if (isStreamExcludedRunEvent(event)) return;
+    if (isBufferedRunEvent(event)) {
+      bufferedEvents.push(event);
+      return;
+    }
+    yield* flushBufferedRunEvents();
+    yield* appendDecoratedRunEvent(event);
+  });
 
   const closeStream = store
     .closeStream(streamPath)
@@ -137,9 +161,14 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
   }).pipe(
     Effect.matchEffect({
       onFailure: (error) =>
-        appendFailedRunEnd(store, streamPath, input.runId, eventIndex++, error.message),
+        flushBufferedRunEvents().pipe(
+          Effect.flatMap(() =>
+            appendFailedRunEnd(store, streamPath, input.runId, eventIndex++, error.message),
+          ),
+        ),
       onSuccess: (result) =>
         Effect.gen(function* () {
+          yield* flushBufferedRunEvents();
           const timestamp = DateTime.formatIso(yield* DateTime.now);
           yield* store.appendEvent(streamPath, {
             v: 1,
@@ -156,13 +185,21 @@ export const executeRun = Effect.fn("AgentRunLifecycle.executeRun")(function* (
         }),
     }),
     Effect.onError(() =>
-      appendFailedRunEnd(
-        store,
-        streamPath,
-        input.runId,
-        eventIndex++,
-        "Agent run execution failed.",
-      ).pipe(
+      flushBufferedRunEvents().pipe(
+        Effect.catch((error) =>
+          Effect.logError("agent run buffered event flush before terminal failure failed", {
+            error,
+          }),
+        ),
+        Effect.flatMap(() =>
+          appendFailedRunEnd(
+            store,
+            streamPath,
+            input.runId,
+            eventIndex++,
+            "Agent run execution failed.",
+          ),
+        ),
         Effect.catch((error) =>
           Effect.logError("agent run terminal failure event append failed", { error }),
         ),
@@ -190,12 +227,5 @@ const appendFailedRunEnd = Effect.fn("AgentRunLifecycle.appendFailedRunEnd")(fun
     error: { message },
   });
 });
-
-const runInputFromStartEvent = (event: unknown): unknown => {
-  if (event === null || typeof event !== "object") return null;
-  const input = (event as Record<string, unknown>).input;
-  if (input === null || typeof input !== "object") return null;
-  return (input as Record<string, unknown>).value ?? null;
-};
 
 export * as AgentRunLifecycle from "./Lifecycle.ts";

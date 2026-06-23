@@ -5,7 +5,6 @@ import {
   type AssistantMessage,
   type AssistantMessageEventStream,
   type Context as PiContext,
-  type Message,
   type Model,
   type OpenAICompletionsCompat,
   type SimpleStreamOptions,
@@ -14,9 +13,7 @@ import {
   type ThinkingContent,
   type Tool,
   type ToolCall,
-  type ToolResultMessage,
   type Usage,
-  type UserMessage,
 } from "@earendil-works/pi-ai";
 import { convertMessages } from "@earendil-works/pi-ai/openai-completions";
 import * as Cloudflare from "alchemy/Cloudflare";
@@ -91,49 +88,6 @@ const ChatCompletionChunkFromJsonString = Schema.fromJsonString(ChatCompletionCh
 
 type WorkersAIReasoningEffort = "low" | "medium" | "high";
 
-type ProviderTextOrImageContent = Exclude<UserMessage["content"], string>[number];
-type ProviderContentBlock =
-  | ProviderTextOrImageContent
-  | AssistantMessage["content"][number]
-  | ToolResultMessage["content"][number];
-type TurnUserContent =
-  | { readonly type: "text"; readonly text: string; readonly textSignature?: string | undefined }
-  | { readonly type: "image"; readonly data: string; readonly mimeType: string };
-type TurnAssistantContent =
-  | TurnUserContent
-  | {
-      readonly type: "thinking";
-      readonly thinking: string;
-      readonly thinkingSignature?: string | undefined;
-      readonly redacted?: boolean | undefined;
-    }
-  | {
-      readonly type: "toolCall";
-      readonly id: string;
-      readonly name: string;
-      readonly arguments: Record<string, unknown>;
-      readonly thoughtSignature?: string | undefined;
-    };
-type TurnToolResultContent = TurnUserContent;
-type TurnContent = TurnUserContent | TurnAssistantContent | TurnToolResultContent;
-type SignalMessageLike = {
-  readonly role: "signal";
-  readonly type: string;
-  readonly tagName?: string | undefined;
-  readonly content: string;
-  readonly attributes?: Readonly<Record<string, unknown>> | undefined;
-};
-type TurnSourceMessage = Message | SignalMessageLike;
-type TurnInputMessage =
-  | { readonly role: "user"; readonly content: string | ReadonlyArray<TurnUserContent> }
-  | { readonly role: "assistant"; readonly content: ReadonlyArray<TurnAssistantContent> }
-  | {
-      readonly role: "toolResult";
-      readonly toolCallId: string;
-      readonly toolName: string;
-      readonly content: ReadonlyArray<TurnToolResultContent>;
-      readonly isError: boolean;
-    };
 type StreamingTextBlock = TextContent;
 type StreamingThinkingBlock = ThinkingContent;
 type StreamingToolCallBlock = ToolCall & { partialArgs?: string; streamIndex?: number };
@@ -157,9 +111,6 @@ type SseReaderState = {
 type WorkersAiRunBinding = Effect.Success<Cloudflare.AiGatewayClient["raw"]>;
 
 type ModelTurnError = InvalidPiModel | ModelCallFailed | ModelResponseFailed | ModelStreamFailed;
-
-// Copied from Flue: event/turn payloads never carry raw image bytes.
-export const IMAGE_DATA_OMITTED = "[image data omitted from event]";
 
 export const AiGatewayId = Schema.String.pipe(Schema.brand("AiGatewayId"));
 export type AiGatewayId = typeof AiGatewayId.Type;
@@ -202,6 +153,11 @@ export interface StreamInput {
   readonly options?: SimpleStreamOptions | undefined;
 }
 
+/**
+ * Provider adapter boundary: converts Cloudflare AI Gateway streaming responses
+ * into Pi's AssistantMessageEventStream. Denora public run-event shaping and
+ * redaction happens above this layer, after pi-agent-core emits AgentEvents.
+ */
 export interface Interface {
   readonly stream: (input: StreamInput) => Effect.Effect<AssistantMessageEventStream>;
 }
@@ -796,80 +752,6 @@ const makeAssistantMessage = (options: {
     ? message
     : { ...message, errorMessage: options.errorMessage };
 };
-
-export const toTurnMessage = (message: TurnSourceMessage): TurnInputMessage => {
-  if (message.role === "signal") {
-    return {
-      role: "user",
-      content: renderSignalMessage(message),
-    };
-  }
-  if (message.role === "user") {
-    return {
-      role: "user",
-      content:
-        typeof message.content === "string"
-          ? message.content
-          : (message.content.map(toTurnContent) as TurnUserContent[]),
-    };
-  }
-  if (message.role === "assistant") {
-    return {
-      role: "assistant",
-      content: message.content.map(toTurnContent) as TurnAssistantContent[],
-    };
-  }
-  if (message.role === "toolResult") {
-    return {
-      role: "toolResult",
-      toolCallId: message.toolCallId,
-      toolName: message.toolName,
-      content: message.content.map(toTurnContent) as TurnToolResultContent[],
-      isError: message.isError,
-    };
-  }
-  throw new Error(
-    `[denora] Unsupported message role in turn context: ${(message as { readonly role?: unknown }).role}`,
-  );
-};
-
-export const toTurnContent = (block: ProviderContentBlock): TurnContent => {
-  if (block.type === "text") {
-    return { type: "text", text: block.text, textSignature: block.textSignature };
-  }
-  if (block.type === "image") {
-    return { type: "image", data: IMAGE_DATA_OMITTED, mimeType: block.mimeType };
-  }
-  if (block.type === "thinking") {
-    return {
-      type: "thinking",
-      thinking: block.thinking,
-      thinkingSignature: block.thinkingSignature,
-      redacted: block.redacted,
-    };
-  }
-  return {
-    type: "toolCall",
-    id: block.id,
-    name: block.name,
-    arguments: block.arguments,
-    thoughtSignature: block.thoughtSignature,
-  };
-};
-
-const renderSignalMessage = (message: SignalMessageLike): string => {
-  const tagName = message.tagName ?? "signal";
-  const attributes = [["type", message.type], ...Object.entries(message.attributes ?? {})]
-    .map(([name, value]) => ` ${escapeXmlAttribute(name)}="${escapeXmlAttribute(value)}"`)
-    .join("");
-  return `<${tagName}${attributes}>\n${escapeXmlText(message.content)}\n</${tagName}>`;
-};
-
-const escapeXmlText = (value: unknown): string =>
-  String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-
-const escapeXmlAttribute = (value: unknown): string =>
-  escapeXmlText(value).replaceAll('"', "&quot;");
 
 const readSseChunks = Effect.fn("PiAgentModel.readSseChunks")(function* (
   body: ReadableStream<Uint8Array>,

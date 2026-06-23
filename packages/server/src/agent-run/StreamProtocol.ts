@@ -337,9 +337,7 @@ const sseFrames = (
 
           const result = yield* store.readEvents(path, { offset: currentOffset });
           if (result.events.length > 0) {
-            frames.push(
-              `event: data\n${encodeSseData(JSON.stringify(publicEventData(path, result)))}`,
-            );
+            frames.push(`event: data\n${encodeSseData(JSON.stringify(publicEventData(result)))}`);
           }
 
           const streamClosed = result.closed && result.upToDate;
@@ -459,7 +457,7 @@ const catchUpResponse = (
   if (etag !== undefined) headers.etag = etag;
   if (result.upToDate) headers[STREAM_UP_TO_DATE] = "true";
   if (isClosed) headers[STREAM_CLOSED] = "true";
-  return new Response(JSON.stringify(publicEventData(path, result)), { status: 200, headers });
+  return new Response(JSON.stringify(publicEventData(result)), { status: 200, headers });
 };
 
 const longPollDataResponse = Effect.fn("StreamProtocol.longPollDataResponse")(function* (
@@ -480,7 +478,7 @@ const longPollDataResponse = Effect.fn("StreamProtocol.longPollDataResponse")(fu
   if (isClosed) headers[STREAM_CLOSED] = "true";
   if (offsetParam !== "now")
     headers.etag = generateETag(path, offsetParam, result.nextOffset, isClosed);
-  return new Response(JSON.stringify(publicEventData(path, result)), { status: 200, headers });
+  return new Response(JSON.stringify(publicEventData(result)), { status: 200, headers });
 });
 
 const longPollEmptyResponse = Effect.fn("StreamProtocol.longPollEmptyResponse")(function* (
@@ -498,18 +496,8 @@ const longPollEmptyResponse = Effect.fn("StreamProtocol.longPollEmptyResponse")(
   return new Response(null, { status: 204, headers });
 });
 
-const publicEventData = (path: string, result: EventStreamReadResult): ReadonlyArray<unknown> =>
-  result.events.map((event) =>
-    path.startsWith("runs/") ? normalizeRunStreamEvent(event.data) : event.data,
-  );
-
-const normalizeRunStreamEvent = (value: unknown): unknown => {
-  if (value === null || typeof value !== "object") return value;
-  const event = value as Record<string, unknown>;
-  if (event.type !== "run_start" || "input" in event || !("payload" in event)) return value;
-  const { payload, ...rest } = event;
-  return { ...rest, input: payload };
-};
+const publicEventData = (result: EventStreamReadResult): ReadonlyArray<unknown> =>
+  result.events.map((event) => event.data);
 
 const invalidRequestResponse = (error: StreamRequestValidationError): Response =>
   new Response(JSON.stringify(invalidRequestBody(error)), {

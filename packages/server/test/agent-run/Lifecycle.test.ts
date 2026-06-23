@@ -61,9 +61,21 @@ describe("AgentRunLifecycle", () => {
       assert.strictEqual(events[0]?.type, "run_start");
       assert.includeMembers(
         events.map((event) => event.type),
-        ["agent_start", "text_delta", "agent_end", "run_end"],
+        ["agent_start", "text_delta", "turn", "agent_end", "run_end"],
+      );
+      assert.notIncludeMembers(
+        events.map((event) => event.type),
+        ["message_update", "text_start", "text_end", "done", "turn_request"],
       );
       assert.strictEqual(events.find((event) => event.type === "text_delta")?.text, "hello");
+      assert.isBelow(
+        events.findIndex((event) => event.type === "text_delta"),
+        events.findIndex((event) => event.type === "turn"),
+      );
+      assert.deepStrictEqual(
+        events.map((event) => event.eventIndex),
+        events.map((_, index) => index),
+      );
       assert.strictEqual(events.find((event) => event.type === "run_end")?.outcome, "completed");
       assert.strictEqual(modelCalls, 1);
 

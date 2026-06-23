@@ -36,6 +36,11 @@ export interface ExecutePromptResult {
   readonly events: ReadonlyArray<AgentEvent>;
 }
 
+/**
+ * Non-durable prompt runner used as a service API around pi-agent-core. Unlike
+ * AgentRunSession, this captures raw Pi AgentEvents for callers instead of
+ * translating them into Denora's durable public run-event contract.
+ */
 export interface Interface {
   readonly executePrompt: (
     input: ExecutePromptInput,

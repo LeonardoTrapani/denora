@@ -7,12 +7,9 @@ import {
 import type { Api, Model } from "@earendil-works/pi-ai";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { toTurnMessage } from "../agent-loop/PiAgentModel.ts";
+import { redactRunEventImages, type RunEvent, toTurnMessage } from "./RunEventContract.ts";
 
-export interface RunEvent {
-  readonly type: string;
-  readonly [key: string]: unknown;
-}
+export type { RunEvent } from "./RunEventContract.ts";
 
 export type RunEventCallback = (event: RunEvent) => Effect.Effect<void, unknown>;
 
@@ -43,6 +40,9 @@ export const execute = Effect.fn("AgentRunSession.execute")(function* (
   return yield* session.prompt();
 });
 
+// Pi-to-Denora event boundary: this class owns translating pi-agent-core
+// AgentEvents into Denora's public run stream events. Provider-stream parsing
+// is lower in PiAgentModel; durable persistence is higher in Lifecycle.
 class AgentRunSession {
   private readonly agentLoop: Agent;
   private readonly eventCallback: RunEventCallback;
@@ -190,7 +190,7 @@ class AgentRunSession {
 
   private emit(event: RunEvent): Promise<void> {
     const decorated = {
-      ...event,
+      ...redactRunEventImages(event),
       runId: this.input.runId,
       ...(this.activeTurnId !== undefined && event.turnId === undefined
         ? { turnId: this.activeTurnId }

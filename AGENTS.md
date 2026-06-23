@@ -5,7 +5,7 @@ Agents should prioritize improving the overall design and quality of the system 
 ## Task Completion Requirements
 
 - Use `bun`; do not switch package managers unless explicitly asked.
-- Run the relevant available checks before considering tasks completed. In the current skeleton this usually means `bun fmt`, `bun lint`, `bun check-types`, and `bun run build`.
+- Run the relevant available checks before considering tasks completed. In the current skeleton this usually means `bun fmt`, `bun lint`, `bun check-types`
 - When a test script exists, use `bun run test`. NEVER run `bun test`. You are not required to run all the tests if it's not needed to the task.
 
 ## Denora

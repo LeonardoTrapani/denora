@@ -124,36 +124,6 @@ export const denoraRuns = pgTable(
   ],
 );
 
-export const denoraEventStreams = pgTable("denora_event_streams", {
-  path: text("path").primaryKey(),
-  nextOffset: integer("next_offset").notNull().default(0),
-  closed: integer("closed").notNull().default(0),
-});
-
-export const denoraEventStreamEntries = pgTable(
-  "denora_event_stream_entries",
-  {
-    path: text("path").notNull(),
-    seq: integer("seq").notNull(),
-    data: text("data").notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.path, table.seq] })],
-);
-
-export const denoraEventStreamKeys = pgTable(
-  "denora_event_stream_keys",
-  {
-    path: text("path").notNull(),
-    key: text("key").notNull(),
-    seq: integer("seq").notNull(),
-    data: text("data").notNull(),
-  },
-  (table) => [
-    primaryKey({ columns: [table.path, table.key] }),
-    uniqueIndex("denora_event_stream_keys_path_seq_idx").on(table.path, table.seq),
-  ],
-);
-
 export const denoraSessions = pgTable("denora_sessions", {
   id: text("id").primaryKey(),
   data: text("data").notNull(),

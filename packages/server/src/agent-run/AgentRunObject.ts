@@ -5,8 +5,6 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { PiAgentModel } from "../agent-loop/PiAgentModel.ts";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
-import { Db } from "../persistence/Db.ts";
-import { AgentRunPersistence } from "./AgentRunPersistence.ts";
 import {
   type EventStreamError,
   EventStorageFailed,
@@ -40,36 +38,26 @@ export const AgentRunObjectLive = AgentRunObject.make(
       return yield* Effect.gen(function* () {
         const state = yield* Cloudflare.DurableObjectState;
         const pi = yield* PiRuntime.Service;
-        const persistence = yield* AgentRunPersistence.Service;
         // Stream storage is required for every request; initialization failure means
         // this Durable Object instance has unavailable or corrupt SQLite state.
-        const sqliteStore = yield* makeSqliteEventStreamStore(state.storage.sql).pipe(Effect.orDie);
-        const store = AgentRunPersistence.mirrorEventStreamStore(sqliteStore, persistence);
+        const store = yield* makeSqliteEventStreamStore(state.storage.sql).pipe(Effect.orDie);
 
         return {
           create: (input: CreateRunInput) =>
             AgentRunLifecycle.startRun(store, {
               ...input,
-              scheduleExecution: scheduleRunAlarm(state, input.runId),
+              scheduleExecution: scheduleRunAlarm(state, input),
             }),
           alarm: () =>
             Effect.gen(function* () {
-              const runId = yield* state.storage
-                .get<string>(RUN_ID_STORAGE_KEY)
-                .pipe(durableObjectStorageFailure("read scheduled agent run id"));
-              if (runId === undefined) {
-                yield* Effect.logError("agent run alarm fired without a persisted run id");
+              const scheduled = yield* state.storage
+                .get<CreateRunInput>(RUN_ALARM_STORAGE_KEY)
+                .pipe(durableObjectStorageFailure("read scheduled agent run input"));
+              if (scheduled === undefined) {
+                yield* Effect.logError("agent run alarm fired without persisted run input");
                 return;
               }
-              const input = yield* persistence.getRunInput(runId).pipe(
-                Effect.catch((error) =>
-                  Effect.gen(function* () {
-                    yield* Effect.logError("agent run input recovery failed", { runId, error });
-                    return undefined;
-                  }),
-                ),
-              );
-              yield* AgentRunLifecycle.executeRun(store, { runId, input, pi });
+              yield* AgentRunLifecycle.executeRun(store, { ...scheduled, pi });
             }),
           fetch: Effect.gen(function* () {
             const request = yield* HttpServerRequest.HttpServerRequest;
@@ -89,19 +77,12 @@ export const AgentRunObjectLive = AgentRunObject.make(
             return HttpServerResponse.fromWeb(response);
           }),
         };
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            piLayer,
-            AgentRunPersistence.layer.pipe(Layer.provide(Db.hyperdriveLayer)),
-          ),
-        ),
-      );
+      }).pipe(Effect.provide(piLayer));
     }).pipe(Effect.provide(Cloudflare.AiGatewayBindingLive)),
   ),
 );
 
-const RUN_ID_STORAGE_KEY = "agent-run/run-id";
+const RUN_ALARM_STORAGE_KEY = "agent-run/alarm-input";
 
 const durableObjectStorageFailure =
   (operation: string) =>
@@ -110,12 +91,12 @@ const durableObjectStorageFailure =
 
 const scheduleRunAlarm = (
   state: Cloudflare.DurableObjectState["Service"],
-  runId: string,
-): (() => Effect.Effect<void, EventStorageFailed>) =>
+  input: CreateRunInput,
+): ((runId: string) => Effect.Effect<void, EventStorageFailed>) =>
   Effect.fn("AgentRunObject.scheduleRunAlarm")(function* () {
     yield* state.storage
-      .put(RUN_ID_STORAGE_KEY, runId)
-      .pipe(durableObjectStorageFailure("persist scheduled agent run id"));
+      .put(RUN_ALARM_STORAGE_KEY, input)
+      .pipe(durableObjectStorageFailure("persist scheduled agent run input"));
     yield* state.storage
       .setAlarm(Date.now())
       .pipe(durableObjectStorageFailure("schedule agent run alarm"));

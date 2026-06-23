@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -10,18 +10,9 @@ import {
   agentRuns,
   conversationMessages,
   conversations,
-  denoraEventStreamEntries,
-  denoraEventStreams,
-  denoraSessions,
   denoraRuns,
 } from "../persistence/schema.ts";
-import {
-  EventStorageFailed,
-  type EventStreamError,
-  type EventStreamStore,
-  parseOffset,
-  runStreamPath,
-} from "./EventStreamStore.ts";
+import { runStreamPath } from "./EventStreamStore.ts";
 
 export class PersistenceFailed extends Schema.TaggedErrorClass<PersistenceFailed>()(
   "PersistenceFailed",
@@ -63,12 +54,6 @@ export interface FinishRunInput {
   readonly error?: unknown;
 }
 
-export interface AppendStreamEventInput {
-  readonly path: string;
-  readonly event: unknown;
-  readonly offset: string;
-}
-
 export interface Interface {
   readonly registerRun: (input: RegisterRunInput) => Effect.Effect<RegisteredRun, Error>;
   readonly getRunInput: (runId: string) => Effect.Effect<unknown, Error>;
@@ -78,9 +63,6 @@ export interface Interface {
   }) => Effect.Effect<void, Error>;
   readonly markRunStarted: (runId: string) => Effect.Effect<void, Error>;
   readonly finishRun: (input: FinishRunInput) => Effect.Effect<void, Error>;
-  readonly createStream: (path: string) => Effect.Effect<void, Error>;
-  readonly appendStreamEvent: (input: AppendStreamEventInput) => Effect.Effect<void, Error>;
-  readonly closeStream: (path: string) => Effect.Effect<void, Error>;
 }
 
 export class Service extends Context.Service<Service, Interface>()(
@@ -303,193 +285,19 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       }
     });
 
-    const createStream = Effect.fn("AgentRunPersistence.createStream")(function* (
-      path: string,
-    ): Effect.fn.Return<void, Error> {
-      yield* persist(
-        "create denora event stream",
-        db.client
-          .insert(denoraEventStreams)
-          .values({ path, nextOffset: 0, closed: 0 })
-          .onConflictDoNothing(),
-      );
-    });
-
-    const appendStreamEvent = Effect.fn("AgentRunPersistence.appendStreamEvent")(function* (
-      input: AppendStreamEventInput,
-    ): Effect.fn.Return<void, Error> {
-      const seq = yield* parseOffset(input.offset).pipe(
-        Effect.mapError(
-          (cause) => new PersistenceFailed({ operation: "parse stream offset", cause }),
-        ),
-      );
-      const data = yield* Effect.try({
-        try: () => JSON.stringify(input.event),
-        catch: (cause) => new PersistenceFailed({ operation: "serialize stream event", cause }),
-      });
-      if (data === undefined) {
-        return yield* new PersistenceFailed({
-          operation: "serialize stream event",
-          cause: new TypeError("Event is not JSON serializable"),
-        });
-      }
-
-      yield* createStream(input.path);
-      const inserted = yield* persist(
-        "append denora event stream entry",
-        db.client
-          .insert(denoraEventStreamEntries)
-          .values({ path: input.path, seq, data })
-          .onConflictDoNothing()
-          .returning({ seq: denoraEventStreamEntries.seq }),
-      );
-      if (inserted.length === 0) return;
-
-      yield* persist(
-        "advance denora event stream offset",
-        db.client.execute(
-          sql`UPDATE denora_event_streams SET next_offset = GREATEST(next_offset, ${seq + 1}) WHERE path = ${input.path}`,
-        ),
-      );
-
-      yield* persistSideEffectsFromEvent(input.path, input.event);
-    });
-
-    const closeStream = Effect.fn("AgentRunPersistence.closeStream")(function* (
-      path: string,
-    ): Effect.fn.Return<void, Error> {
-      yield* createStream(path);
-      yield* persist(
-        "close denora event stream",
-        db.client
-          .update(denoraEventStreams)
-          .set({ closed: 1 })
-          .where(eq(denoraEventStreams.path, path)),
-      );
-    });
-
-    const persistSideEffectsFromEvent = Effect.fn(
-      "AgentRunPersistence.persistSideEffectsFromEvent",
-    )(function* (path: string, event: unknown): Effect.fn.Return<void, Error> {
-      const runStart = Schema.decodeUnknownOption(PersistedRunStartEvent)(event);
-      if (Option.isSome(runStart)) yield* markRunStarted(runStart.value.runId);
-
-      const agentEnd = Schema.decodeUnknownOption(PersistedAgentEndEvent)(event);
-      if (Option.isSome(agentEnd)) {
-        const updatedAt = yield* nowIso();
-        yield* persist(
-          "save denora session",
-          db.client
-            .insert(denoraSessions)
-            .values({
-              id: agentEnd.value.runId,
-              data: serializeJson({ path, messages: agentEnd.value.messages, updatedAt }) ?? "null",
-            })
-            .onConflictDoUpdate({
-              target: denoraSessions.id,
-              set: {
-                data:
-                  serializeJson({ path, messages: agentEnd.value.messages, updatedAt }) ?? "null",
-              },
-            }),
-        );
-      }
-
-      const runEnd = Schema.decodeUnknownOption(PersistedRunEndEvent)(event);
-      if (Option.isSome(runEnd)) {
-        yield* finishRun({
-          runId: runEnd.value.runId,
-          isError: runEnd.value.isError,
-          durationMs: runEnd.value.durationMs,
-          result: runEnd.value.result,
-          error: runEnd.value.error,
-        });
-      }
-    });
-
     return Service.of({
       registerRun,
       getRunInput,
       authorizeRun: ({ runId, userId }) => authorizeExistingRun(runId, userId),
       markRunStarted,
       finishRun,
-      createStream,
-      appendStreamEvent,
-      closeStream,
     });
   }),
 );
 
-export const mirrorEventStreamStore = (
-  store: EventStreamStore,
-  persistence: Interface,
-): EventStreamStore => ({
-  createStream: (path) =>
-    store
-      .createStream(path)
-      .pipe(
-        Effect.flatMap(() =>
-          persistence.createStream(path).pipe(Effect.mapError(toEventStorageFailed)),
-        ),
-      ),
-  appendEvent: (path, event) =>
-    store
-      .appendEvent(path, event)
-      .pipe(
-        Effect.flatMap((offset) =>
-          persistence
-            .appendStreamEvent({ path, event, offset })
-            .pipe(Effect.mapError(toEventStorageFailed), Effect.as(offset)),
-        ),
-      ),
-  readEvents: store.readEvents,
-  closeStream: (path) =>
-    store
-      .closeStream(path)
-      .pipe(
-        Effect.flatMap(() =>
-          persistence.closeStream(path).pipe(Effect.mapError(toEventStorageFailed)),
-        ),
-      ),
-  getStreamMeta: store.getStreamMeta,
-  subscribe: store.subscribe,
-});
-
-const toEventStorageFailed = (cause: Error): EventStreamError =>
-  new EventStorageFailed({ operation: "persist mirrored event stream", cause });
-
 const serializeJson = (value: unknown): string | null => JSON.stringify(value) ?? null;
 
 const PromptInput = Schema.Struct({ prompt: Schema.String });
-
-const PersistedRunStartEvent = Schema.StructWithRest(
-  Schema.Struct({
-    type: Schema.Literal("run_start"),
-    runId: Schema.String,
-  }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-
-const PersistedAgentEndEvent = Schema.StructWithRest(
-  Schema.Struct({
-    type: Schema.Literal("agent_end"),
-    runId: Schema.String,
-    messages: Schema.Unknown,
-  }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
-
-const PersistedRunEndEvent = Schema.StructWithRest(
-  Schema.Struct({
-    type: Schema.Literal("run_end"),
-    runId: Schema.String,
-    isError: Schema.Boolean,
-    durationMs: Schema.Number,
-    result: Schema.Unknown,
-    error: Schema.optionalKey(Schema.Unknown),
-  }),
-  [Schema.Record(Schema.String, Schema.Unknown)],
-);
 
 const normalizeUserMessageContent = (input: unknown): unknown => {
   const promptInput = Schema.decodeUnknownOption(PromptInput)(input);

@@ -403,9 +403,15 @@ const conversationRequestFailed = (
   error: EventStreamError | ConversationPersistence.Error,
 ): ConversationRequestFailed => {
   if (error._tag === "PersistenceFailed") {
+    Effect.runFork(
+      Effect.logError("conversation persistence failed", {
+        operation: error.operation,
+        cause: error.cause,
+      }),
+    );
     return new ConversationRequestFailed({
       reason: "persistence_failed",
-      message: "Conversation persistence failed.",
+      message: `Conversation persistence failed during ${error.operation}.`,
     });
   }
   if (error._tag === "ConversationNotAuthorized") {
@@ -451,7 +457,11 @@ const conversationRequestFailedFromCause = (
 
   return Effect.gen(function* () {
     const traceId = crypto.randomUUID();
-    yield* Effect.logError("conversation request failed", { traceId, cause });
+    yield* Effect.logError("conversation request failed", {
+      traceId,
+      cause,
+      error: Cause.squash(cause),
+    });
     return yield* new ConversationRequestFailed({
       reason: "event_storage_failed",
       message: "Conversation request could not be completed.",

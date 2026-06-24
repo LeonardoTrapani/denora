@@ -23,6 +23,7 @@ const sessionCookieName = "denora_session";
 const transactionCookieName = "denora_auth_transaction";
 const sessionMaxAgeSeconds = 60 * 60 * 24 * 30;
 const transactionMaxAgeSeconds = 60 * 10;
+const sessionLoadTimeout = "5 seconds";
 
 type AuthOptions = ServerConfig.Auth;
 
@@ -202,9 +203,12 @@ const toDenoraUser = (user: User): DenoraUser =>
     emailVerified: user.emailVerified,
     name: user.name,
     image: user.profilePictureUrl,
-    createdAt: user.createdAt,
-    updatedAt: user.updatedAt,
+    createdAt: timestampString(user.createdAt),
+    updatedAt: timestampString(user.updatedAt),
   });
+
+const timestampString = (value: string | Date): string =>
+  value instanceof Date ? value.toISOString() : value;
 
 const toSessionBody = (session: AuthenticatedSession) => ({
   session: {
@@ -226,6 +230,27 @@ const parseRequestUrl = (request: Request) =>
   Effect.fromResult(Url.fromString(request.url)).pipe(
     Effect.mapError((cause) => new AuthProviderError({ operation: "parseRequestUrl", cause })),
   );
+
+const abortable = <A>(promise: PromiseLike<A>, signal: AbortSignal): Promise<A> =>
+  new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("Operation aborted."));
+      return;
+    }
+
+    const abort = () => reject(new Error("Operation aborted."));
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (cause) => {
+        signal.removeEventListener("abort", abort);
+        reject(cause);
+      },
+    );
+  });
 
 const trustedOriginFromRequest = (
   request: Request,
@@ -340,18 +365,18 @@ export const layer = (options: AuthOptions): Layer.Layer<Auth.Service> =>
         }
 
         return yield* Effect.tryPromise({
-          try: async (): Promise<SessionState> => {
+          try: async (signal): Promise<SessionState> => {
             const session = workos.userManagement.loadSealedSession({
               sessionData: sealedSession,
               cookiePassword,
             });
 
-            const authenticated = await session.authenticate();
+            const authenticated = await abortable(session.authenticate(), signal);
             if (authenticated.authenticated) {
               return toAuthenticatedSession(authenticated);
             }
 
-            const refreshed = await session.refresh({ cookiePassword });
+            const refreshed = await abortable(session.refresh({ cookiePassword }), signal);
             if (refreshed.authenticated) {
               return toAuthenticatedSession(refreshed);
             }
@@ -359,7 +384,18 @@ export const layer = (options: AuthOptions): Layer.Layer<Auth.Service> =>
             return { _tag: "Unauthenticated" };
           },
           catch: (cause) => new AuthProviderError({ operation: "loadSession", cause }),
-        });
+        }).pipe(
+          Effect.timeoutOrElse({
+            duration: sessionLoadTimeout,
+            orElse: () =>
+              Effect.fail(
+                new AuthProviderError({
+                  operation: "loadSession",
+                  cause: new Error(`WorkOS session loading timed out after ${sessionLoadTimeout}.`),
+                }),
+              ),
+          }),
+        );
       });
 
       const handleLogin = Effect.fn("Auth.handleLogin")(function* (request: Request, url: URL) {

@@ -5,13 +5,12 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { PiAgentModel } from "../agent-loop/PiAgentModel.ts";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
-import { ConversationPersistence } from "../conversation/ConversationPersistence.ts";
-import { Db } from "../persistence/Db.ts";
 import {
   type EventStreamError,
   EventStorageFailed,
   makeSqliteEventStreamStore,
 } from "./EventStreamStore.ts";
+import { AgentConversationSessionStore } from "./AgentConversationSessionStore.ts";
 import {
   type AbortConversationResult,
   type Interface as AgentConversationCoordinatorInterface,
@@ -54,21 +53,20 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
         Layer.provide(PiAgentModel.layer()),
         Layer.provide(PiAgentModel.aiGatewayLayerFromClient(aiGateway)),
       );
-      const objectLayer = Layer.mergeAll(piLayer, ConversationPersistence.layer).pipe(
-        Layer.provide(Db.hyperdriveLayer),
-      );
 
       return yield* Effect.gen(function* () {
         const state = yield* Cloudflare.DurableObjectState;
         const pi = yield* PiRuntime.Service;
-        const persistence = yield* ConversationPersistence.Service;
         // Stream storage is required for every request; initialization failure means
         // this Durable Object instance has unavailable or corrupt SQLite state.
         const store = yield* makeSqliteEventStreamStore(state.storage.sql).pipe(Effect.orDie);
+        const sessionStore = yield* AgentConversationSessionStore.makeSqlite(
+          state.storage.sql,
+        ).pipe(Effect.orDie);
         const coordinator = yield* makeSqliteAgentConversationCoordinator(
           state.storage.sql,
           store,
-          persistence,
+          sessionStore,
         ).pipe(Effect.orDie);
 
         return {
@@ -120,7 +118,7 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
             return HttpServerResponse.fromWeb(response);
           }),
         };
-      }).pipe(Effect.provide(objectLayer));
+      }).pipe(Effect.provide(piLayer));
     }).pipe(Effect.provide(Cloudflare.AiGatewayBindingLive)),
   ),
 );

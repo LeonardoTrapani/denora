@@ -5,6 +5,7 @@ import {
   type CreateConversationSubmissionInput,
   type ExecuteRunAttemptResult,
 } from "./Lifecycle.ts";
+import { AgentConversationSessionStore } from "./AgentConversationSessionStore.ts";
 import {
   type EventStreamError,
   type EventStreamStore,
@@ -15,7 +16,6 @@ import {
   parseOffset,
 } from "./EventStreamStore.ts";
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
-import { ConversationPersistence } from "../conversation/ConversationPersistence.ts";
 
 const WAKE_DELAY_MS = 30_000;
 const RUNNING_STALE_MS = 15 * 60 * 1000;
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS denora_agent_conversation_submissions (
   started_at            INTEGER,
   settled_at            INTEGER,
   abort_requested_at    INTEGER,
+  input_applied_at      INTEGER,
   error                 TEXT,
   terminal_event_key    TEXT,
   terminal_event_json   TEXT,
@@ -93,7 +94,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
 )(function* (
   sql: Cloudflare.SqlStorage,
   store: EventStreamStore,
-  persistence: ConversationPersistence.Interface,
+  sessionStore: AgentConversationSessionStore.Interface,
 ): Effect.fn.Return<Interface, EventStorageFailed> {
   yield* ensureTables(sql);
   const activeAttempts = new Map<string, AbortController>();
@@ -252,6 +253,33 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       )
       .pipe(storageFailure("mark agent conversation submission abort requested"), Effect.asVoid);
 
+  const markSubmissionInputApplied = (
+    submission: Submission,
+  ): Effect.Effect<void, EventStorageFailed> =>
+    Effect.gen(function* () {
+      const cursor = yield* sql
+        .exec<Row>(
+          `UPDATE denora_agent_conversation_submissions
+           SET input_applied_at = COALESCE(input_applied_at, ?)
+           WHERE submission_id = ? AND status = 'running' AND attempt_id = ?
+           RETURNING 1 AS value`,
+          Date.now(),
+          submission.submissionId,
+          submission.attemptId ?? "",
+        )
+        .pipe(storageFailure("mark conversation submission input applied"));
+      const rows = yield* cursor
+        .toArray()
+        .pipe(storageFailure("collect conversation submission input marker"));
+      if (rows[0] !== undefined) return;
+      return yield* new EventStorageFailed({
+        operation: "mark conversation submission input applied",
+        cause: new Error(
+          `Submission ${submission.submissionId} lost ownership before input application.`,
+        ),
+      });
+    });
+
   const hasUnsettledSubmissions = Effect.fn("AgentConversationCoordinator.hasUnsettledSubmissions")(
     function* (): Effect.fn.Return<boolean, EventStorageFailed> {
       const cursor = yield* sql
@@ -274,10 +302,17 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           `UPDATE denora_agent_conversation_submissions
            SET status = 'running', attempt_id = ?, started_at = ?
            WHERE submission_id = (
-             SELECT submission_id
-              FROM denora_agent_conversation_submissions
-             WHERE status = 'queued'
-             ORDER BY sequence ASC
+             SELECT current.submission_id
+              FROM denora_agent_conversation_submissions AS current
+             WHERE current.status = 'queued'
+               AND NOT EXISTS (
+                 SELECT 1
+                   FROM denora_agent_conversation_submissions AS earlier
+                  WHERE earlier.session_key = current.session_key
+                    AND earlier.status IN ('queued', 'running', 'terminalizing')
+                    AND earlier.sequence < current.sequence
+               )
+             ORDER BY current.sequence ASC
              LIMIT 1
            )
            RETURNING ${submissionColumns}`,
@@ -300,15 +335,13 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     const controller = new AbortController();
     activeAttempts.set(submission.submissionId, controller);
     try {
+      const completed = yield* reconstructCompletedRunResult(submission);
+      if (completed !== null) {
+        yield* reserveTerminal(submission, completed);
+        return;
+      }
       const prepared = yield* prepareSubmissionForExecution(submission);
-      yield* persistence
-        .markRunStarted(submission.runId)
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventStorageFailed({ operation: "mark conversation run started", cause }),
-          ),
-        );
+      yield* markSubmissionInputApplied(submission);
       const execution = yield* AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
         runId: submission.runId,
         agentName: submission.agentName,
@@ -331,19 +364,12 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           }),
         ),
       );
-      yield* persistence
-        .finishRun({
-          runId: submission.runId,
-          isError: execution.isError,
-          durationMs: execution.durationMs,
-          result: execution.result,
-          error: execution.error,
-        })
-        .pipe(
-          Effect.mapError(
-            (cause) => new EventStorageFailed({ operation: "finish conversation run", cause }),
-          ),
-        );
+      yield* sessionStore.finishRun({
+        conversationId: submission.conversationId ?? "unknown",
+        runId: submission.runId,
+        isError: execution.isError,
+        result: execution.result,
+      });
       yield* reserveTerminal(submission, execution);
     } finally {
       activeAttempts.delete(submission.submissionId);
@@ -365,6 +391,15 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     const rows = yield* cursor.toArray().pipe(storageFailure("collect stale running submissions"));
     for (const row of rows) {
       const submission = parseSubmission(row);
+      const completed = yield* reconstructCompletedRunResult(submission);
+      if (completed !== null) {
+        yield* reserveTerminal(submission, completed);
+        continue;
+      }
+      if (submission.inputAppliedAt !== undefined && submission.abortRequestedAt === undefined) {
+        yield* requeueStaleAppliedSubmission(submission);
+        continue;
+      }
       yield* reserveTerminal(
         submission,
         yield* makeInterruptedResult(
@@ -374,6 +409,20 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       );
     }
   });
+
+  const requeueStaleAppliedSubmission = (
+    submission: Submission,
+  ): Effect.Effect<void, EventStorageFailed> =>
+    sql
+      .exec(
+        `UPDATE denora_agent_conversation_submissions
+         SET status = 'queued', attempt_id = NULL, started_at = NULL
+         WHERE submission_id = ? AND status = 'running' AND attempt_id = ?
+           AND input_applied_at IS NOT NULL`,
+        submission.submissionId,
+        submission.attemptId ?? "",
+      )
+      .pipe(storageFailure("requeue stale applied conversation submission"), Effect.asVoid);
 
   const publishTerminalOutboxes = Effect.fn("AgentConversationCoordinator.publishTerminalOutboxes")(
     function* (): Effect.fn.Return<void, EventStreamError> {
@@ -415,6 +464,8 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
                   terminal_event_json, terminal_event_offset
             FROM denora_agent_conversation_submissions
            WHERE status = 'terminalizing'
+             AND terminal_event_key IS NOT NULL
+             AND terminal_event_json IS NOT NULL
            ORDER BY sequence ASC`,
       )
       .pipe(storageFailure("list terminal outboxes"));
@@ -565,7 +616,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       try: () => submissionPayload(submission.input),
       catch: (cause) => new EventStorageFailed({ operation: "read submission payload", cause }),
     });
-    return yield* persistence
+    return yield* sessionStore
       .recordSubmissionStarted({
         conversationId,
         userId: payload.userId,
@@ -580,6 +631,19 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           (cause) => new EventStorageFailed({ operation: "record conversation submission", cause }),
         ),
       );
+  });
+
+  const reconstructCompletedRunResult = Effect.fn(
+    "AgentConversationCoordinator.reconstructCompletedRunResult",
+  )(function* (
+    submission: Submission,
+  ): Effect.fn.Return<ExecuteRunAttemptResult | null, EventStreamError> {
+    const completed = yield* sessionStore.reconstructCompletedRun({
+      conversationId: submission.conversationId ?? "unknown",
+      runId: submission.runId,
+    });
+    if (completed === null) return null;
+    return yield* makeCompletedResult(submission, completed.assistantText);
   });
 
   return {
@@ -598,6 +662,26 @@ const ensureTables = (sql: Cloudflare.SqlStorage): Effect.Effect<void, EventStor
     ] as const) {
       yield* sql.exec(statement).pipe(storageFailure(operation), Effect.asVoid);
     }
+    yield* ensureColumn(sql, {
+      table: "denora_agent_conversation_submissions",
+      column: "input_applied_at",
+      definition: "input_applied_at INTEGER",
+    });
+  });
+
+const ensureColumn = (
+  sql: Cloudflare.SqlStorage,
+  input: { readonly table: string; readonly column: string; readonly definition: string },
+): Effect.Effect<void, EventStorageFailed> =>
+  Effect.gen(function* () {
+    const cursor = yield* sql
+      .exec<TableInfoRow>(`PRAGMA table_info(${input.table})`)
+      .pipe(storageFailure(`inspect ${input.table} columns`));
+    const rows = yield* cursor.toArray().pipe(storageFailure(`collect ${input.table} columns`));
+    if (rows.some((row) => row.name === input.column)) return;
+    yield* sql
+      .exec(`ALTER TABLE ${input.table} ADD COLUMN ${input.definition}`)
+      .pipe(storageFailure(`add ${input.table}.${input.column} column`), Effect.asVoid);
   });
 
 const storageFailure =
@@ -639,6 +723,27 @@ const makeInterruptedResult = Effect.fn("AgentConversationCoordinator.makeInterr
   },
 );
 
+const makeCompletedResult = Effect.fn("AgentConversationCoordinator.makeCompletedResult")(
+  function* (
+    submission: Submission,
+    assistantText: string,
+  ): Effect.fn.Return<ExecuteRunAttemptResult> {
+    const timestamp = yield* Effect.sync(() => new Date().toISOString());
+    const result = { assistantText };
+    const terminalEvent = {
+      v: 3,
+      type: "submission_settled",
+      instanceId: submission.conversationId ?? "unknown",
+      agentName: submission.agentName,
+      submissionId: submission.submissionId,
+      timestamp,
+      outcome: "completed",
+      result,
+    };
+    return { terminalEvent, durationMs: 0, isError: false, result };
+  },
+);
+
 const errorMessage = (error: EventStreamError): string =>
   error._tag === "EventStorageFailed"
     ? `Agent run storage failed during ${error.operation}.`
@@ -663,7 +768,7 @@ const submissionPayload = (
 };
 
 const submissionColumns =
-  "sequence, submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id, payload, status, accepted_at, attempt_id, started_at, settled_at, abort_requested_at, error, terminal_event_key, terminal_event_json, terminal_event_offset";
+  "sequence, submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id, payload, status, accepted_at, attempt_id, started_at, settled_at, abort_requested_at, input_applied_at, error, terminal_event_key, terminal_event_json, terminal_event_offset";
 
 const parseSubmission = (row: SubmissionRow): Submission => ({
   sequence: row.sequence,
@@ -682,6 +787,7 @@ const parseSubmission = (row: SubmissionRow): Submission => ({
   startedAt: row.started_at ?? undefined,
   settledAt: row.settled_at ?? undefined,
   abortRequestedAt: row.abort_requested_at ?? undefined,
+  inputAppliedAt: row.input_applied_at ?? undefined,
   error: row.error ?? undefined,
 });
 
@@ -729,6 +835,10 @@ interface Row extends Record<string, Cloudflare.SqlStorageValue> {
   readonly value?: number;
 }
 
+interface TableInfoRow extends Record<string, Cloudflare.SqlStorageValue> {
+  readonly name: string;
+}
+
 interface SubmissionRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly sequence: number;
   readonly submission_id: string;
@@ -745,6 +855,7 @@ interface SubmissionRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly started_at: number | null;
   readonly settled_at: number | null;
   readonly abort_requested_at: number | null;
+  readonly input_applied_at: number | null;
   readonly error: string | null;
   readonly terminal_event_key: string | null;
   readonly terminal_event_json: string | null;
@@ -791,6 +902,7 @@ interface Submission {
   readonly startedAt?: number | undefined;
   readonly settledAt?: number | undefined;
   readonly abortRequestedAt?: number | undefined;
+  readonly inputAppliedAt?: number | undefined;
   readonly error?: string | undefined;
 }
 

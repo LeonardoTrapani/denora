@@ -119,37 +119,47 @@ export const createConversationSubmission = Effect.fn(
   const offset = existing?.nextOffset ?? "-1";
   yield* store.createStream(streamPath);
 
+  const startKey = `submission:${input.submissionId}:user:start`;
+  const endKey = `submission:${input.submissionId}:user:end`;
+  const existingStart = yield* store.readEventByKey(streamPath, startKey);
+  const existingEnd = yield* store.readEventByKey(streamPath, endKey);
   const userMessage = userMessageFromInput(input.input);
   const timestamp = DateTime.formatIso(yield* DateTime.now);
-  const firstIndex = (yield* parseOffset(offset)) + 1;
-  yield* store.appendEventOnce(
-    streamPath,
-    `submission:${input.submissionId}:user:start`,
-    redactRunEventImages({
-      v: 3,
-      type: "message_start",
-      instanceId: input.conversationId,
-      agentName: input.agentName,
-      submissionId: input.submissionId,
-      eventIndex: firstIndex,
-      timestamp,
-      message: userMessage,
-    }),
-  );
-  yield* store.appendEventOnce(
-    streamPath,
-    `submission:${input.submissionId}:user:end`,
-    redactRunEventImages({
-      v: 3,
-      type: "message_end",
-      instanceId: input.conversationId,
-      agentName: input.agentName,
-      submissionId: input.submissionId,
-      eventIndex: firstIndex + 1,
-      timestamp,
-      message: userMessage,
-    }),
-  );
+  const firstIndex =
+    eventIndexFrom(existingStart?.event) ??
+    eventIndexFrom(existingEnd?.event) ??
+    (yield* parseOffset(offset)) + 1;
+  const startTimestamp = timestampFrom(existingStart?.event) ?? timestamp;
+  if (existingStart === null)
+    yield* store.appendEventOnce(
+      streamPath,
+      startKey,
+      redactRunEventImages({
+        v: 3,
+        type: "message_start",
+        instanceId: input.conversationId,
+        agentName: input.agentName,
+        submissionId: input.submissionId,
+        eventIndex: firstIndex,
+        timestamp: startTimestamp,
+        message: userMessage,
+      }),
+    );
+  if (existingEnd === null)
+    yield* store.appendEventOnce(
+      streamPath,
+      endKey,
+      redactRunEventImages({
+        v: 3,
+        type: "message_end",
+        instanceId: input.conversationId,
+        agentName: input.agentName,
+        submissionId: input.submissionId,
+        eventIndex: firstIndex + 1,
+        timestamp: startTimestamp,
+        message: userMessage,
+      }),
+    );
 
   return {
     runId: input.runId,
@@ -504,6 +514,20 @@ const imageBlock = (value: unknown): unknown | undefined => {
     ? { type: "image", data: record.data, mimeType: record.mimeType }
     : undefined;
 };
+
+const eventIndexFrom = (event: unknown): number | undefined =>
+  typeof event === "object" &&
+  event !== null &&
+  typeof (event as { readonly eventIndex?: unknown }).eventIndex === "number"
+    ? (event as { readonly eventIndex: number }).eventIndex
+    : undefined;
+
+const timestampFrom = (event: unknown): string | undefined =>
+  typeof event === "object" &&
+  event !== null &&
+  typeof (event as { readonly timestamp?: unknown }).timestamp === "string"
+    ? (event as { readonly timestamp: string }).timestamp
+    : undefined;
 
 const subscribeRunFanout = (
   store: EventStreamStore,

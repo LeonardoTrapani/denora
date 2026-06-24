@@ -1,4 +1,5 @@
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Drizzle from "alchemy/Drizzle";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Etag from "effect/unstable/http/Etag";
@@ -17,6 +18,7 @@ import { ConversationPersistence } from "../conversation/ConversationPersistence
 import { Conversations } from "../conversation/Conversations.ts";
 import { Routes } from "../http/Routes.ts";
 import { Telemetry } from "../observability/Telemetry.ts";
+import { AlchemyDb } from "../persistence/AlchemyDb.ts";
 import { Db } from "../persistence/Db.ts";
 
 export interface ObservabilityConfig {
@@ -138,13 +140,15 @@ export default Resource.make(
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
     yield* Cloudflare.AiGateway.bind(AiGateway);
+    const hyperdrive = yield* Cloudflare.Hyperdrive.bind(AlchemyDb.DenoraHyperdrive);
+    const db = yield* Drizzle.postgres(hyperdrive.connectionString);
     const conversationObjects = yield* AgentConversationObject;
 
     return {
       fetch: Routes.layer.pipe(
         Layer.provide(Conversations.layer(conversationObjects)),
         Layer.provide(ConversationPersistence.layer),
-        Layer.provide(Db.hyperdriveLayer),
+        Layer.provide(Db.layer(db)),
         Layer.provide(AuthLive.layerFromConfig),
         Layer.provide([HttpPlatform.layer, Etag.layer]),
         Layer.provide(corsLayer),
@@ -154,7 +158,13 @@ export default Resource.make(
       ),
     };
   }).pipe(
-    Effect.provide(Layer.mergeAll(AgentConversationObjectLive, Cloudflare.AiGatewayBindingLive)),
+    Effect.provide(
+      Layer.mergeAll(
+        AgentConversationObjectLive,
+        Cloudflare.AiGatewayBindingLive,
+        Cloudflare.HyperdriveBindingLive,
+      ),
+    ),
   ),
 );
 

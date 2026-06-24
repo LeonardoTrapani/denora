@@ -93,6 +93,10 @@ export interface EventStreamStore {
     key: string,
     event: unknown,
   ) => Effect.Effect<string, EventStreamError>;
+  readonly readEventByKey: (
+    path: string,
+    key: string,
+  ) => Effect.Effect<{ readonly offset: string; readonly event: unknown } | null, EventStreamError>;
   readonly readEvents: (
     path: string,
     opts?: { readonly offset?: string | undefined; readonly limit?: number | undefined },
@@ -392,6 +396,30 @@ export const makeSqliteEventStreamStore = Effect.fn("EventStreamStore.makeSqlite
       };
     });
 
+    const readEventByKey = Effect.fn("EventStreamStore.readSqliteEventByKey")(function* (
+      path: string,
+      key: string,
+    ): Effect.fn.Return<
+      { readonly offset: string; readonly event: unknown } | null,
+      EventStreamError
+    > {
+      const cursor = yield* sql
+        .exec<EventKeyRow>(
+          `SELECT seq, data FROM denora_event_stream_keys WHERE path = ? AND key = ? LIMIT 1`,
+          path,
+          key,
+        )
+        .pipe(storageFailure("read event by key"));
+      const rows = yield* cursor.toArray().pipe(storageFailure("collect event by key"));
+      const row = rows[0];
+      if (row === undefined) return null;
+      const event = yield* Effect.try({
+        try: () => JSON.parse(row.data) as unknown,
+        catch: (cause) => new EventStorageFailed({ operation: "parse keyed event", cause }),
+      });
+      return { offset: formatOffset(row.seq), event };
+    });
+
     const closeStream = Effect.fn("EventStreamStore.closeSqliteStream")(function* (
       path: string,
     ): Effect.fn.Return<void, EventStorageFailed> {
@@ -405,6 +433,7 @@ export const makeSqliteEventStreamStore = Effect.fn("EventStreamStore.makeSqlite
       createStream,
       appendEvent,
       appendEventOnce,
+      readEventByKey,
       readEvents,
       closeStream,
       getStreamMeta,
@@ -526,6 +555,22 @@ export const makeInMemoryEventStreamStore = (): EventStreamStore => {
     };
   });
 
+  const readEventByKey = Effect.fn("EventStreamStore.readInMemoryEventByKey")(function* (
+    path: string,
+    key: string,
+  ): Effect.fn.Return<
+    { readonly offset: string; readonly event: unknown } | null,
+    EventStreamError
+  > {
+    const existing = eventKeys.get(`${path}:${key}`);
+    if (existing === undefined) return null;
+    const event = yield* Effect.try({
+      try: () => JSON.parse(existing.data) as unknown,
+      catch: (cause) => new EventStorageFailed({ operation: "parse keyed event", cause }),
+    });
+    return { offset: formatOffset(existing.seq), event };
+  });
+
   const closeStream = (path: string): Effect.Effect<void> =>
     Effect.sync(() => {
       const stream = streams.get(path);
@@ -537,6 +582,7 @@ export const makeInMemoryEventStreamStore = (): EventStreamStore => {
     createStream,
     appendEvent,
     appendEventOnce,
+    readEventByKey,
     readEvents,
     closeStream,
     getStreamMeta,

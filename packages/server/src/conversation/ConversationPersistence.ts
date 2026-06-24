@@ -1,6 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { and, asc, desc, eq } from "drizzle-orm";
-import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -134,45 +133,21 @@ export class Service extends Context.Service<Service, Interface>()(
   "@denora/server/ConversationPersistence",
 ) {}
 
-const persistenceOperationTimeout = "5 seconds";
-
 export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const db = yield* Db.Service;
 
-    const persist = <A>(operation: string, makeEffect: () => Effect.Effect<A, unknown>) =>
-      Effect.try({
-        try: makeEffect,
-        catch: (cause) => new PersistenceFailed({ operation, cause }),
-      }).pipe(
-        Effect.flatMap((effect) =>
-          effect.pipe(
-            Effect.catchCause((cause) =>
-              Effect.fail(new PersistenceFailed({ operation, cause: Cause.squash(cause) })),
-            ),
-            Effect.timeoutOrElse({
-              duration: persistenceOperationTimeout,
-              orElse: () =>
-                Effect.fail(
-                  new PersistenceFailed({
-                    operation,
-                    cause: new Error(
-                      `Conversation persistence timed out during ${operation} after ${persistenceOperationTimeout}.`,
-                    ),
-                  }),
-                ),
-            }),
-          ),
-        ),
-      );
+    const persist = <A>(operation: string, effect: Effect.Effect<A, unknown>) =>
+      effect.pipe(Effect.mapError((cause) => new PersistenceFailed({ operation, cause })));
     const nowIso = () => DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
     const findConversation = Effect.fn("ConversationPersistence.findConversation")(function* (
       conversationId: string,
       userId: string,
     ): Effect.fn.Return<ConversationRecord | undefined, Error> {
-      const rows = yield* persist("find conversation", () =>
+      const rows = yield* persist(
+        "find conversation",
         db.client
           .select()
           .from(conversations)
@@ -201,7 +176,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       if (existing !== undefined) return existing;
 
       const timestamp = yield* nowIso();
-      yield* persist("create conversation", () =>
+      yield* persist(
+        "create conversation",
         db.client
           .insert(conversations)
           .values({
@@ -229,7 +205,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
     const listConversations = Effect.fn("ConversationPersistence.listConversations")(function* (
       userId: string,
     ): Effect.fn.Return<ReadonlyArray<ConversationRecord>, Error> {
-      const rows = yield* persist("list conversations", () =>
+      const rows = yield* persist(
+        "list conversations",
         db.client
           .select()
           .from(conversations)
@@ -251,7 +228,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
     const readMessages = Effect.fn("ConversationPersistence.readMessages")(function* (
       conversationId: string,
     ): Effect.fn.Return<ReadonlyArray<ConversationMessageRecord>, Error> {
-      const rows = yield* persist("list conversation messages", () =>
+      const rows = yield* persist(
+        "list conversation messages",
         db.client
           .select()
           .from(conversationMessages)
@@ -305,7 +283,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
           messages: [...priorMessages.flatMap(toAgentMessage), ...currentUserMessages(content)],
         };
 
-        yield* persist("create user conversation message", () =>
+        yield* persist(
+          "create user conversation message",
           db.client
             .insert(conversationMessages)
             .values({
@@ -320,7 +299,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
             .onConflictDoNothing(),
         );
 
-        yield* persist("create conversation agent run", () =>
+        yield* persist(
+          "create conversation agent run",
           db.client
             .insert(agentRuns)
             .values({
@@ -337,7 +317,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
             .onConflictDoNothing(),
         );
 
-        yield* persist("create conversation denora run", () =>
+        yield* persist(
+          "create conversation denora run",
           db.client
             .insert(denoraRuns)
             .values({
@@ -350,7 +331,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
             .onConflictDoNothing(),
         );
 
-        yield* persist("touch conversation", () =>
+        yield* persist(
+          "touch conversation",
           db.client
             .update(conversations)
             .set({ updatedAt: timestamp })
@@ -365,7 +347,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       runId: string,
     ): Effect.fn.Return<void, Error> {
       const timestamp = yield* nowIso();
-      yield* persist("mark conversation run started", () =>
+      yield* persist(
+        "mark conversation run started",
         db.client
           .update(agentRuns)
           .set({ status: "running", startedAt: timestamp, updatedAt: timestamp })
@@ -377,14 +360,16 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       input: FinishRunInput,
     ): Effect.fn.Return<void, Error> {
       const timestamp = yield* nowIso();
-      const rows = yield* persist("find conversation run", () =>
+      const rows = yield* persist(
+        "find conversation run",
         db.client.select().from(agentRuns).where(eq(agentRuns.id, input.runId)).limit(1),
       );
       const row = rows[0];
       if (row === undefined)
         return yield* new ConversationNotAuthorized({ conversationId: input.runId });
 
-      yield* persist("finish conversation run", () =>
+      yield* persist(
+        "finish conversation run",
         db.client
           .update(agentRuns)
           .set({
@@ -397,7 +382,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
           .where(eq(agentRuns.id, input.runId)),
       );
 
-      yield* persist("finish conversation denora run", () =>
+      yield* persist(
+        "finish conversation denora run",
         db.client
           .update(denoraRuns)
           .set({
@@ -412,7 +398,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       );
 
       if (!input.isError) {
-        yield* persist("create assistant conversation message", () =>
+        yield* persist(
+          "create assistant conversation message",
           db.client.insert(conversationMessages).values({
             id: `message_${crypto.randomUUID()}`,
             conversationId: row.conversationId,
@@ -425,7 +412,8 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
         );
       }
 
-      yield* persist("touch conversation after run", () =>
+      yield* persist(
+        "touch conversation after run",
         db.client
           .update(conversations)
           .set({ updatedAt: timestamp })

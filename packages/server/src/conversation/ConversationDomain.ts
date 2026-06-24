@@ -101,14 +101,14 @@ export const richUserMessage = (
   const images = imageContents(decoded.value);
   if (images.length === 0) return undefined;
 
+  const textContent = Option.match(Option.fromUndefinedOr(decoded.value.text), {
+    onNone: () => [],
+    onSome: (text) => [{ type: "text" as const, text }],
+  });
+
   return {
     role: "user",
-    content: [
-      ...(decoded.value.text === undefined
-        ? []
-        : [{ type: "text" as const, text: decoded.value.text }]),
-      ...images,
-    ],
+    content: [...textContent, ...images],
     timestamp,
   };
 };

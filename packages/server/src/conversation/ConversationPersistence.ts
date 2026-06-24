@@ -4,7 +4,6 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { Db } from "../persistence/Db.ts";
 import {
@@ -14,6 +13,7 @@ import {
   denoraRuns,
 } from "../persistence/schema.ts";
 import { agentStreamPath } from "../agent-run/EventStreamStore.ts";
+import { ConversationDomain } from "./ConversationDomain.ts";
 
 export class PersistenceFailed extends Schema.TaggedErrorClass<PersistenceFailed>()(
   "PersistenceFailed",
@@ -69,11 +69,7 @@ export interface SubmitMessageInput {
   readonly content?: unknown;
 }
 
-export interface AgentPromptImage {
-  readonly type: "image";
-  readonly data: string;
-  readonly mimeType: string;
-}
+export type AgentPromptImage = ConversationDomain.ImageContent;
 
 export interface SubmittedMessage {
   readonly conversationId: string;
@@ -171,7 +167,7 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
     const createConversation = Effect.fn("ConversationPersistence.createConversation")(function* (
       input: CreateConversationInput,
     ): Effect.fn.Return<ConversationRecord, Error> {
-      const conversationId = input.conversationId ?? `conversation_${crypto.randomUUID()}`;
+      const conversationId = input.conversationId ?? ConversationDomain.makeConversationId();
       const existing = yield* findConversation(conversationId, input.userId);
       if (existing !== undefined) return existing;
 
@@ -248,9 +244,9 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
         userId: input.userId,
         agentId: agentName,
       });
-      const messageId = `message_${crypto.randomUUID()}`;
-      const submissionId = `submission_${crypto.randomUUID()}`;
-      const runId = `run_${crypto.randomUUID()}`;
+      const messageId = ConversationDomain.makeMessageId();
+      const submissionId = ConversationDomain.makeSubmissionId();
+      const runId = ConversationDomain.makeRunId();
       const streamPath = agentStreamPath(agentName, input.conversationId);
       const content = normalizeUserContent(input);
 
@@ -276,9 +272,9 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
         const priorMessages = yield* readMessages(input.conversationId);
         const timestamp = yield* nowIso();
         const content = input.content;
-        const prompt = promptFromContent(content);
+        const prompt = ConversationDomain.promptFromContent(content);
         const runInput = {
-          prompt: richUserMessage(content) === undefined ? prompt : "",
+          prompt: ConversationDomain.richUserMessage(content) === undefined ? prompt : "",
           submittedMessage: content,
           messages: [...priorMessages.flatMap(toAgentMessage), ...currentUserMessages(content)],
         };
@@ -366,7 +362,10 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       );
       const row = rows[0];
       if (row === undefined)
-        return yield* new ConversationNotAuthorized({ conversationId: input.runId });
+        return yield* new PersistenceFailed({
+          operation: "find conversation run",
+          cause: new Error(`Conversation run ${input.runId} was not found.`),
+        });
 
       yield* persist(
         "finish conversation run",
@@ -401,11 +400,11 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
         yield* persist(
           "create assistant conversation message",
           db.client.insert(conversationMessages).values({
-            id: `message_${crypto.randomUUID()}`,
+            id: ConversationDomain.makeMessageId(),
             conversationId: row.conversationId,
             runId: input.runId,
             role: "assistant",
-            content: { text: assistantTextFromResult(input.result) },
+            content: { text: ConversationDomain.assistantTextFromResult(input.result) },
             metadata: { source: "agent_submission_result" },
             createdAt: timestamp,
           }),
@@ -441,18 +440,9 @@ const normalizeUserContent = (input: SubmitMessageInput): unknown => {
   return { text: input.message ?? "", ...(input.images ? { images: input.images } : {}) };
 };
 
-const TextContent = Schema.Struct({ text: Schema.String });
-
-const promptFromContent = (content: unknown): string => {
-  if (typeof content === "string") return content;
-  const decoded = Schema.decodeUnknownOption(TextContent)(content);
-  if (Option.isSome(decoded)) return decoded.value.text;
-  return JSON.stringify(content) ?? "";
-};
-
 const toAgentMessage = (message: ConversationMessageRecord): ReadonlyArray<AgentMessage> => {
   if (message.role !== "user" && message.role !== "assistant") return [];
-  const text = promptFromContent(message.content);
+  const text = ConversationDomain.promptFromContent(message.content);
   if (message.role === "user")
     return [{ role: "user", content: text, timestamp: Date.parse(message.createdAt) }];
   return [
@@ -465,50 +455,9 @@ const toAgentMessage = (message: ConversationMessageRecord): ReadonlyArray<Agent
 };
 
 const currentUserMessages = (content: unknown): ReadonlyArray<AgentMessage> => {
-  const rich = richUserMessage(content);
+  const rich = ConversationDomain.richUserMessage(content);
   if (rich !== undefined) return [rich];
   return [];
-};
-
-const richUserMessage = (content: unknown): AgentMessage | undefined => {
-  if (typeof content !== "object" || content === null) return undefined;
-  const record = content as Record<string, unknown>;
-  const images = imageContents(record.images ?? record.image);
-  if (images.length === 0) return undefined;
-  const text = typeof record.text === "string" ? record.text : undefined;
-  return {
-    role: "user",
-    content: [...(text === undefined ? [] : [{ type: "text" as const, text }]), ...images],
-    timestamp: Date.now(),
-  };
-};
-
-const imageContents = (
-  value: unknown,
-): ReadonlyArray<{ readonly type: "image"; readonly data: string; readonly mimeType: string }> => {
-  if (Array.isArray(value)) return value.flatMap((item) => imageContent(item) ?? []);
-  const image = imageContent(value);
-  return image === undefined ? [] : [image];
-};
-
-const imageContent = (
-  value: unknown,
-): { readonly type: "image"; readonly data: string; readonly mimeType: string } | undefined => {
-  if (typeof value !== "object" || value === null) return undefined;
-  const record = value as Record<string, unknown>;
-  return record.type === "image" &&
-    typeof record.data === "string" &&
-    typeof record.mimeType === "string"
-    ? { type: "image", data: record.data, mimeType: record.mimeType }
-    : undefined;
-};
-
-const assistantTextFromResult = (result: unknown): string => {
-  if (typeof result === "object" && result !== null) {
-    const text = (result as Record<string, unknown>).assistantText;
-    if (typeof text === "string") return text;
-  }
-  return "";
 };
 
 export * as ConversationPersistence from "./ConversationPersistence.ts";

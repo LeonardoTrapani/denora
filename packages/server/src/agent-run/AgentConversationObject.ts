@@ -5,22 +5,19 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { PiAgentModel } from "../agent-loop/PiAgentModel.ts";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
-import {
-  type EventStreamError,
-  EventStorageFailed,
-  makeSqliteEventStreamStore,
-} from "./EventStreamStore.ts";
+import { type EventStreamError, EventStorageFailed, EventStreamStore } from "./EventStreamStore.ts";
 import { AgentConversationSessionStore } from "./AgentConversationSessionStore.ts";
 import {
+  AgentConversationCoordinator,
   type AbortConversationResult,
   type Interface as AgentConversationCoordinatorInterface,
-  makeSqliteAgentConversationCoordinator,
 } from "./AgentConversationCoordinator.ts";
 import {
   AgentRunLifecycle,
   type CreateConversationSubmissionInput,
   type CreateConversationSubmissionResult,
 } from "./Lifecycle.ts";
+import { SqlStorage } from "./SqlStorage.ts";
 import { handleConversationObjectRequest, internalErrorResponse } from "./StreamProtocol.ts";
 
 export interface Shape {
@@ -56,69 +53,70 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
 
       return yield* Effect.gen(function* () {
         const state = yield* Cloudflare.DurableObjectState;
-        const pi = yield* PiRuntime.Service;
-        // Stream storage is required for every request; initialization failure means
-        // this Durable Object instance has unavailable or corrupt SQLite state.
-        const store = yield* makeSqliteEventStreamStore(state.storage.sql).pipe(Effect.orDie);
-        const sessionStore = yield* AgentConversationSessionStore.makeSqlite(
-          state.storage.sql,
-        ).pipe(Effect.orDie);
-        const coordinator = yield* makeSqliteAgentConversationCoordinator(
-          state.storage.sql,
-          store,
-          sessionStore,
-        ).pipe(Effect.orDie);
+        const persistenceLayer = AgentConversationCoordinator.sqliteLayer.pipe(
+          Layer.provideMerge(EventStreamStore.sqliteLayer),
+          Layer.provideMerge(AgentConversationSessionStore.sqliteLayer),
+          Layer.provide(SqlStorage.layer(state.storage.sql)),
+          Layer.orDie,
+        );
+        const objectLayer = Layer.merge(piLayer, persistenceLayer);
 
-        return {
-          abortConversation: (input?: { readonly reason?: string | undefined }) =>
-            Effect.gen(function* () {
-              const result = yield* coordinator.abortConversation(input);
-              if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
-              return result;
-            }),
-          submitMessage: (input: CreateConversationSubmissionInput) =>
-            Effect.gen(function* () {
-              const admission = yield* coordinator.admitSubmission(input);
-              const created = yield* AgentRunLifecycle.createConversationSubmission(store, input);
-              if (input.waitForResult) {
-                const result = yield* waitForSubmissionResult(
-                  input.submissionId,
-                  coordinator,
+        return yield* Effect.gen(function* () {
+          const pi = yield* PiRuntime.Service;
+          const store = yield* EventStreamStore.Service;
+          const coordinator = yield* AgentConversationCoordinator.Service;
+
+          return {
+            abortConversation: (input?: { readonly reason?: string | undefined }) =>
+              Effect.gen(function* () {
+                const result = yield* coordinator.abortConversation(input);
+                if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
+                return result;
+              }),
+            submitMessage: (input: CreateConversationSubmissionInput) =>
+              Effect.gen(function* () {
+                const admission = yield* coordinator.admitSubmission(input);
+                const created = yield* AgentRunLifecycle.createConversationSubmission(store, input);
+                if (input.waitForResult) {
+                  const result = yield* waitForSubmissionResult(
+                    input.submissionId,
+                    coordinator,
+                    pi,
+                    (delayMs) => scheduleRunAlarm(state, delayMs),
+                  );
+                  return { ...created, result };
+                }
+                if (created.created || admission.admitted) yield* scheduleRunAlarm(state);
+                return created;
+              }),
+            alarm: () =>
+              Effect.gen(function* () {
+                const result = yield* coordinator.reconcile({
                   pi,
-                  (delayMs) => scheduleRunAlarm(state, delayMs),
-                );
-                return { ...created, result };
-              }
-              if (created.created || admission.admitted) yield* scheduleRunAlarm(state);
-              return created;
+                  scheduleWake: (delayMs) => scheduleRunAlarm(state, delayMs),
+                });
+                if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
+              }),
+            fetch: Effect.gen(function* () {
+              const request = yield* HttpServerRequest.HttpServerRequest;
+              const webRequest = yield* HttpServerRequest.toWeb(request);
+              const response = yield* handleConversationObjectRequest(store, webRequest).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.gen(function* () {
+                    const traceId = crypto.randomUUID();
+                    yield* Effect.logError("agent conversation object stream request failed", {
+                      traceId,
+                      cause,
+                    });
+                    return internalErrorResponse(traceId);
+                  }),
+                ),
+              );
+              return HttpServerResponse.fromWeb(response);
             }),
-          alarm: () =>
-            Effect.gen(function* () {
-              const result = yield* coordinator.reconcile({
-                pi,
-                scheduleWake: (delayMs) => scheduleRunAlarm(state, delayMs),
-              });
-              if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
-            }),
-          fetch: Effect.gen(function* () {
-            const request = yield* HttpServerRequest.HttpServerRequest;
-            const webRequest = yield* HttpServerRequest.toWeb(request);
-            const response = yield* handleConversationObjectRequest(store, webRequest).pipe(
-              Effect.catchCause((cause) =>
-                Effect.gen(function* () {
-                  const traceId = crypto.randomUUID();
-                  yield* Effect.logError("agent conversation object stream request failed", {
-                    traceId,
-                    cause,
-                  });
-                  return internalErrorResponse(traceId);
-                }),
-              ),
-            );
-            return HttpServerResponse.fromWeb(response);
-          }),
-        };
-      }).pipe(Effect.provide(piLayer));
+          };
+        }).pipe(Effect.provide(objectLayer));
+      });
     }).pipe(Effect.provide(Cloudflare.AiGatewayBindingLive)),
   ),
 );

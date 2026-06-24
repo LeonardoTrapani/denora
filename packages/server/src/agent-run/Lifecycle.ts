@@ -15,6 +15,7 @@ import {
   redactRunEventImages,
 } from "./RunEventContract.ts";
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
+import { ConversationDomain } from "../conversation/ConversationDomain.ts";
 
 const BUFFERED_EVENT_FLUSH_INTERVAL_MS = 3_000;
 
@@ -467,67 +468,13 @@ const makeFailedSubmissionSettled = Effect.fn("AgentRunLifecycle.makeFailedSubmi
 
 const userMessageFromInput = (input: unknown): unknown => ({
   role: "user",
-  content: submittedContentFromInput(input),
+  content: ConversationDomain.submittedContentFromInput(input),
   timestamp: Date.now(),
 });
 
-const promptFromInput = (input: unknown): string => {
-  if (typeof input === "string") return input;
-  if (typeof input === "object" && input !== null) {
-    const prompt = (input as Record<string, unknown>).prompt;
-    if (typeof prompt === "string") return prompt;
-  }
-  return "";
-};
+const eventIndexFrom = ConversationDomain.eventIndexFrom;
 
-const submittedContentFromInput = (input: unknown): unknown => {
-  if (typeof input === "object" && input !== null) {
-    const submitted = (input as Record<string, unknown>).submittedMessage;
-    if (submitted !== undefined) return messageContentFromSubmitted(submitted);
-  }
-  return promptFromInput(input);
-};
-
-const messageContentFromSubmitted = (submitted: unknown): unknown => {
-  if (typeof submitted === "string") return submitted;
-  if (typeof submitted !== "object" || submitted === null) return JSON.stringify(submitted) ?? "";
-  const record = submitted as Record<string, unknown>;
-  const text = typeof record.text === "string" ? record.text : undefined;
-  const images = imageBlocks(record.images ?? record.image);
-  if (images.length > 0)
-    return [...(text === undefined ? [] : [{ type: "text", text }]), ...images];
-  return text ?? JSON.stringify(submitted) ?? "";
-};
-
-const imageBlocks = (value: unknown): ReadonlyArray<unknown> => {
-  if (Array.isArray(value)) return value.flatMap((item) => imageBlock(item) ?? []);
-  const image = imageBlock(value);
-  return image === undefined ? [] : [image];
-};
-
-const imageBlock = (value: unknown): unknown | undefined => {
-  if (typeof value !== "object" || value === null) return undefined;
-  const record = value as Record<string, unknown>;
-  return record.type === "image" &&
-    typeof record.data === "string" &&
-    typeof record.mimeType === "string"
-    ? { type: "image", data: record.data, mimeType: record.mimeType }
-    : undefined;
-};
-
-const eventIndexFrom = (event: unknown): number | undefined =>
-  typeof event === "object" &&
-  event !== null &&
-  typeof (event as { readonly eventIndex?: unknown }).eventIndex === "number"
-    ? (event as { readonly eventIndex: number }).eventIndex
-    : undefined;
-
-const timestampFrom = (event: unknown): string | undefined =>
-  typeof event === "object" &&
-  event !== null &&
-  typeof (event as { readonly timestamp?: unknown }).timestamp === "string"
-    ? (event as { readonly timestamp: string }).timestamp
-    : undefined;
+const timestampFrom = ConversationDomain.timestampFrom;
 
 const subscribeRunFanout = (
   store: EventStreamStore,

@@ -1,27 +1,31 @@
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 import { assert, describe, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import {
-  makeSqliteAgentConversationCoordinator,
+  AgentConversationCoordinator,
   type Interface as AgentConversationCoordinatorInterface,
 } from "../../src/agent-run/AgentConversationCoordinator.ts";
 import { AgentConversationSessionStore } from "../../src/agent-run/AgentConversationSessionStore.ts";
 import {
+  EventStreamStore as EventStreamStoreModule,
   agentStreamPath,
   type EventStreamStore,
-  makeSqliteEventStreamStore,
 } from "../../src/agent-run/EventStreamStore.ts";
 import { AgentRunLifecycle } from "../../src/agent-run/Lifecycle.ts";
+import { SqlStorage } from "../../src/agent-run/SqlStorage.ts";
 import type { Interface as PiRuntimeInterface } from "../../src/agent-loop/PiRuntime.ts";
-import { makeSqliteStorage } from "../helpers/SqliteStorage.ts";
+import { SqliteStorage, type TestSqliteStorage } from "../helpers/SqliteStorage.ts";
+
+type TestSqlStorage = TestSqliteStorage["sql"];
 
 describe("AgentConversationSessionStore", () => {
   it.effect("replaying the same submission admission does not duplicate input stream events", () =>
-    Effect.gen(function* () {
-      const sqlite = makeSqliteStorage();
-      try {
-        const { store, coordinator } = yield* makeHarness(sqlite.sql);
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, store, coordinator } = yield* AgentConversationHarness;
         const input = submissionInput({ text: "hello" });
 
         const firstAdmission = yield* coordinator.admitSubmission(input);
@@ -45,23 +49,20 @@ describe("AgentConversationSessionStore", () => {
           events.map((event) => event.type),
           ["message_start", "message_end"],
         );
-        assert.strictEqual(yield* countSubmissions(sqlite.sql), 1);
-      } finally {
-        sqlite.close();
-      }
-    }),
+        assert.strictEqual(yield* countSubmissions(sql), 1);
+      }),
+    ),
   );
 
   it.effect("does not duplicate the user input when the same submission is applied twice", () =>
-    Effect.gen(function* () {
-      const sqlite = makeSqliteStorage();
-      try {
-        const sessions = yield* AgentConversationSessionStore.makeSqlite(sqlite.sql);
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
         const input = submissionInput({ text: "hello" });
 
         yield* sessions.recordSubmissionStarted(recordStartedInput(input));
         const replay = yield* sessions.recordSubmissionStarted(recordStartedInput(input));
-        const messages = yield* readSessionMessages(sqlite.sql);
+        const messages = yield* readSessionMessages(sql);
 
         assert.deepStrictEqual(
           messages.map((message) => message.role),
@@ -74,22 +75,19 @@ describe("AgentConversationSessionStore", () => {
           ),
           ["user"],
         );
-      } finally {
-        sqlite.close();
-      }
-    }),
+      }),
+    ),
   );
 
   it.effect("retries after input was applied using the persisted local session history", () =>
-    Effect.gen(function* () {
-      const sqlite = makeSqliteStorage();
-      try {
-        const { store, sessions, coordinator } = yield* makeHarness(sqlite.sql);
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, store, sessions, coordinator } = yield* AgentConversationHarness;
         const input = submissionInput({ text: "retry me" });
         yield* coordinator.admitSubmission(input);
         yield* AgentRunLifecycle.createConversationSubmission(store, input);
         yield* sessions.recordSubmissionStarted(recordStartedInput(input));
-        yield* markStaleApplied(sqlite.sql, input.submissionId);
+        yield* markStaleApplied(sql, input.submissionId);
 
         const contexts: Array<ReadonlyArray<AgentMessage>> = [];
         yield* coordinator.reconcile({
@@ -97,7 +95,7 @@ describe("AgentConversationSessionStore", () => {
           scheduleWake: () => Effect.void,
         });
 
-        const messages = yield* readSessionMessages(sqlite.sql);
+        const messages = yield* readSessionMessages(sql);
         assert.deepStrictEqual(
           messages.map((message) => message.role),
           ["user", "assistant"],
@@ -106,20 +104,17 @@ describe("AgentConversationSessionStore", () => {
           contexts[0]?.map((message) => message.role),
           ["user"],
         );
-        assert.strictEqual(yield* countMessages(sqlite.sql, "user"), 1);
-      } finally {
-        sqlite.close();
-      }
-    }),
+        assert.strictEqual(yield* countMessages(sql, "user"), 1);
+      }),
+    ),
   );
 
   it.effect(
     "settles from a persisted assistant final after crash without re-running the model",
     () =>
-      Effect.gen(function* () {
-        const sqlite = makeSqliteStorage();
-        try {
-          const { store, sessions, coordinator } = yield* makeHarness(sqlite.sql);
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, store, sessions, coordinator } = yield* AgentConversationHarness;
           const input = submissionInput({ text: "recover completed" });
           const contexts: Array<ReadonlyArray<AgentMessage>> = [];
 
@@ -132,7 +127,7 @@ describe("AgentConversationSessionStore", () => {
             isError: false,
             result: { assistantText: "already done" },
           });
-          yield* markStaleApplied(sqlite.sql, input.submissionId);
+          yield* markStaleApplied(sql, input.submissionId);
 
           yield* coordinator.reconcile({
             pi: makePi(["should not run"], contexts),
@@ -145,18 +140,15 @@ describe("AgentConversationSessionStore", () => {
           assert.strictEqual(event?.type, "submission_settled");
           assert.strictEqual(event?.outcome, "completed");
           assert.deepStrictEqual(event?.result, { assistantText: "already done" });
-          assert.strictEqual(yield* countMessages(sqlite.sql, "assistant"), 1);
-        } finally {
-          sqlite.close();
-        }
-      }),
+          assert.strictEqual(yield* countMessages(sql, "assistant"), 1);
+        }),
+      ),
   );
 
   it.effect("does not duplicate the assistant final message for the same run", () =>
-    Effect.gen(function* () {
-      const sqlite = makeSqliteStorage();
-      try {
-        const sessions = yield* AgentConversationSessionStore.makeSqlite(sqlite.sql);
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
         yield* sessions.finishRun({
           conversationId: "conversation_1",
           runId: "run_1",
@@ -170,18 +162,15 @@ describe("AgentConversationSessionStore", () => {
           result: { assistantText: "done" },
         });
 
-        assert.strictEqual(yield* countMessages(sqlite.sql, "assistant"), 1);
-      } finally {
-        sqlite.close();
-      }
-    }),
+        assert.strictEqual(yield* countMessages(sql, "assistant"), 1);
+      }),
+    ),
   );
 
   it.effect("uses prior locally persisted messages for later model context", () =>
-    Effect.gen(function* () {
-      const sqlite = makeSqliteStorage();
-      try {
-        const { store, coordinator } = yield* makeHarness(sqlite.sql);
+    withHarness(
+      Effect.gen(function* () {
+        const { store, coordinator } = yield* AgentConversationHarness;
         const contexts: Array<ReadonlyArray<AgentMessage>> = [];
         const pi = makePi(["first reply", "second reply"], contexts);
 
@@ -213,19 +202,16 @@ describe("AgentConversationSessionStore", () => {
           (contexts[1]?.[1] as Extract<AgentMessage, { role: "assistant" }> | undefined)?.content,
           [{ type: "text", text: "first reply" }],
         );
-      } finally {
-        sqlite.close();
-      }
-    }),
+      }),
+    ),
   );
 
   it.effect(
     "does not claim a later same-session submission while an earlier submission is running",
     () =>
-      Effect.gen(function* () {
-        const sqlite = makeSqliteStorage();
-        try {
-          const { store, coordinator } = yield* makeHarness(sqlite.sql);
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, store, coordinator } = yield* AgentConversationHarness;
           const first = submissionInput({
             submissionId: "submission_first_running",
             runId: "run_first_running",
@@ -242,7 +228,7 @@ describe("AgentConversationSessionStore", () => {
 
           yield* admitAndCreate(store, coordinator, first);
           yield* admitAndCreate(store, coordinator, second);
-          yield* markRunning(sqlite.sql, first.submissionId);
+          yield* markRunning(sql, first.submissionId);
 
           yield* coordinator.reconcile({
             pi: makePi(["should not run"], contexts),
@@ -250,35 +236,26 @@ describe("AgentConversationSessionStore", () => {
           });
 
           assert.strictEqual(contexts.length, 0);
-          assert.strictEqual(
-            yield* readSubmissionStatus(sqlite.sql, second.submissionId),
-            "queued",
-          );
+          assert.strictEqual(yield* readSubmissionStatus(sql, second.submissionId), "queued");
 
-          yield* markSettled(sqlite.sql, first.submissionId);
+          yield* markSettled(sql, first.submissionId);
           yield* coordinator.reconcile({
             pi: makePi(["second reply"], contexts),
             scheduleWake: () => Effect.void,
           });
 
           assert.strictEqual(contexts.length, 1);
-          assert.strictEqual(
-            yield* readSubmissionStatus(sqlite.sql, second.submissionId),
-            "settled",
-          );
-        } finally {
-          sqlite.close();
-        }
-      }),
+          assert.strictEqual(yield* readSubmissionStatus(sql, second.submissionId), "settled");
+        }),
+      ),
   );
 
   it.effect(
     "claims a different session while an earlier active submission blocks only its own session",
     () =>
-      Effect.gen(function* () {
-        const sqlite = makeSqliteStorage();
-        try {
-          const { store, coordinator } = yield* makeHarness(sqlite.sql);
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, store, coordinator } = yield* AgentConversationHarness;
           const running = submissionInput({
             submissionId: "submission_active_session_a",
             runId: "run_active_session_a",
@@ -305,7 +282,7 @@ describe("AgentConversationSessionStore", () => {
           yield* admitAndCreate(store, coordinator, running);
           yield* admitAndCreate(store, coordinator, blocked);
           yield* admitAndCreate(store, coordinator, runnable);
-          yield* markRunning(sqlite.sql, running.submissionId);
+          yield* markRunning(sql, running.submissionId);
 
           yield* coordinator.reconcile({
             pi: makePi(["session b reply"], contexts),
@@ -313,27 +290,18 @@ describe("AgentConversationSessionStore", () => {
           });
 
           assert.strictEqual(contexts.length, 1);
-          assert.strictEqual(
-            yield* readSubmissionStatus(sqlite.sql, blocked.submissionId),
-            "queued",
-          );
-          assert.strictEqual(
-            yield* readSubmissionStatus(sqlite.sql, runnable.submissionId),
-            "settled",
-          );
-        } finally {
-          sqlite.close();
-        }
-      }),
+          assert.strictEqual(yield* readSubmissionStatus(sql, blocked.submissionId), "queued");
+          assert.strictEqual(yield* readSubmissionStatus(sql, runnable.submissionId), "settled");
+        }),
+      ),
   );
 
   it.effect(
     "does not claim a later same-session submission while an earlier submission is terminalizing",
     () =>
-      Effect.gen(function* () {
-        const sqlite = makeSqliteStorage();
-        try {
-          const { store, coordinator } = yield* makeHarness(sqlite.sql);
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, store, coordinator } = yield* AgentConversationHarness;
           const terminalizing = submissionInput({
             submissionId: "submission_terminalizing_session_a",
             runId: "run_terminalizing_session_a",
@@ -360,7 +328,7 @@ describe("AgentConversationSessionStore", () => {
           yield* admitAndCreate(store, coordinator, terminalizing);
           yield* admitAndCreate(store, coordinator, blocked);
           yield* admitAndCreate(store, coordinator, runnable);
-          yield* markTerminalizing(sqlite.sql, terminalizing.submissionId);
+          yield* markTerminalizing(sql, terminalizing.submissionId);
 
           yield* coordinator.reconcile({
             pi: makePi(["session b reply"], contexts),
@@ -369,28 +337,19 @@ describe("AgentConversationSessionStore", () => {
 
           assert.strictEqual(contexts.length, 1);
           assert.strictEqual(
-            yield* readSubmissionStatus(sqlite.sql, terminalizing.submissionId),
+            yield* readSubmissionStatus(sql, terminalizing.submissionId),
             "terminalizing",
           );
-          assert.strictEqual(
-            yield* readSubmissionStatus(sqlite.sql, blocked.submissionId),
-            "queued",
-          );
-          assert.strictEqual(
-            yield* readSubmissionStatus(sqlite.sql, runnable.submissionId),
-            "settled",
-          );
-        } finally {
-          sqlite.close();
-        }
-      }),
+          assert.strictEqual(yield* readSubmissionStatus(sql, blocked.submissionId), "queued");
+          assert.strictEqual(yield* readSubmissionStatus(sql, runnable.submissionId), "settled");
+        }),
+      ),
   );
 
   it.effect("retries a stale earlier submission before a later same-session submission", () =>
-    Effect.gen(function* () {
-      const sqlite = makeSqliteStorage();
-      try {
-        const { store, sessions, coordinator } = yield* makeHarness(sqlite.sql);
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, store, sessions, coordinator } = yield* AgentConversationHarness;
         const first = submissionInput({
           submissionId: "submission_stale_first",
           runId: "run_stale_first",
@@ -408,7 +367,7 @@ describe("AgentConversationSessionStore", () => {
         yield* admitAndCreate(store, coordinator, first);
         yield* admitAndCreate(store, coordinator, second);
         yield* sessions.recordSubmissionStarted(recordStartedInput(first));
-        yield* markStaleApplied(sqlite.sql, first.submissionId);
+        yield* markStaleApplied(sql, first.submissionId);
 
         yield* coordinator.reconcile({
           pi: makePi(["first recovered", "second reply"], contexts),
@@ -424,23 +383,58 @@ describe("AgentConversationSessionStore", () => {
           contexts[1]?.map((message) => message.role),
           ["user", "assistant", "user"],
         );
-        assert.strictEqual(yield* readSubmissionStatus(sqlite.sql, first.submissionId), "settled");
-        assert.strictEqual(yield* readSubmissionStatus(sqlite.sql, second.submissionId), "settled");
-        assert.strictEqual(yield* countMessages(sqlite.sql, "user"), 2);
-      } finally {
-        sqlite.close();
-      }
-    }),
+        assert.strictEqual(yield* readSubmissionStatus(sql, first.submissionId), "settled");
+        assert.strictEqual(yield* readSubmissionStatus(sql, second.submissionId), "settled");
+        assert.strictEqual(yield* countMessages(sql, "user"), 2);
+      }),
+    ),
   );
 });
 
-const makeHarness = (sql: ReturnType<typeof makeSqliteStorage>["sql"]) =>
+interface AgentConversationHarnessValue {
+  readonly sql: TestSqlStorage;
+  readonly store: EventStreamStore;
+  readonly sessions: AgentConversationSessionStore.Interface;
+  readonly coordinator: AgentConversationCoordinatorInterface;
+}
+
+class AgentConversationHarness extends Context.Service<
+  AgentConversationHarness,
+  AgentConversationHarnessValue
+>()("test/AgentConversationHarness") {}
+
+const agentConversationHarnessLayer = Layer.effect(
+  AgentConversationHarness,
   Effect.gen(function* () {
-    const store = yield* makeSqliteEventStreamStore(sql);
-    const sessions = yield* AgentConversationSessionStore.makeSqlite(sql);
-    const coordinator = yield* makeSqliteAgentConversationCoordinator(sql, store, sessions);
-    return { store, sessions, coordinator };
-  });
+    const sqlite = yield* SqliteStorage.Service;
+    const store = yield* EventStreamStoreModule.Service;
+    const sessions = yield* AgentConversationSessionStore.Service;
+    const coordinator = yield* AgentConversationCoordinator.Service;
+    return AgentConversationHarness.of({
+      sql: sqlite.sql,
+      store,
+      sessions,
+      coordinator,
+    });
+  }),
+).pipe(
+  Layer.provideMerge(AgentConversationCoordinator.sqliteLayer),
+  Layer.provideMerge(EventStreamStoreModule.sqliteLayer),
+  Layer.provideMerge(AgentConversationSessionStore.sqliteLayer),
+  Layer.provideMerge(
+    Layer.effect(
+      SqlStorage.Service,
+      Effect.gen(function* () {
+        const sqlite = yield* SqliteStorage.Service;
+        return SqlStorage.Service.of(sqlite.sql);
+      }),
+    ),
+  ),
+  Layer.provide(SqliteStorage.layer),
+);
+
+const withHarness = <A, E>(effect: Effect.Effect<A, E, AgentConversationHarness>) =>
+  effect.pipe(Effect.provide(agentConversationHarnessLayer));
 
 const submissionInput = (
   options: {
@@ -514,7 +508,7 @@ const makePi = (
   };
 };
 
-const markStaleApplied = (sql: ReturnType<typeof makeSqliteStorage>["sql"], submissionId: string) =>
+const markStaleApplied = (sql: TestSqlStorage, submissionId: string) =>
   sql
     .exec(
       `UPDATE denora_agent_conversation_submissions
@@ -526,7 +520,7 @@ const markStaleApplied = (sql: ReturnType<typeof makeSqliteStorage>["sql"], subm
     )
     .pipe(Effect.asVoid);
 
-const markRunning = (sql: ReturnType<typeof makeSqliteStorage>["sql"], submissionId: string) =>
+const markRunning = (sql: TestSqlStorage, submissionId: string) =>
   sql
     .exec(
       `UPDATE denora_agent_conversation_submissions
@@ -537,7 +531,7 @@ const markRunning = (sql: ReturnType<typeof makeSqliteStorage>["sql"], submissio
     )
     .pipe(Effect.asVoid);
 
-const markSettled = (sql: ReturnType<typeof makeSqliteStorage>["sql"], submissionId: string) =>
+const markSettled = (sql: TestSqlStorage, submissionId: string) =>
   sql
     .exec(
       `UPDATE denora_agent_conversation_submissions
@@ -548,10 +542,7 @@ const markSettled = (sql: ReturnType<typeof makeSqliteStorage>["sql"], submissio
     )
     .pipe(Effect.asVoid);
 
-const markTerminalizing = (
-  sql: ReturnType<typeof makeSqliteStorage>["sql"],
-  submissionId: string,
-) =>
+const markTerminalizing = (sql: TestSqlStorage, submissionId: string) =>
   sql
     .exec(
       `UPDATE denora_agent_conversation_submissions
@@ -561,10 +552,7 @@ const markTerminalizing = (
     )
     .pipe(Effect.asVoid);
 
-const readSubmissionStatus = (
-  sql: ReturnType<typeof makeSqliteStorage>["sql"],
-  submissionId: string,
-) =>
+const readSubmissionStatus = (sql: TestSqlStorage, submissionId: string) =>
   Effect.gen(function* () {
     const cursor = yield* sql.exec<SubmissionStatusRow>(
       `SELECT status
@@ -576,7 +564,7 @@ const readSubmissionStatus = (
     return (yield* cursor.one()).status;
   });
 
-const readSessionMessages = (sql: ReturnType<typeof makeSqliteStorage>["sql"]) =>
+const readSessionMessages = (sql: TestSqlStorage) =>
   Effect.gen(function* () {
     const cursor = yield* sql.exec<MessageRow>(
       `SELECT message_id, role, content_json
@@ -586,7 +574,7 @@ const readSessionMessages = (sql: ReturnType<typeof makeSqliteStorage>["sql"]) =
     return yield* cursor.toArray();
   });
 
-const countMessages = (sql: ReturnType<typeof makeSqliteStorage>["sql"], role: string) =>
+const countMessages = (sql: TestSqlStorage, role: string) =>
   Effect.gen(function* () {
     const cursor = yield* sql.exec<CountRow>(
       `SELECT COUNT(*) AS count
@@ -597,7 +585,7 @@ const countMessages = (sql: ReturnType<typeof makeSqliteStorage>["sql"], role: s
     return (yield* cursor.one()).count;
   });
 
-const countSubmissions = (sql: ReturnType<typeof makeSqliteStorage>["sql"]) =>
+const countSubmissions = (sql: TestSqlStorage) =>
   Effect.gen(function* () {
     const cursor = yield* sql.exec<CountRow>(
       `SELECT COUNT(*) AS count

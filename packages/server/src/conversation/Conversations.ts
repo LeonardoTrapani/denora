@@ -28,6 +28,7 @@ import {
   type ConversationMessageRecord,
   type ConversationRecord,
 } from "./ConversationPersistence.ts";
+import { ConversationDomain } from "./ConversationDomain.ts";
 
 export class ConversationRequestFailed extends Schema.TaggedErrorClass<ConversationRequestFailed>()(
   "ConversationRequestFailed",
@@ -237,7 +238,7 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
       readonly title?: string | null | undefined;
       readonly metadata?: unknown;
     }): ConversationRecord => {
-      const conversationId = input.conversationId ?? `conversation_${crypto.randomUUID()}`;
+      const conversationId = input.conversationId ?? ConversationDomain.makeConversationId();
       const existing = conversations.get(conversationId);
       if (existing !== undefined) return existing;
       const timestamp = new Date().toISOString();
@@ -282,20 +283,15 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
           }
           const existingMessages = messages.get(input.conversationId) ?? [];
           const timestamp = new Date().toISOString();
-          const messageId = `message_${crypto.randomUUID()}`;
-          const submissionId = `submission_${crypto.randomUUID()}`;
-          const runId = `run_${crypto.randomUUID()}`;
+          const messageId = ConversationDomain.makeMessageId();
+          const submissionId = ConversationDomain.makeSubmissionId();
+          const runId = ConversationDomain.makeRunId();
           const content = input.content ?? {
             text: input.message ?? "",
             ...(input.images ? { images: input.images } : {}),
           };
-          const prompt =
-            typeof content === "object" &&
-            content !== null &&
-            typeof (content as Record<string, unknown>).text === "string"
-              ? ((content as Record<string, unknown>).text as string)
-              : (JSON.stringify(content) ?? "");
-          const richMessage = richUserMessage(content);
+          const prompt = ConversationDomain.promptFromContent(content);
+          const richMessage = ConversationDomain.richUserMessage(content);
           const inputPayload = {
             prompt: richMessage === undefined ? prompt : "",
             submittedMessage: content,
@@ -349,7 +345,7 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
                         instanceId: input.conversationId,
                         agentName,
                         submissionId,
-                        eventIndex: nextEventIndex(result.terminalEvent),
+                        eventIndex: ConversationDomain.nextEventIndex(result.terminalEvent),
                         timestamp: new Date().toISOString(),
                       },
                     ),
@@ -468,41 +464,5 @@ const conversationRequestFailedFromCause = (
     });
   });
 };
-
-const richUserMessage = (content: unknown): unknown | undefined => {
-  if (typeof content !== "object" || content === null) return undefined;
-  const record = content as Record<string, unknown>;
-  const images = imageMessages(record.images ?? record.image);
-  if (images.length === 0) return undefined;
-  const text = typeof record.text === "string" ? record.text : undefined;
-  return {
-    role: "user",
-    content: [...(text === undefined ? [] : [{ type: "text", text }]), ...images],
-    timestamp: Date.now(),
-  };
-};
-
-const imageMessages = (value: unknown): ReadonlyArray<unknown> => {
-  if (Array.isArray(value)) return value.flatMap((item) => imageMessage(item) ?? []);
-  const image = imageMessage(value);
-  return image === undefined ? [] : [image];
-};
-
-const imageMessage = (value: unknown): unknown | undefined => {
-  if (typeof value !== "object" || value === null) return undefined;
-  const record = value as Record<string, unknown>;
-  return record.type === "image" &&
-    typeof record.data === "string" &&
-    typeof record.mimeType === "string"
-    ? { type: "image", data: record.data, mimeType: record.mimeType }
-    : undefined;
-};
-
-const nextEventIndex = (event: unknown): number =>
-  typeof event === "object" &&
-  event !== null &&
-  typeof (event as { readonly eventIndex?: unknown }).eventIndex === "number"
-    ? (event as { readonly eventIndex: number }).eventIndex + 1
-    : 0;
 
 export * as Conversations from "./Conversations.ts";

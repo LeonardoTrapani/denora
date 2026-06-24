@@ -1,5 +1,7 @@
 import type * as Cloudflare from "alchemy/Cloudflare";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import {
   AgentRunLifecycle,
   type CreateConversationSubmissionInput,
@@ -11,11 +13,13 @@ import {
   type EventStreamStore,
   EventSerializationFailed,
   EventStorageFailed,
+  Service as EventStreamStoreService,
   agentStreamPath,
   formatOffset,
   parseOffset,
 } from "./EventStreamStore.ts";
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
+import { SqlStorage } from "./SqlStorage.ts";
 
 const WAKE_DELAY_MS = 30_000;
 const RUNNING_STALE_MS = 15 * 60 * 1000;
@@ -88,6 +92,25 @@ export interface Interface {
   ) => Effect.Effect<SubmissionTerminalResult | null, EventStreamError>;
   readonly reconcile: (input: ReconcileInput) => Effect.Effect<ReconcileResult, EventStreamError>;
 }
+
+export class Service extends Context.Service<Service, Interface>()(
+  "@denora/server/AgentConversationCoordinator",
+) {}
+
+export const sqliteLayer: Layer.Layer<
+  Service,
+  EventStorageFailed,
+  SqlStorage.Service | EventStreamStoreService | AgentConversationSessionStore.Service
+> = Layer.effect(
+  Service,
+  Effect.gen(function* () {
+    const sql = yield* SqlStorage.Service;
+    const store = yield* EventStreamStoreService;
+    const sessions = yield* AgentConversationSessionStore.Service;
+    const coordinator = yield* makeSqliteAgentConversationCoordinator(sql, store, sessions);
+    return Service.of(coordinator);
+  }),
+);
 
 export const makeSqliteAgentConversationCoordinator = Effect.fn(
   "AgentConversationCoordinator.makeSqliteAgentConversationCoordinator",

@@ -1,6 +1,9 @@
 import type * as Cloudflare from "alchemy/Cloudflare";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import { SqlStorage } from "./SqlStorage.ts";
 
 const COMPONENT_PAD = 16;
 const ZERO_COMPONENT = "0".repeat(COMPONENT_PAD);
@@ -105,6 +108,20 @@ export interface EventStreamStore {
   readonly getStreamMeta: (path: string) => Effect.Effect<EventStreamMeta | null, EventStreamError>;
   readonly subscribe: (path: string, listener: () => void) => Effect.Effect<() => void>;
 }
+
+export class Service extends Context.Service<Service, EventStreamStore>()(
+  "@denora/server/EventStreamStore",
+) {}
+
+export const sqliteLayer: Layer.Layer<Service, EventStorageFailed, SqlStorage.Service> =
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const sql = yield* SqlStorage.Service;
+      const store = yield* makeSqliteEventStreamStore(sql);
+      return Service.of(store);
+    }),
+  );
 
 export const formatOffset = (seq: number): string => {
   if (seq === -1) return "-1";

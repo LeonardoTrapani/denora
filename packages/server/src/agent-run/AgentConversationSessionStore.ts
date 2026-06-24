@@ -1,10 +1,12 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type * as Cloudflare from "alchemy/Cloudflare";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
+import * as Layer from "effect/Layer";
+import { ConversationDomain } from "../conversation/ConversationDomain.ts";
 import { EventStorageFailed } from "./EventStreamStore.ts";
+import { SqlStorage } from "./SqlStorage.ts";
 
 const CREATE_MESSAGES_TABLE = `
 CREATE TABLE IF NOT EXISTS denora_agent_conversation_session_messages (
@@ -57,6 +59,20 @@ export interface Interface {
     readonly runId: string;
   }) => Effect.Effect<CompletedAssistantRun | null, EventStorageFailed>;
 }
+
+export class Service extends Context.Service<Service, Interface>()(
+  "@denora/server/AgentConversationSessionStore",
+) {}
+
+export const sqliteLayer: Layer.Layer<Service, EventStorageFailed, SqlStorage.Service> =
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const sql = yield* SqlStorage.Service;
+      const store = yield* makeSqlite(sql);
+      return Service.of(store);
+    }),
+  );
 
 export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(function* (
   sql: Cloudflare.SqlStorage,
@@ -119,7 +135,7 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
       conversationId: input.conversationId,
       runId: input.runId,
       role: "assistant",
-      content: { text: assistantTextFromResult(input.result) },
+      content: { text: ConversationDomain.assistantTextFromResult(input.result) },
       metadata: { source: "agent_submission_result", result: input.result },
       createdAt: timestamp,
     });
@@ -146,7 +162,7 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     const row = rows[0];
     if (row === undefined) return null;
     const message = yield* parseMessageRow(row);
-    return { assistantText: promptFromContent(message.content) };
+    return { assistantText: ConversationDomain.promptFromContent(message.content) };
   });
 
   return { recordSubmissionStarted, finishRun, reconstructCompletedRun } satisfies Interface;
@@ -232,19 +248,10 @@ const stringify = (value: unknown): Effect.Effect<string, EventStorageFailed> =>
     ),
   );
 
-const TextContent = Schema.Struct({ text: Schema.String });
-
-const promptFromContent = (content: unknown): string => {
-  if (typeof content === "string") return content;
-  const decoded = Schema.decodeUnknownOption(TextContent)(content);
-  if (Option.isSome(decoded)) return decoded.value.text;
-  return JSON.stringify(content) ?? "";
-};
-
 const toAgentMessage = (message: MessageRecord): ReadonlyArray<AgentMessage> => {
-  const text = promptFromContent(message.content);
+  const text = ConversationDomain.promptFromContent(message.content);
   if (message.role === "user") {
-    const rich = richUserMessage(message.content, Date.parse(message.createdAt));
+    const rich = ConversationDomain.richUserMessage(message.content, Date.parse(message.createdAt));
     return [rich ?? { role: "user", content: text, timestamp: Date.parse(message.createdAt) }];
   }
   return [
@@ -254,47 +261,6 @@ const toAgentMessage = (message: MessageRecord): ReadonlyArray<AgentMessage> => 
       timestamp: Date.parse(message.createdAt),
     } as AgentMessage,
   ];
-};
-
-const richUserMessage = (content: unknown, timestamp = Date.now()): AgentMessage | undefined => {
-  if (typeof content !== "object" || content === null) return undefined;
-  const record = content as Record<string, unknown>;
-  const images = imageContents(record.images ?? record.image);
-  if (images.length === 0) return undefined;
-  const text = typeof record.text === "string" ? record.text : undefined;
-  return {
-    role: "user",
-    content: [...(text === undefined ? [] : [{ type: "text" as const, text }]), ...images],
-    timestamp,
-  };
-};
-
-const imageContents = (
-  value: unknown,
-): ReadonlyArray<{ readonly type: "image"; readonly data: string; readonly mimeType: string }> => {
-  if (Array.isArray(value)) return value.flatMap((item) => imageContent(item) ?? []);
-  const image = imageContent(value);
-  return image === undefined ? [] : [image];
-};
-
-const imageContent = (
-  value: unknown,
-): { readonly type: "image"; readonly data: string; readonly mimeType: string } | undefined => {
-  if (typeof value !== "object" || value === null) return undefined;
-  const record = value as Record<string, unknown>;
-  return record.type === "image" &&
-    typeof record.data === "string" &&
-    typeof record.mimeType === "string"
-    ? { type: "image", data: record.data, mimeType: record.mimeType }
-    : undefined;
-};
-
-const assistantTextFromResult = (result: unknown): string => {
-  if (typeof result === "object" && result !== null) {
-    const text = (result as Record<string, unknown>).assistantText;
-    if (typeof text === "string") return text;
-  }
-  return "";
 };
 
 const assistantMessageId = (runId: string): string => `assistant:${runId}`;

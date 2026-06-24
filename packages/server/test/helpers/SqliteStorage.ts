@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import type * as Cloudflare from "alchemy/Cloudflare";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
 export interface TestSqliteStorage {
   readonly sql: Cloudflare.SqlStorage;
@@ -52,5 +54,14 @@ export const makeSqliteStorage = (): TestSqliteStorage => {
 
   return { sql, close: () => db.close() };
 };
+
+export class Service extends Context.Service<Service, TestSqliteStorage>()("test/SqliteStorage") {}
+
+export const layer: Layer.Layer<Service> = Layer.effect(
+  Service,
+  Effect.acquireRelease(Effect.sync(makeSqliteStorage), (storage) =>
+    Effect.sync(() => storage.close()),
+  ).pipe(Effect.map(Service.of)),
+);
 
 export * as SqliteStorage from "./SqliteStorage.ts";

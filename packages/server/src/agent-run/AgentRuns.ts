@@ -7,6 +7,7 @@ import type { HttpServerError } from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
+import type { AbortConversationResult } from "./AgentConversationCoordinator.ts";
 import {
   AgentRunPersistence,
   type Error as AgentRunPersistenceError,
@@ -46,18 +47,26 @@ export interface CreateAgentRunInput {
   readonly triggerMessageId?: string | undefined;
 }
 
-export interface AgentRunObjectStub {
-  readonly create: (input: CreateRunInput) => Effect.Effect<CreateRunResult, EventStreamError>;
+export interface AgentConversationObjectStub {
+  readonly abortConversation: (input?: {
+    readonly reason?: string | undefined;
+  }) => Effect.Effect<AbortConversationResult, EventStreamError>;
+  readonly createRun: (input: CreateRunInput) => Effect.Effect<CreateRunResult, EventStreamError>;
   readonly fetch: (
     request: HttpServerRequest.HttpServerRequest,
   ) => Effect.Effect<HttpServerResponse.HttpServerResponse, HttpServerError>;
 }
 
-export interface AgentRunObjectNamespace {
-  readonly getByName: (name: string) => AgentRunObjectStub;
+export interface AgentConversationObjectNamespace {
+  readonly getByName: (name: string) => AgentConversationObjectStub;
 }
 
 export interface Interface {
+  readonly abortConversation: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+    readonly reason?: string | undefined;
+  }) => Effect.Effect<AbortConversationResult, CreateAgentRunFailed>;
   readonly create: (
     input: CreateAgentRunInput,
   ) => Effect.Effect<CreateRunResult, CreateAgentRunFailed>;
@@ -71,7 +80,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@denora/server/AgentRuns") {}
 
 export const layer = (
-  objects: AgentRunObjectNamespace,
+  objects: AgentConversationObjectNamespace,
 ): Layer.Layer<Service, never, AgentRunPersistence.Service> =>
   Layer.effect(
     Service,
@@ -79,6 +88,14 @@ export const layer = (
       const persistence = yield* AgentRunPersistence.Service;
 
       return Service.of({
+        abortConversation: (input) =>
+          persistence.authorizeConversation(input).pipe(
+            Effect.flatMap(() =>
+              objects.getByName(input.conversationId).abortConversation({ reason: input.reason }),
+            ),
+            Effect.mapError(createAgentRunFailed),
+            Effect.catchCause(createAgentRunFailedFromCause),
+          ),
         create: (input) => {
           const runId = input.runId ?? crypto.randomUUID();
           if (input.userId === undefined) {
@@ -101,8 +118,14 @@ export const layer = (
             .pipe(
               Effect.flatMap((registered) =>
                 objects
-                  .getByName(runId)
-                  .create({ runId, input: registered.input, userId: input.userId })
+                  .getByName(registered.conversationId)
+                  .createRun({
+                    runId,
+                    conversationId: registered.conversationId,
+                    triggerMessageId: registered.triggerMessageId ?? undefined,
+                    input: registered.input,
+                    userId: input.userId,
+                  })
                   .pipe(
                     Effect.map((created) => ({
                       ...created,
@@ -115,7 +138,7 @@ export const layer = (
             );
         },
         streamRequest: (runId, userId, request) =>
-          persistence.authorizeRun({ runId, userId }).pipe(
+          persistence.authorizeRunForStream({ runId, userId }).pipe(
             Effect.matchEffect({
               onFailure: (error) => {
                 if (error._tag === "RunNotAuthorized") {
@@ -131,7 +154,8 @@ export const layer = (
                   return HttpServerResponse.fromWeb(internalErrorResponse(traceId));
                 });
               },
-              onSuccess: () => objects.getByName(runId).fetch(request),
+              onSuccess: (authorized) =>
+                objects.getByName(authorized.conversationId).fetch(request),
             }),
             Effect.catchCause((cause) =>
               Effect.gen(function* () {
@@ -156,10 +180,14 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
     const store = makeInMemoryEventStreamStore();
 
     return Service.of({
+      abortConversation: () =>
+        Effect.succeed({ abortedSubmissions: 0, needsWake: false, wakeDelayMs: 0 }),
       create: (input) => {
         const runId = input.runId ?? crypto.randomUUID();
+        const conversationId = input.conversationId ?? `conversation_${crypto.randomUUID()}`;
         return AgentRunLifecycle.startRun(store, {
           runId,
+          conversationId,
           input: input.input,
           userId: input.userId,
           scheduleExecution: () =>

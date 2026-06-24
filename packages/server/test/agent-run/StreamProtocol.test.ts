@@ -320,6 +320,26 @@ describe("StreamProtocol", () => {
     }),
   );
 
+  it.effect("returns generic stream_not_found for missing attached-agent streams", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+
+      const response = yield* handleStreamRead({
+        store,
+        path: "agents/denora/missing",
+        request: new Request("https://api.test/agents/denora/missing?offset=-1"),
+      });
+
+      assert.strictEqual(response.status, 404);
+      assert.deepStrictEqual(yield* Effect.promise(() => response.json()), {
+        error: {
+          type: "stream_not_found",
+          message: 'Event stream "agents/denora/missing" was not found.',
+        },
+      });
+    }),
+  );
+
   it.effect("fails the SSE stream instead of emitting error frames when reads fail", () =>
     Effect.gen(function* () {
       const base = makeInMemoryEventStreamStore();

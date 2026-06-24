@@ -18,6 +18,7 @@ export interface ExecuteInput {
   readonly input?: unknown;
   readonly streamFn: StreamFn;
   readonly onAgentEvent: RunEventCallback;
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface ExecuteResult {
@@ -76,15 +77,23 @@ class AgentRunSession {
   prompt(): Effect.Effect<ExecuteResult, AgentRunSessionFailed> {
     return Effect.tryPromise({
       try: async () => {
+        const onAbort = () => this.agentLoop.abort();
+        if (this.input.signal?.aborted) onAbort();
+        else this.input.signal?.addEventListener("abort", onAbort, { once: true });
         const prompt = promptFrom(this.input.input);
-        if (prompt.length > 0) await this.agentLoop.prompt(prompt);
-        else await this.agentLoop.continue();
+        try {
+          if (prompt.length > 0) await this.agentLoop.prompt(prompt);
+          else await this.agentLoop.continue();
+          if (this.input.signal?.aborted) throw new Error("Agent run aborted.");
 
-        const messages = this.agentLoop.state.messages.slice();
-        return {
-          messages,
-          assistantText: assistantTextFrom(messages),
-        };
+          const messages = this.agentLoop.state.messages.slice();
+          return {
+            messages,
+            assistantText: assistantTextFrom(messages),
+          };
+        } finally {
+          this.input.signal?.removeEventListener("abort", onAbort);
+        }
       },
       catch: (cause) =>
         new AgentRunSessionFailed({

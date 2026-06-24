@@ -6,7 +6,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
-import { AgentRuns } from "../../src/agent-run/AgentRuns.ts";
+import { Conversations } from "../../src/conversation/Conversations.ts";
 import { Api } from "../../src/http/Api.ts";
 import { Routes } from "../../src/http/Routes.ts";
 import * as AuthMock from "../helpers/AuthMock.ts";
@@ -30,7 +30,7 @@ const appLayer = (fake = fakeGateway()) =>
           ? Option.some(validUser)
           : Option.none(),
       ),
-      AgentRuns.inMemoryLayer.pipe(
+      Conversations.inMemoryLayer.pipe(
         Layer.provide(PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fake)))),
       ),
       ServerConfigMock.layer(),
@@ -46,17 +46,21 @@ const fakeGateway = () =>
     ),
   );
 
-const waitForRunReplay = (client: HttpClient.HttpClient, runId: string) =>
+const waitForConversationEvent = (
+  client: HttpClient.HttpClient,
+  conversationId: string,
+  agentName = "default",
+) =>
   Effect.gen(function* () {
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      const response = yield* client.get(`/runs/${runId}`, {
+      const response = yield* client.get(`/agents/${agentName}/${conversationId}`, {
         headers: { cookie: "denora_session=valid" },
       });
       const events = (yield* response.json) as ReadonlyArray<Record<string, unknown>>;
-      if (response.headers["stream-closed"] === "true") return { response, events };
+      if (events.some((event) => event.type === "submission_settled")) return { response, events };
       yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
     }
-    throw new Error(`Timed out waiting for run ${runId} to close.`);
+    throw new Error(`Timed out waiting for conversation ${conversationId} events.`);
   });
 
 describe("Api http surface", () => {
@@ -120,38 +124,53 @@ describe("Api http surface", () => {
     );
   });
 
-  describe("Agent Run", () => {
-    it.effect("creates a run and replays translated agent events", () =>
+  describe("Conversation", () => {
+    it.effect("creates a conversation and replays attached-agent events", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
-        const runId = `run_${crypto.randomUUID()}`;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+
+        const createdConversation = yield* client.execute(
+          HttpClientRequest.post("/conversations").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ conversationId, title: "Test" }),
+          ),
+        );
+        assert.strictEqual(createdConversation.status, 200);
 
         const created = yield* client.execute(
-          HttpClientRequest.post("/agent-runs").pipe(
+          HttpClientRequest.post(`/conversations/${conversationId}/messages`).pipe(
             HttpClientRequest.setHeader("cookie", "denora_session=valid"),
-            HttpClientRequest.bodyJsonUnsafe({ runId, input: { prompt: "hello" } }),
+            HttpClientRequest.bodyJsonUnsafe({ message: "hello" }),
           ),
         );
         assert.strictEqual(created.status, 202);
         const createdBody = (yield* created.json) as {
+          readonly conversationId: string;
+          readonly messageId: string;
+          readonly submissionId: string;
           readonly runId: string;
           readonly streamUrl: string;
           readonly streamPath: string;
           readonly offset: string;
         };
-        assert.strictEqual(createdBody.runId, runId);
-        assert.strictEqual(createdBody.streamPath, `runs/${runId}`);
-        assert.strictEqual(createdBody.offset, "0000000000000000_0000000000000000");
+        assert.strictEqual(createdBody.conversationId, conversationId);
+        assert.strictEqual(createdBody.streamPath, `agents/default/${conversationId}`);
+        assert.strictEqual(createdBody.offset, "-1");
         assert.strictEqual(created.headers.location, createdBody.streamUrl);
         assert.strictEqual(created.headers["stream-next-offset"], createdBody.offset);
 
-        const { response: replay, events } = yield* waitForRunReplay(client, runId);
+        const { response: replay, events } = yield* waitForConversationEvent(
+          client,
+          conversationId,
+        );
         assert.strictEqual(replay.status, 200);
-        assert.strictEqual(replay.headers["stream-closed"], "true");
-        assert.strictEqual(events[0]?.type, "run_start");
-        assert.strictEqual(events[0]?.runId, runId);
+        assert.strictEqual(events[0]?.type, "message_start");
+        assert.strictEqual(events[0]?.instanceId, conversationId);
+        assert.strictEqual(events[0]?.agentName, "default");
+        assert.strictEqual(events[0]?.submissionId, createdBody.submissionId);
+        assert.notProperty(events[0] ?? {}, "runId");
         assert.strictEqual(events[0]?.v, 3);
-        assert.deepStrictEqual(events[0]?.input, { prompt: "hello" });
         assert.includeMembers(
           events.map((event) => event.type),
           [
@@ -163,35 +182,120 @@ describe("Api http surface", () => {
             "message_end",
             "turn_messages",
             "agent_end",
-            "run_end",
+            "submission_settled",
+            "idle",
           ],
         );
+        assert.notInclude(
+          events.map((event) => event.type),
+          "run_start",
+        );
+        assert.notInclude(
+          events.map((event) => event.type),
+          "run_end",
+        );
         const textDelta = events.find((event) => event.type === "text_delta");
-        assert.strictEqual(textDelta?.runId, runId);
+        assert.strictEqual(textDelta?.instanceId, conversationId);
+        assert.strictEqual(textDelta?.agentName, "default");
+        assert.strictEqual(textDelta?.submissionId, createdBody.submissionId);
+        assert.notProperty(textDelta ?? {}, "runId");
         assert.strictEqual(textDelta?.text, "hello");
-        const runEnd = events.find((event) => event.type === "run_end");
-        assert.strictEqual(runEnd?.runId, runId);
-        assert.strictEqual(runEnd?.isError, false);
-        assert.isNumber(runEnd?.durationMs);
+        const settled = events.find((event) => event.type === "submission_settled");
+        assert.strictEqual(settled?.submissionId, createdBody.submissionId);
+        assert.strictEqual(settled?.outcome, "completed");
+
+        const messages = yield* client.get(`/conversations/${conversationId}/messages`, {
+          headers: { cookie: "denora_session=valid" },
+        });
+        assert.strictEqual(messages.status, 200);
+        const messageBody = (yield* messages.json) as ReadonlyArray<Record<string, unknown>>;
+        assert.strictEqual(messageBody[0]?.id, createdBody.messageId);
+        assert.strictEqual(messageBody[0]?.role, "user");
       }).pipe(Effect.provide(appLayer())),
     );
 
-    it.effect("serves HEAD metadata for an existing run stream", () =>
+    it.effect("submits and streams through the Flue-compatible attached-agent route", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
-        const runId = `run_${crypto.randomUUID()}`;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+        const created = yield* client.execute(
+          HttpClientRequest.post(`/agents/denora/${conversationId}`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ message: "hello" }),
+          ),
+        );
+
+        assert.strictEqual(created.status, 202);
+        const createdBody = (yield* created.json) as {
+          readonly streamUrl: string;
+          readonly offset: string;
+          readonly submissionId: string;
+          readonly runId?: string;
+        };
+        assert.strictEqual(
+          new URL(createdBody.streamUrl).pathname,
+          `/agents/denora/${conversationId}`,
+        );
+        assert.strictEqual(createdBody.offset, "-1");
+        assert.match(createdBody.submissionId, /^submission_/);
+        assert.notProperty(createdBody, "runId");
+
+        const { events } = yield* waitForConversationEvent(client, conversationId, "denora");
+        const userStart = events.find((event) => event.type === "message_start");
+        assert.strictEqual(userStart?.instanceId, conversationId);
+        assert.strictEqual(userStart?.agentName, "denora");
+        assert.strictEqual(userStart?.submissionId, createdBody.submissionId);
+        assert.notProperty(userStart ?? {}, "runId");
+        assert.includeMembers(
+          events.map((event) => event.type),
+          ["message_start", "text_delta", "submission_settled", "idle"],
+        );
+      }).pipe(Effect.provide(appLayer())),
+    );
+
+    it.effect("omits stream location headers for attached-agent wait=result responses", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+        const response = yield* client.execute(
+          HttpClientRequest.post(`/agents/denora/${conversationId}?wait=result`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ message: "hello" }),
+          ),
+        );
+
+        assert.strictEqual(response.status, 200);
+        assert.isUndefined(response.headers.location);
+        assert.isUndefined(response.headers["stream-next-offset"]);
+        const body = (yield* response.json) as Record<string, unknown>;
+        assert.property(body, "result");
+        assert.match(String(body.submissionId), /^submission_/);
+      }).pipe(Effect.provide(appLayer())),
+    );
+
+    it.effect("serves HEAD metadata for an existing conversation stream", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+
+        yield* client.execute(
+          HttpClientRequest.post("/conversations").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ conversationId }),
+          ),
+        );
 
         const created = yield* client.execute(
-          HttpClientRequest.post("/agent-runs").pipe(
+          HttpClientRequest.post(`/conversations/${conversationId}/messages`).pipe(
             HttpClientRequest.setHeader("cookie", "denora_session=valid"),
-            HttpClientRequest.bodyJsonUnsafe({ runId, input: { prompt: "hello" } }),
+            HttpClientRequest.bodyJsonUnsafe({ message: "hello" }),
           ),
         );
         assert.strictEqual(created.status, 202);
-        yield* waitForRunReplay(client, runId);
+        yield* waitForConversationEvent(client, conversationId);
 
         const head = yield* client.execute(
-          HttpClientRequest.head(`/runs/${runId}`).pipe(
+          HttpClientRequest.head(`/agents/default/${conversationId}`).pipe(
             HttpClientRequest.setHeader("cookie", "denora_session=valid"),
           ),
         );
@@ -199,58 +303,66 @@ describe("Api http surface", () => {
         assert.strictEqual(head.status, 200);
         assert.strictEqual(yield* head.text, "");
         assert.strictEqual(head.headers["stream-up-to-date"], "true");
-        assert.strictEqual(head.headers["stream-closed"], "true");
+        assert.isUndefined(head.headers["stream-closed"]);
         assert.isString(head.headers.etag);
         assert.strictEqual(head.headers["x-content-type-options"], "nosniff");
         assert.strictEqual(head.headers["cross-origin-resource-policy"], "cross-origin");
       }).pipe(Effect.provide(appLayer())),
     );
 
-    it.effect("keeps image bytes in model input but redacts public run stream events", () => {
-      const fake = fakeGateway();
-      return Effect.gen(function* () {
-        const client = yield* HttpClient.HttpClient;
-        const runId = `run_${crypto.randomUUID()}`;
+    it.effect(
+      "keeps image bytes in model input but redacts public conversation stream events",
+      () => {
+        const fake = fakeGateway();
+        return Effect.gen(function* () {
+          const client = yield* HttpClient.HttpClient;
+          const conversationId = `conversation_${crypto.randomUUID()}`;
 
-        const created = yield* client.execute(
-          HttpClientRequest.post("/agent-runs").pipe(
-            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
-            HttpClientRequest.bodyJsonUnsafe({
-              runId,
-              input: {
-                messages: [
-                  {
-                    role: "user",
-                    content: [
-                      { type: "text", text: "describe this image" },
-                      { type: "image", data: IMAGE_BYTES, mimeType: "image/png" },
-                    ],
-                    timestamp: Date.now(),
-                  },
-                ],
-              },
-            }),
-          ),
-        );
-        assert.strictEqual(created.status, 202);
+          yield* client.execute(
+            HttpClientRequest.post("/conversations").pipe(
+              HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+              HttpClientRequest.bodyJsonUnsafe({ conversationId }),
+            ),
+          );
 
-        const { events } = yield* waitForRunReplay(client, runId);
-        const replayJson = JSON.stringify(events);
-        const runStart = events.find((event) => event.type === "run_start");
+          const created = yield* client.execute(
+            HttpClientRequest.post(`/conversations/${conversationId}/messages`).pipe(
+              HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+              HttpClientRequest.bodyJsonUnsafe({
+                content: {
+                  text: "describe this image",
+                  image: { type: "image", data: IMAGE_BYTES, mimeType: "image/png" },
+                },
+              }),
+            ),
+          );
+          assert.strictEqual(created.status, 202);
 
-        assert.include(JSON.stringify(fake.calls[0]?.payload), IMAGE_BYTES);
-        assert.notInclude(replayJson, IMAGE_BYTES);
-        assert.property(runStart ?? {}, "input");
-      }).pipe(Effect.provide(appLayer(fake)));
-    });
+          const { events } = yield* waitForConversationEvent(client, conversationId);
+          const replayJson = JSON.stringify(events);
+          const userMessage = events.find((event) => event.type === "message_start");
 
-    it.effect("serves an empty 404 HEAD response for a missing run stream", () =>
+          assert.include(JSON.stringify(fake.calls[0]?.payload), IMAGE_BYTES);
+          assert.notInclude(replayJson, IMAGE_BYTES);
+          assert.property(userMessage ?? {}, "message");
+        }).pipe(Effect.provide(appLayer(fake)));
+      },
+    );
+
+    it.effect("serves an empty 404 HEAD response for a missing conversation stream", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
-        const runId = `run_${crypto.randomUUID()}`;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+
+        yield* client.execute(
+          HttpClientRequest.post("/conversations").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ conversationId }),
+          ),
+        );
 
         const head = yield* client.execute(
-          HttpClientRequest.head(`/runs/${runId}`).pipe(
+          HttpClientRequest.head(`/agents/default/${conversationId}`).pipe(
             HttpClientRequest.setHeader("cookie", "denora_session=valid"),
           ),
         );
@@ -260,10 +372,10 @@ describe("Api http surface", () => {
       }).pipe(Effect.provide(appLayer())),
     );
 
-    it.effect("returns structured unauthorized errors for run streams", () =>
+    it.effect("returns structured unauthorized errors for conversation streams", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
-        const res = yield* client.get("/runs/run_missing");
+        const res = yield* client.get("/agents/default/conversation_missing");
 
         assert.strictEqual(res.status, 401);
         assert.deepStrictEqual(yield* res.json, {
@@ -278,7 +390,16 @@ describe("Api http surface", () => {
     it.effect("returns structured stream validation errors", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;
-        const res = yield* client.get("/runs/run_invalid?offset=banana", {
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+
+        yield* client.execute(
+          HttpClientRequest.post("/conversations").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ conversationId }),
+          ),
+        );
+
+        const res = yield* client.get(`/agents/default/${conversationId}?offset=banana`, {
           headers: { cookie: "denora_session=valid" },
         });
 

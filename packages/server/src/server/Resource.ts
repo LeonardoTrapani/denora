@@ -6,11 +6,15 @@ import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { AgentRunObject, AgentRunObjectLive, AiGateway } from "../agent-run/AgentRunObject.ts";
-import { AgentRunPersistence } from "../agent-run/AgentRunPersistence.ts";
-import { AgentRuns } from "../agent-run/AgentRuns.ts";
+import {
+  AgentConversationObject,
+  AgentConversationObjectLive,
+  AiGateway,
+} from "../agent-run/AgentConversationObject.ts";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
+import { ConversationPersistence } from "../conversation/ConversationPersistence.ts";
+import { Conversations } from "../conversation/Conversations.ts";
 import { Routes } from "../http/Routes.ts";
 import { Telemetry } from "../observability/Telemetry.ts";
 import { Db } from "../persistence/Db.ts";
@@ -123,20 +127,23 @@ const corsLayer = Layer.unwrap(
   }),
 );
 
-export class Resource extends Cloudflare.Worker<Resource, {}, AgentRunObject>()("Server", props) {}
+export class Resource extends Cloudflare.Worker<Resource, {}, AgentConversationObject>()(
+  "Server",
+  props,
+) {}
 
-export { AgentRunObject };
+export { AgentConversationObject };
 
 export default Resource.make(
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
     yield* Cloudflare.AiGateway.bind(AiGateway);
-    const runObjects = yield* AgentRunObject;
+    const conversationObjects = yield* AgentConversationObject;
 
     return {
       fetch: Routes.layer.pipe(
-        Layer.provide(AgentRuns.layer(runObjects)),
-        Layer.provide(AgentRunPersistence.layer),
+        Layer.provide(Conversations.layer(conversationObjects)),
+        Layer.provide(ConversationPersistence.layer),
         Layer.provide(Db.hyperdriveLayer),
         Layer.provide(AuthLive.layerFromConfig),
         Layer.provide([HttpPlatform.layer, Etag.layer]),
@@ -146,7 +153,9 @@ export default Resource.make(
         HttpRouter.toHttpEffect,
       ),
     };
-  }).pipe(Effect.provide(Layer.mergeAll(AgentRunObjectLive, Cloudflare.AiGatewayBindingLive))),
+  }).pipe(
+    Effect.provide(Layer.mergeAll(AgentConversationObjectLive, Cloudflare.AiGatewayBindingLive)),
+  ),
 );
 
 export * as ServerResource from "./Resource.ts";

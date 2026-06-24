@@ -3,6 +3,7 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import {
+  agentStreamPath,
   makeInMemoryEventStreamStore,
   runStreamPath,
 } from "../../src/agent-run/EventStreamStore.ts";
@@ -10,6 +11,40 @@ import { AgentRunLifecycle } from "../../src/agent-run/Lifecycle.ts";
 import type { Interface as PiRuntimeInterface } from "../../src/agent-loop/PiRuntime.ts";
 
 describe("AgentRunLifecycle", () => {
+  it.effect("creates Flue-compatible attached agent user events", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      const instanceId = `conversation_${crypto.randomUUID()}`;
+      const submissionId = `submission_${crypto.randomUUID()}`;
+      const streamPath = agentStreamPath("denora", instanceId);
+
+      const created = yield* AgentRunLifecycle.createConversationSubmission(store, {
+        agentName: "denora",
+        conversationId: instanceId,
+        submissionId,
+        runId: `run_${crypto.randomUUID()}`,
+        triggerMessageId: `message_${crypto.randomUUID()}`,
+        input: { submittedMessage: { text: "hello" } },
+      });
+
+      assert.strictEqual(created.streamPath, streamPath);
+      assert.strictEqual(created.offset, "-1");
+      const replay = yield* store.readEvents(streamPath, { offset: "-1" });
+      const events = replay.events.map((event) => event.data as Record<string, unknown>);
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["message_start", "message_end"],
+      );
+      for (const event of events) {
+        assert.strictEqual(event.v, 3);
+        assert.strictEqual(event.instanceId, instanceId);
+        assert.strictEqual(event.agentName, "denora");
+        assert.strictEqual(event.submissionId, submissionId);
+        assert.notProperty(event, "runId");
+      }
+    }),
+  );
+
   it.effect("translates Pi agent events into the durable run stream once", () =>
     Effect.gen(function* () {
       const store = makeInMemoryEventStreamStore();

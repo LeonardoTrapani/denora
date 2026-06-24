@@ -46,6 +46,12 @@ export interface RegisteredRun {
   readonly created: boolean;
 }
 
+export interface AuthorizedRunForStream {
+  readonly runId: string;
+  readonly conversationId: string;
+  readonly streamPath: string;
+}
+
 export interface FinishRunInput {
   readonly runId: string;
   readonly isError: boolean;
@@ -61,6 +67,14 @@ export interface Interface {
     readonly runId: string;
     readonly userId: string;
   }) => Effect.Effect<void, Error>;
+  readonly authorizeConversation: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+  }) => Effect.Effect<void, Error>;
+  readonly authorizeRunForStream: (input: {
+    readonly runId: string;
+    readonly userId: string;
+  }) => Effect.Effect<AuthorizedRunForStream, Error>;
   readonly markRunStarted: (runId: string) => Effect.Effect<void, Error>;
   readonly finishRun: (input: FinishRunInput) => Effect.Effect<void, Error>;
 }
@@ -196,20 +210,35 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       if (rows[0] === undefined) return yield* new RunNotAuthorized({ runId: conversationId });
     });
 
+    const authorizeRunForStream = Effect.fn("AgentRunPersistence.authorizeRunForStream")(
+      function* (input: {
+        readonly runId: string;
+        readonly userId: string;
+      }): Effect.fn.Return<AuthorizedRunForStream, Error> {
+        const rows = yield* persist(
+          "authorize agent run",
+          db.client
+            .select({
+              id: agentRuns.id,
+              conversationId: agentRuns.conversationId,
+              streamPath: agentRuns.streamPath,
+            })
+            .from(agentRuns)
+            .innerJoin(conversations, eq(agentRuns.conversationId, conversations.id))
+            .where(and(eq(agentRuns.id, input.runId), eq(conversations.ownerUserId, input.userId)))
+            .limit(1),
+        );
+        const row = rows[0];
+        if (row === undefined) return yield* new RunNotAuthorized({ runId: input.runId });
+        return { runId: row.id, conversationId: row.conversationId, streamPath: row.streamPath };
+      },
+    );
+
     const authorizeExistingRun = Effect.fn("AgentRunPersistence.authorizeExistingRun")(function* (
       runId: string,
       userId: string,
     ): Effect.fn.Return<void, Error> {
-      const rows = yield* persist(
-        "authorize agent run",
-        db.client
-          .select({ id: agentRuns.id })
-          .from(agentRuns)
-          .innerJoin(conversations, eq(agentRuns.conversationId, conversations.id))
-          .where(and(eq(agentRuns.id, runId), eq(conversations.ownerUserId, userId)))
-          .limit(1),
-      );
-      if (rows[0] === undefined) return yield* new RunNotAuthorized({ runId });
+      yield* authorizeRunForStream({ runId, userId });
     });
 
     const getRunInput = Effect.fn("AgentRunPersistence.getRunInput")(function* (
@@ -288,7 +317,10 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
     return Service.of({
       registerRun,
       getRunInput,
+      authorizeConversation: ({ conversationId, userId }) =>
+        authorizeConversation(conversationId, userId),
       authorizeRun: ({ runId, userId }) => authorizeExistingRun(runId, userId),
+      authorizeRunForStream,
       markRunStarted,
       finishRun,
     });

@@ -120,6 +120,10 @@ export const parseOffset = Effect.fn("EventStreamStore.parseOffset")(function* (
 });
 
 export const runStreamPath = (runId: string): string => `runs/${runId}`;
+export const agentStreamPath = (agentName: string, instanceId: string): string =>
+  `agents/${agentName}/${instanceId}`;
+export const conversationStreamPath = (conversationId: string): string =>
+  `conversations/${conversationId}`;
 
 const clampLimit = (limit: number | undefined): number => {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_READ_LIMIT;

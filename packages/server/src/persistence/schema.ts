@@ -85,6 +85,7 @@ export const agentRuns = pgTable(
     triggerMessageId: text("trigger_message_id").references(() => conversationMessages.id, {
       onDelete: "set null",
     }),
+    submissionId: text("submission_id"),
     status: agentRunStatus("status").notNull().default("queued"),
     streamPath: text("stream_path").notNull(),
     input: jsonb("input"),
@@ -99,6 +100,7 @@ export const agentRuns = pgTable(
     index("agent_runs_conversation_id_created_at_idx").on(table.conversationId, table.createdAt),
     index("agent_runs_status_created_at_idx").on(table.status, table.createdAt),
     index("agent_runs_trigger_message_id_idx").on(table.triggerMessageId),
+    uniqueIndex("agent_runs_submission_id_idx").on(table.submissionId),
   ],
 );
 

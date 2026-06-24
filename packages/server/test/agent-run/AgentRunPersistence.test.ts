@@ -24,6 +24,13 @@ describe("AgentRunPersistence", () => {
       assert.strictEqual(registered.runId, runId);
       assert.deepStrictEqual(yield* persistence.getRunInput(runId), input);
       yield* persistence.authorizeRun({ runId, userId: "user_1" });
+      const streamAuthorization = yield* persistence.authorizeRunForStream({
+        runId,
+        userId: "user_1",
+      });
+      assert.strictEqual(streamAuthorization.runId, runId);
+      assert.strictEqual(streamAuthorization.conversationId, registered.conversationId);
+      assert.strictEqual(streamAuthorization.streamPath, registered.streamPath);
 
       const denied = yield* persistence
         .authorizeRun({ runId, userId: "user_2" })

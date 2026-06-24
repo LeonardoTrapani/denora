@@ -22,10 +22,11 @@ import {
   type EventStreamError,
   type EventStreamReadResult,
   type EventStreamStore,
+  agentStreamPath,
   formatOffset,
   parseOffset,
 } from "./EventStreamStore.ts";
-import { PublicRunEvent } from "./RunEventContract.ts";
+import { PublicStreamEvent } from "./RunEventContract.ts";
 
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 30_000;
 const DEFAULT_SSE_HEARTBEAT_MS = 15_000;
@@ -116,6 +117,35 @@ export const handleRunObjectRequest = Effect.fn("StreamProtocol.handleRunObjectR
 
   return methodNotAllowedResponse();
 });
+
+export const handleConversationObjectRequest = Effect.fn(
+  "StreamProtocol.handleConversationObjectRequest",
+)(function* (store: EventStreamStore, request: Request): Effect.fn.Return<Response> {
+  const url = new URL(request.url);
+  const path = streamPathFromAttachedPath(url.pathname);
+
+  if (request.method === "HEAD") {
+    return yield* handleStreamHead(store, path).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(eventStreamErrorResponse(error, path, { head: true })),
+      ),
+    );
+  }
+  if (request.method === "GET") {
+    return yield* handleStreamRead({ store, path, request }).pipe(
+      Effect.catch((error) => Effect.succeed(eventStreamErrorResponse(error, path))),
+    );
+  }
+
+  return methodNotAllowedResponse();
+});
+
+const streamPathFromAttachedPath = (pathname: string): string => {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === "agents" && parts.length >= 3)
+    return agentStreamPath(parts[1] ?? "", parts[2] ?? "");
+  return `conversations/${conversationIdFromPath(pathname)}`;
+};
 
 export const handleStreamHead = Effect.fn("StreamProtocol.handleStreamHead")(function* (
   store: EventStreamStore,
@@ -511,12 +541,12 @@ const publicEventData = Effect.fn("StreamProtocol.publicEventData")(function* (
   path: string,
   result: EventStreamReadResult,
 ): Effect.fn.Return<ReadonlyArray<unknown>, EventStorageFailed> {
-  const decode = Schema.decodeUnknownEffect(PublicRunEvent);
+  const decode = Schema.decodeUnknownEffect(PublicStreamEvent);
   return yield* Effect.forEach(result.events, (event) =>
     decode(event.data).pipe(
       Effect.catch((cause) =>
         Effect.gen(function* () {
-          yield* Effect.logError("invalid public run stream event", {
+          yield* Effect.logError("invalid public stream event", {
             path,
             offset: event.offset,
             cause,
@@ -586,7 +616,7 @@ export const unauthorizedResponse = (): Response =>
 
 export const forbiddenResponse = (): Response =>
   jsonErrorResponse({
-    body: errorBody("forbidden", "You do not have access to this Agent Run."),
+    body: errorBody("forbidden", "You do not have access to this stream."),
     status: 403,
   });
 
@@ -670,7 +700,14 @@ const notFoundResponse = (path: string, head: boolean): Response => {
 };
 
 const notFoundBody = (path: string): ErrorBody =>
-  errorBody("run_not_found", `Agent Run "${path.slice("runs/".length)}" was not found.`);
+  path.startsWith("conversations/")
+    ? errorBody(
+        "conversation_stream_not_found",
+        `Conversation stream "${path.slice("conversations/".length)}" was not found.`,
+      )
+    : path.startsWith("runs/")
+      ? errorBody("run_not_found", `Agent Run "${path.slice("runs/".length)}" was not found.`)
+      : errorBody("stream_not_found", `Event stream "${path}" was not found.`);
 
 interface ErrorBody {
   readonly error: {
@@ -697,6 +734,11 @@ const errorBody = (
 
 const runIdFromPath = (pathname: string): string => {
   const match = /^\/runs\/([^/]+)$/.exec(pathname);
+  return decodeURIComponent(match?.[1] ?? "");
+};
+
+const conversationIdFromPath = (pathname: string): string => {
+  const match = /^\/conversations\/([^/]+)\/events$/.exec(pathname);
   return decodeURIComponent(match?.[1] ?? "");
 };
 

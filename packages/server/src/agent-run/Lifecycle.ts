@@ -4,6 +4,7 @@ import {
   type EventStreamError,
   type EventStreamStore,
   EventStorageFailed,
+  agentStreamPath,
   parseOffset,
   runStreamPath,
 } from "./EventStreamStore.ts";
@@ -19,8 +20,22 @@ const BUFFERED_EVENT_FLUSH_INTERVAL_MS = 3_000;
 
 export interface CreateRunInput {
   readonly runId: string;
+  readonly conversationId?: string | undefined;
+  readonly submissionId?: string | undefined;
+  readonly triggerMessageId?: string | undefined;
   readonly input?: unknown;
   readonly userId?: string | undefined;
+}
+
+export interface CreateConversationSubmissionInput {
+  readonly runId: string;
+  readonly agentName: string;
+  readonly conversationId: string;
+  readonly submissionId: string;
+  readonly triggerMessageId: string;
+  readonly input?: unknown;
+  readonly userId?: string | undefined;
+  readonly waitForResult?: boolean | undefined;
 }
 
 export interface CreateRunResult {
@@ -30,15 +45,26 @@ export interface CreateRunResult {
   readonly created: boolean;
 }
 
+export interface CreateConversationSubmissionResult extends CreateRunResult {
+  readonly conversationId: string;
+  readonly submissionId: string;
+  readonly messageId: string;
+}
+
 export interface StartRunInput extends CreateRunInput {
   readonly scheduleExecution: (runId: string) => Effect.Effect<void, EventStreamError>;
 }
 
 export interface ExecuteRunInput extends CreateRunInput {
   readonly pi: PiRuntimeInterface;
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface ExecuteRunAttemptInput extends ExecuteRunInput {}
+export interface ExecuteConversationSubmissionAttemptInput extends CreateConversationSubmissionInput {
+  readonly pi: PiRuntimeInterface;
+  readonly signal?: AbortSignal | undefined;
+}
 
 export interface ExecuteRunAttemptResult {
   readonly terminalEvent: RunEvent;
@@ -80,6 +106,60 @@ export const createRun = Effect.fn("AgentRunLifecycle.createRun")(function* (
   );
 
   return { runId: input.runId, streamPath, offset, created: true };
+});
+
+export const createConversationSubmission = Effect.fn(
+  "AgentRunLifecycle.createConversationSubmission",
+)(function* (
+  store: EventStreamStore,
+  input: CreateConversationSubmissionInput,
+): Effect.fn.Return<CreateConversationSubmissionResult, EventStreamError> {
+  const streamPath = agentStreamPath(input.agentName, input.conversationId);
+  const existing = yield* store.getStreamMeta(streamPath);
+  const offset = existing?.nextOffset ?? "-1";
+  yield* store.createStream(streamPath);
+
+  const userMessage = userMessageFromInput(input.input);
+  const timestamp = DateTime.formatIso(yield* DateTime.now);
+  const firstIndex = (yield* parseOffset(offset)) + 1;
+  yield* store.appendEventOnce(
+    streamPath,
+    `submission:${input.submissionId}:user:start`,
+    redactRunEventImages({
+      v: 3,
+      type: "message_start",
+      instanceId: input.conversationId,
+      agentName: input.agentName,
+      submissionId: input.submissionId,
+      eventIndex: firstIndex,
+      timestamp,
+      message: userMessage,
+    }),
+  );
+  yield* store.appendEventOnce(
+    streamPath,
+    `submission:${input.submissionId}:user:end`,
+    redactRunEventImages({
+      v: 3,
+      type: "message_end",
+      instanceId: input.conversationId,
+      agentName: input.agentName,
+      submissionId: input.submissionId,
+      eventIndex: firstIndex + 1,
+      timestamp,
+      message: userMessage,
+    }),
+  );
+
+  return {
+    runId: input.runId,
+    conversationId: input.conversationId,
+    submissionId: input.submissionId,
+    messageId: input.triggerMessageId,
+    streamPath,
+    offset,
+    created: existing === null,
+  };
 });
 
 export const startRun = Effect.fn("AgentRunLifecycle.startRun")(function* (
@@ -164,6 +244,7 @@ export const executeRunAttempt = Effect.fn("AgentRunLifecycle.executeRunAttempt"
     input: input.input,
     streamFn: input.pi.streamFn,
     onAgentEvent: emitRunEvent,
+    signal: input.signal,
   }).pipe(
     Effect.matchEffect({
       onFailure: (error) =>
@@ -211,6 +292,112 @@ export const executeRunAttempt = Effect.fn("AgentRunLifecycle.executeRunAttempt"
   );
 });
 
+export const executeConversationSubmissionAttempt = Effect.fn(
+  "AgentRunLifecycle.executeConversationSubmissionAttempt",
+)(function* (
+  store: EventStreamStore,
+  input: ExecuteConversationSubmissionAttemptInput,
+): Effect.fn.Return<ExecuteRunAttemptResult, EventStreamError> {
+  const streamPath = agentStreamPath(input.agentName, input.conversationId);
+  const meta = yield* store.getStreamMeta(streamPath);
+  if (meta === null)
+    return yield* new EventStorageFailed({
+      operation: "execute agent conversation submission",
+      cause: new Error(`Agent conversation stream ${streamPath} does not exist.`),
+    });
+  if (meta.closed)
+    return yield* new EventStorageFailed({
+      operation: "execute agent conversation submission",
+      cause: new Error(`Agent conversation stream ${streamPath} is closed.`),
+    });
+
+  let eventIndex = (yield* parseOffset(meta.nextOffset)) + 1;
+  const startedAtMs = Date.now();
+  const subscribers = new Set<(event: RunEvent) => Effect.Effect<void, EventStreamError>>();
+
+  const decorateConversationEvent = Effect.fn("AgentRunLifecycle.decorateConversationEvent")(
+    function* (event: RunEvent): Effect.fn.Return<RunEvent> {
+      const timestamp = DateTime.formatIso(yield* DateTime.now);
+      const { runId: _runId, ...attachedEvent } = event;
+      return redactRunEventImages({
+        ...attachedEvent,
+        instanceId: input.conversationId,
+        agentName: input.agentName,
+        submissionId: input.submissionId,
+        v: 3,
+        eventIndex: eventIndex++,
+        timestamp,
+      });
+    },
+  );
+
+  const emitConversationEvent = Effect.fn("AgentRunLifecycle.emitConversationEvent")(function* (
+    event: RunEvent,
+  ): Effect.fn.Return<void, EventStreamError> {
+    if (isStreamExcludedRunEvent(event)) return;
+    const decorated = yield* decorateConversationEvent(event);
+    for (const subscriber of subscribers) yield* subscriber(decorated);
+  });
+
+  const fanout = subscribeRunFanout(store, streamPath, subscribers);
+
+  return yield* AgentRunSession.execute({
+    runId: input.runId,
+    input: input.input,
+    streamFn: input.pi.streamFn,
+    onAgentEvent: emitConversationEvent,
+    signal: input.signal,
+  }).pipe(
+    Effect.matchEffect({
+      onFailure: (error) =>
+        fanout
+          .flush()
+          .pipe(
+            Effect.flatMap(() =>
+              makeFailedSubmissionSettled(input, eventIndex++, startedAtMs, error.message),
+            ),
+          ),
+      onSuccess: (result) =>
+        Effect.gen(function* () {
+          yield* fanout.flush();
+          const timestamp = DateTime.formatIso(yield* DateTime.now);
+          const terminalEvent = {
+            v: 3,
+            type: "submission_settled",
+            instanceId: input.conversationId,
+            agentName: input.agentName,
+            submissionId: input.submissionId,
+            eventIndex: eventIndex++,
+            timestamp,
+            outcome: "completed",
+            result: {
+              assistantText: result.assistantText,
+              messageCount: result.messages.length,
+            },
+          } satisfies RunEvent;
+          return {
+            terminalEvent,
+            durationMs: Math.max(0, Date.now() - startedAtMs),
+            isError: false,
+            result: terminalEvent.result,
+          } satisfies ExecuteRunAttemptResult;
+        }),
+    }),
+    Effect.onError(() =>
+      fanout.flush().pipe(
+        Effect.catch((error) =>
+          Effect.logError(
+            "agent conversation buffered event flush before terminal failure failed",
+            {
+              error,
+            },
+          ),
+        ),
+      ),
+    ),
+  );
+});
+
 const makeFailedRunEnd = Effect.fn("AgentRunLifecycle.makeFailedRunEnd")(function* (
   runId: string,
   eventIndex: number,
@@ -237,6 +424,86 @@ const makeFailedRunEnd = Effect.fn("AgentRunLifecycle.makeFailedRunEnd")(functio
     error: { message },
   } satisfies ExecuteRunAttemptResult;
 });
+
+const makeFailedSubmissionSettled = Effect.fn("AgentRunLifecycle.makeFailedSubmissionSettled")(
+  function* (
+    input: CreateConversationSubmissionInput,
+    eventIndex: number,
+    startedAtMs: number,
+    message: string,
+  ): Effect.fn.Return<ExecuteRunAttemptResult> {
+    const timestamp = DateTime.formatIso(yield* DateTime.now);
+    const terminalEvent = {
+      v: 3,
+      type: "submission_settled",
+      instanceId: input.conversationId,
+      agentName: input.agentName,
+      submissionId: input.submissionId,
+      eventIndex,
+      timestamp,
+      outcome: "failed",
+      result: null,
+      error: { message },
+    } satisfies RunEvent;
+    return {
+      terminalEvent,
+      durationMs: Math.max(0, Date.now() - startedAtMs),
+      isError: true,
+      result: null,
+      error: { message },
+    } satisfies ExecuteRunAttemptResult;
+  },
+);
+
+const userMessageFromInput = (input: unknown): unknown => ({
+  role: "user",
+  content: submittedContentFromInput(input),
+  timestamp: Date.now(),
+});
+
+const promptFromInput = (input: unknown): string => {
+  if (typeof input === "string") return input;
+  if (typeof input === "object" && input !== null) {
+    const prompt = (input as Record<string, unknown>).prompt;
+    if (typeof prompt === "string") return prompt;
+  }
+  return "";
+};
+
+const submittedContentFromInput = (input: unknown): unknown => {
+  if (typeof input === "object" && input !== null) {
+    const submitted = (input as Record<string, unknown>).submittedMessage;
+    if (submitted !== undefined) return messageContentFromSubmitted(submitted);
+  }
+  return promptFromInput(input);
+};
+
+const messageContentFromSubmitted = (submitted: unknown): unknown => {
+  if (typeof submitted === "string") return submitted;
+  if (typeof submitted !== "object" || submitted === null) return JSON.stringify(submitted) ?? "";
+  const record = submitted as Record<string, unknown>;
+  const text = typeof record.text === "string" ? record.text : undefined;
+  const images = imageBlocks(record.images ?? record.image);
+  if (images.length > 0)
+    return [...(text === undefined ? [] : [{ type: "text", text }]), ...images];
+  return text ?? JSON.stringify(submitted) ?? "";
+};
+
+const imageBlocks = (value: unknown): ReadonlyArray<unknown> => {
+  if (Array.isArray(value)) return value.flatMap((item) => imageBlock(item) ?? []);
+  const image = imageBlock(value);
+  return image === undefined ? [] : [image];
+};
+
+const imageBlock = (value: unknown): unknown | undefined => {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  return record.type === "image" &&
+    typeof record.data === "string" &&
+    typeof record.mimeType === "string"
+    ? { type: "image", data: record.data, mimeType: record.mimeType }
+    : undefined;
+};
 
 const subscribeRunFanout = (
   store: EventStreamStore,

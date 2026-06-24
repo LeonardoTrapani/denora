@@ -16,6 +16,16 @@ const publicRunEventEnvelope = {
   timestamp: Schema.String,
 };
 
+const publicConversationEventEnvelope = {
+  v: Schema.Literal(3),
+  instanceId: Schema.String,
+  agentName: Schema.String,
+  eventIndex: PublicEventIndex,
+  timestamp: Schema.String,
+  submissionId: Schema.optionalKey(Schema.String),
+  messageId: Schema.optionalKey(Schema.String),
+};
+
 const PublicRunStartEvent = Schema.StructWithRest(
   Schema.Struct({
     ...publicRunEventEnvelope,
@@ -67,6 +77,80 @@ export const PublicRunEvent = Schema.Union([
   PublicRunEndEvent,
   PublicRunAgentEvent,
 ]);
+
+const PublicConversationMessageEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literals(["message_start", "message_end"]),
+    message: Schema.Unknown,
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationDeltaEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literal("text_delta"),
+    text: Schema.String,
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationThinkingEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literals(["thinking_start", "thinking_delta", "thinking_end"]),
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationToolEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literals(["tool_start", "tool"]),
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationTurnEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literals(["agent_start", "agent_end", "turn_start", "turn_messages", "turn"]),
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationSubmissionSettledEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literal("submission_settled"),
+    submissionId: Schema.String,
+    outcome: Schema.Literals(["completed", "failed", "cancelled"]),
+    result: Schema.optionalKey(Schema.Unknown),
+    error: Schema.optionalKey(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationIdleEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literal("idle"),
+  }),
+  [PublicRunEventRest],
+);
+
+export const PublicConversationEvent = Schema.Union([
+  PublicConversationMessageEvent,
+  PublicConversationDeltaEvent,
+  PublicConversationThinkingEvent,
+  PublicConversationToolEvent,
+  PublicConversationTurnEvent,
+  PublicConversationSubmissionSettledEvent,
+  PublicConversationIdleEvent,
+]);
+
+export const PublicStreamEvent = Schema.Union([PublicRunEvent, PublicConversationEvent]);
 
 type ProviderTextOrImageContent = Exclude<UserMessage["content"], string>[number];
 type ProviderContentBlock =

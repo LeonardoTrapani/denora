@@ -32,6 +32,20 @@ const CREATE_MESSAGES_CONVERSATION_INDEX = `
 CREATE INDEX IF NOT EXISTS denora_agent_conversation_session_messages_conversation_sequence_idx
 ON denora_agent_conversation_session_messages (conversation_id, sequence ASC)`;
 
+const CREATE_MESSAGE_IMAGE_CHUNKS_TABLE = `
+CREATE TABLE IF NOT EXISTS denora_agent_conversation_message_image_chunks (
+  conversation_id TEXT NOT NULL,
+  message_id      TEXT NOT NULL,
+  image_id        TEXT NOT NULL,
+  chunk_index     INTEGER NOT NULL,
+  chunk_count     INTEGER NOT NULL,
+  data            TEXT NOT NULL,
+  PRIMARY KEY (conversation_id, message_id, image_id, chunk_index)
+)`;
+
+const IMAGE_DATA_CHUNK_LENGTH = 256 * 1024;
+const imageChunkMarkerPrefix = "__denora_agent_conversation_image_chunks__:";
+
 export interface RecordSubmissionStartedInput {
   readonly conversationId: string;
   readonly userId: string;
@@ -168,7 +182,7 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     const rows = yield* cursor
       .toArray()
       .pipe(storageFailure("collect conversation session messages"));
-    return yield* Effect.forEach(rows, parseMessageRow);
+    return yield* Effect.forEach(rows, (row) => parseMessageRow(sql, row));
   });
 
   const recordSubmissionStarted = Effect.fn(
@@ -368,7 +382,7 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
       .pipe(storageFailure("read completed assistant run"));
     const rows = yield* cursor.toArray().pipe(storageFailure("collect completed assistant run"));
     for (const row of rows) {
-      const message = yield* parseMessageRow(row);
+      const message = yield* parseMessageRow(sql, row);
       if (!hasToolCallPart(message.parts)) return { assistantText: message.plainText };
     }
     return null;
@@ -395,7 +409,7 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     const rows = yield* cursor
       .toArray()
       .pipe(storageFailure("collect conversation submission progress"));
-    const messages = yield* Effect.forEach(rows, parseMessageRow);
+    const messages = yield* Effect.forEach(rows, (row) => parseMessageRow(sql, row));
     const inputApplied = messages.some(
       (message) => message.role === "user" && message.status === "completed",
     );
@@ -437,6 +451,7 @@ const ensureTables = (sql: Cloudflare.SqlStorage): Effect.Effect<void, EventStor
     for (const [operation, statement] of [
       ["create conversation session messages table", CREATE_MESSAGES_TABLE],
       ["create conversation session messages index", CREATE_MESSAGES_CONVERSATION_INDEX],
+      ["create conversation message image chunks table", CREATE_MESSAGE_IMAGE_CHUNKS_TABLE],
     ] as const) {
       yield* sql.exec(statement).pipe(storageFailure(operation), Effect.asVoid);
     }
@@ -448,14 +463,16 @@ const insertMessage = (
 ): Effect.Effect<void, EventStorageFailed> =>
   Effect.gen(function* () {
     yield* validateMessageForPersistence(input);
-    const partsJson = yield* stringify(input.parts);
+    const prepared = prepareMessageParts(input.parts);
+    const partsJson = yield* stringify(prepared.parts);
     yield* validateSerializedContent(partsJson, "Conversation session message parts");
-    yield* sql
-      .exec(
+    const cursor = yield* sql
+      .exec<MessageIdRow>(
         `INSERT OR IGNORE INTO denora_agent_conversation_session_messages
              (message_id, conversation_id, parent_message_id, run_id, submission_id, role,
-              parts_json, plain_text, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               parts_json, plain_text, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           RETURNING message_id`,
         input.messageId,
         input.conversationId,
         input.parentMessageId,
@@ -468,7 +485,13 @@ const insertMessage = (
         input.createdAt,
         input.updatedAt,
       )
-      .pipe(storageFailure("insert conversation session message"), Effect.asVoid);
+      .pipe(storageFailure("insert conversation session message"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect inserted conversation session message"));
+    if (rows.length > 0) {
+      yield* replaceMessageImageChunks(sql, input, prepared.chunks);
+    }
   });
 
 const upsertAssistantMessage = (
@@ -477,13 +500,14 @@ const upsertAssistantMessage = (
 ): Effect.Effect<void, EventStorageFailed> =>
   Effect.gen(function* () {
     yield* validateMessageForPersistence(input);
-    const partsJson = yield* stringify(input.parts);
+    const prepared = prepareMessageParts(input.parts);
+    const partsJson = yield* stringify(prepared.parts);
     yield* validateSerializedContent(partsJson, "Conversation session message parts");
-    yield* sql
-      .exec(
+    const cursor = yield* sql
+      .exec<MessageIdRow>(
         `INSERT INTO denora_agent_conversation_session_messages
              (message_id, conversation_id, parent_message_id, run_id, submission_id, role,
-              parts_json, plain_text, status, created_at, updated_at)
+               parts_json, plain_text, status, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(message_id) DO UPDATE SET
              parts_json = excluded.parts_json,
@@ -491,7 +515,8 @@ const upsertAssistantMessage = (
              status = excluded.status,
              updated_at = excluded.updated_at
            WHERE denora_agent_conversation_session_messages.status != 'completed'
-              OR excluded.status = 'completed'`,
+              OR excluded.status = 'completed'
+           RETURNING message_id`,
         input.messageId,
         input.conversationId,
         input.parentMessageId,
@@ -504,7 +529,13 @@ const upsertAssistantMessage = (
         input.createdAt,
         input.updatedAt,
       )
-      .pipe(storageFailure("upsert assistant conversation session message"), Effect.asVoid);
+      .pipe(storageFailure("upsert assistant conversation session message"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect upserted assistant conversation session message"));
+    if (rows.length > 0) {
+      yield* replaceMessageImageChunks(sql, input, prepared.chunks);
+    }
   });
 
 const readMessageById = (
@@ -529,7 +560,7 @@ const readMessageById = (
       .pipe(storageFailure("collect conversation session message"));
     const row = rows[0];
     if (row === undefined) return null;
-    return yield* parseMessageRow(row);
+    return yield* parseMessageRow(sql, row);
   });
 
 const readLatestMessageId = (
@@ -557,23 +588,29 @@ const readLatestMessageId = (
     return rows[0]?.message_id ?? null;
   });
 
-const parseMessageRow = (row: MessageRow): Effect.Effect<MessageRecord, EventStorageFailed> =>
-  Effect.try({
-    try: () => ({
-      messageId: row.message_id,
-      conversationId: row.conversation_id,
-      parentMessageId: row.parent_message_id ?? null,
-      runId: row.run_id ?? null,
-      submissionId: row.submission_id ?? null,
-      role: parseRole(row.role),
-      parts: JSON.parse(row.parts_json) as ReadonlyArray<unknown>,
-      plainText: row.plain_text,
-      status: row.status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }),
-    catch: (cause) =>
-      new EventStorageFailed({ operation: "parse conversation session message", cause }),
+const parseMessageRow = (
+  sql: Cloudflare.SqlStorage,
+  row: MessageRow,
+): Effect.Effect<MessageRecord, EventStorageFailed> =>
+  Effect.gen(function* () {
+    const chunks = yield* readMessageImageChunks(sql, row.conversation_id, row.message_id);
+    return yield* Effect.try({
+      try: () => ({
+        messageId: row.message_id,
+        conversationId: row.conversation_id,
+        parentMessageId: row.parent_message_id ?? null,
+        runId: row.run_id ?? null,
+        submissionId: row.submission_id ?? null,
+        role: parseRole(row.role),
+        parts: hydrateMessageParts(JSON.parse(row.parts_json) as ReadonlyArray<unknown>, chunks),
+        plainText: row.plain_text,
+        status: row.status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }),
+      catch: (cause) =>
+        new EventStorageFailed({ operation: "parse conversation session message", cause }),
+    });
   });
 
 const parseRole = (role: string): MessageRecord["role"] => {
@@ -623,6 +660,175 @@ const validateSerializedContent = (
     catch: (cause) =>
       new EventStorageFailed({ operation: "validate conversation session message", cause }),
   });
+
+const prepareMessageParts = (parts: ReadonlyArray<unknown>): PreparedMessageParts => {
+  const chunks: PersistedImageChunk[] = [];
+  let imageIndex = 0;
+  const preparedParts = parts.map((part) => {
+    if (!isImagePart(part)) return part;
+    const imageId = String(imageIndex++);
+    const count = Math.max(1, Math.ceil(part.data.length / IMAGE_DATA_CHUNK_LENGTH));
+    for (let index = 0; index < count; index += 1) {
+      chunks.push({
+        imageId,
+        index,
+        count,
+        data: part.data.slice(
+          index * IMAGE_DATA_CHUNK_LENGTH,
+          (index + 1) * IMAGE_DATA_CHUNK_LENGTH,
+        ),
+      });
+    }
+    return { ...part, data: `${imageChunkMarkerPrefix}${imageId}` };
+  });
+  return { parts: preparedParts, chunks };
+};
+
+const hydrateMessageParts = (
+  parts: ReadonlyArray<unknown>,
+  rows: ReadonlyArray<PersistedImageChunkRow>,
+): ReadonlyArray<unknown> => {
+  const data = reassemblePersistedImageChunks(rows);
+  assertExactImageGroups(markerImageIds(parts), data);
+  return parts.map((part) => {
+    if (!isImagePart(part) || !part.data.startsWith(imageChunkMarkerPrefix)) return part;
+    const imageData = data.get(part.data.slice(imageChunkMarkerPrefix.length));
+    if (imageData === undefined) throw new Error("[denora] Persisted image chunks are missing.");
+    return { ...part, data: imageData };
+  });
+};
+
+const markerImageIds = (parts: ReadonlyArray<unknown>): ReadonlyArray<string> =>
+  parts.flatMap((part) =>
+    isImagePart(part) && part.data.startsWith(imageChunkMarkerPrefix)
+      ? [part.data.slice(imageChunkMarkerPrefix.length)]
+      : [],
+  );
+
+const assertExactImageGroups = (
+  markerIds: ReadonlyArray<string>,
+  imageData: ReadonlyMap<string, string>,
+): void => {
+  const markers = new Set(markerIds);
+  if (markers.size !== markerIds.length || markers.size !== imageData.size) {
+    throw new Error("[denora] Persisted image chunks do not match persisted image markers.");
+  }
+  for (const imageId of imageData.keys()) {
+    if (!markers.has(imageId)) {
+      throw new Error("[denora] Persisted image chunks do not match persisted image markers.");
+    }
+  }
+};
+
+const reassemblePersistedImageChunks = (
+  rows: ReadonlyArray<PersistedImageChunkRow>,
+): ReadonlyMap<string, string> => {
+  const grouped = new Map<string, PersistedImageChunkRow[]>();
+  for (const row of rows) {
+    const imageRows = grouped.get(row.imageId) ?? [];
+    imageRows.push(row);
+    grouped.set(row.imageId, imageRows);
+  }
+
+  const data = new Map<string, string>();
+  for (const [imageId, imageRows] of grouped) {
+    const ordered = imageRows.slice().sort((left, right) => left.index - right.index);
+    const expectedCount = ordered[0]?.count;
+    if (
+      expectedCount === undefined ||
+      expectedCount < 1 ||
+      ordered.length !== expectedCount ||
+      ordered.some((row, index) => row.count !== expectedCount || row.index !== index)
+    ) {
+      throw new Error("[denora] Persisted image chunks are missing or malformed.");
+    }
+    data.set(imageId, ordered.map((row) => row.data).join(""));
+  }
+  return data;
+};
+
+const replaceMessageImageChunks = (
+  sql: Cloudflare.SqlStorage,
+  owner: Pick<MessageRecord, "conversationId" | "messageId">,
+  chunks: ReadonlyArray<PersistedImageChunk>,
+): Effect.Effect<void, EventStorageFailed> =>
+  Effect.gen(function* () {
+    yield* sql
+      .exec(
+        `DELETE FROM denora_agent_conversation_message_image_chunks
+         WHERE conversation_id = ? AND message_id = ?`,
+        owner.conversationId,
+        owner.messageId,
+      )
+      .pipe(storageFailure("delete conversation message image chunks"), Effect.asVoid);
+
+    for (const chunk of chunks) {
+      yield* sql
+        .exec(
+          `INSERT INTO denora_agent_conversation_message_image_chunks
+             (conversation_id, message_id, image_id, chunk_index, chunk_count, data)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          owner.conversationId,
+          owner.messageId,
+          chunk.imageId,
+          chunk.index,
+          chunk.count,
+          chunk.data,
+        )
+        .pipe(storageFailure("insert conversation message image chunk"), Effect.asVoid);
+    }
+  });
+
+const readMessageImageChunks = (
+  sql: Cloudflare.SqlStorage,
+  conversationId: string,
+  messageId: string,
+): Effect.Effect<ReadonlyArray<PersistedImageChunkRow>, EventStorageFailed> =>
+  Effect.gen(function* () {
+    const cursor = yield* sql
+      .exec<ImageChunkRow>(
+        `SELECT image_id, chunk_index, chunk_count, data
+         FROM denora_agent_conversation_message_image_chunks
+         WHERE conversation_id = ? AND message_id = ?
+         ORDER BY image_id, chunk_index`,
+        conversationId,
+        messageId,
+      )
+      .pipe(storageFailure("read conversation message image chunks"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect conversation message image chunks"));
+    return yield* Effect.try({
+      try: () => rows.map(parseImageChunkRow),
+      catch: (cause) =>
+        new EventStorageFailed({ operation: "parse conversation message image chunks", cause }),
+    });
+  });
+
+const parseImageChunkRow = (row: ImageChunkRow): PersistedImageChunkRow => {
+  if (
+    typeof row.image_id !== "string" ||
+    typeof row.chunk_index !== "number" ||
+    !Number.isInteger(row.chunk_index) ||
+    typeof row.chunk_count !== "number" ||
+    !Number.isInteger(row.chunk_count) ||
+    typeof row.data !== "string"
+  ) {
+    throw new Error("[denora] Persisted image chunk row is malformed.");
+  }
+  return {
+    imageId: row.image_id,
+    index: row.chunk_index,
+    count: row.chunk_count,
+    data: row.data,
+  };
+};
+
+const isImagePart = (value: unknown): value is ImagePart => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as { readonly type?: unknown; readonly data?: unknown };
+  return record.type === "image" && typeof record.data === "string";
+};
 
 const toAgentMessage = (message: MessageRecord): ReadonlyArray<AgentMessage> => {
   if (message.role === "user") {
@@ -850,6 +1056,37 @@ interface MessageRow extends Record<string, Cloudflare.SqlStorageValue> {
 
 interface LatestMessageRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly message_id: string;
+}
+
+interface MessageIdRow extends Record<string, Cloudflare.SqlStorageValue> {
+  readonly message_id: string;
+}
+
+interface ImagePart {
+  readonly type: "image";
+  readonly data: string;
+  readonly [key: string]: unknown;
+}
+
+interface PreparedMessageParts {
+  readonly parts: ReadonlyArray<unknown>;
+  readonly chunks: ReadonlyArray<PersistedImageChunk>;
+}
+
+interface PersistedImageChunk {
+  readonly imageId: string;
+  readonly index: number;
+  readonly count: number;
+  readonly data: string;
+}
+
+interface PersistedImageChunkRow extends PersistedImageChunk {}
+
+interface ImageChunkRow extends Record<string, Cloudflare.SqlStorageValue> {
+  readonly image_id: string;
+  readonly chunk_index: number;
+  readonly chunk_count: number;
+  readonly data: string;
 }
 
 export * as AgentConversationSessionStore from "./AgentConversationSessionStore.ts";

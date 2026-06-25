@@ -20,6 +20,7 @@ import { SqlStorage } from "../../src/agent-run/SqlStorage.ts";
 import type { Interface as PiRuntimeInterface } from "../../src/agent-loop/PiRuntime.ts";
 import {
   MAX_AGENT_CONVERSATION_IMAGE_DATA_LENGTH,
+  MAX_AGENT_CONVERSATION_JSON_LENGTH,
   MAX_AGENT_CONVERSATION_TEXT_LENGTH,
 } from "../../src/agent-run/AgentConversationContentLimits.ts";
 import { SqliteStorage, type TestSqliteStorage } from "../helpers/SqliteStorage.ts";
@@ -319,6 +320,136 @@ describe("AgentConversationSessionStore", () => {
         assert.strictEqual(error._tag, "EventStorageFailed");
         assert.strictEqual(error.operation, "validate conversation session message");
         assert.strictEqual(yield* countMessages(sql, "user"), 0);
+      }),
+    ),
+  );
+
+  it.effect("stores oversized image parts as chunks and hydrates model context", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "hello" });
+        const imageData = "x".repeat(MAX_AGENT_CONVERSATION_JSON_LENGTH + 1);
+
+        const replay = yield* sessions.recordSubmissionStarted({
+          ...recordStartedInput(input),
+          content: {
+            text: "describe this image",
+            image: { type: "image", data: imageData, mimeType: "image/png" },
+          },
+        });
+
+        const messages = yield* readSessionMessages(sql);
+        const chunks = yield* readImageChunks(sql, input.conversationId, input.triggerMessageId);
+        const agentMessages = (replay.input as { readonly messages: ReadonlyArray<AgentMessage> })
+          .messages;
+        const user = agentMessages[0] as Extract<AgentMessage, { role: "user" }> | undefined;
+
+        assert.strictEqual(messages.length, 1);
+        assert.isBelow(messages[0]?.parts_json.length ?? 0, MAX_AGENT_CONVERSATION_JSON_LENGTH);
+        assert.match(messages[0]?.parts_json ?? "", /__denora_agent_conversation_image_chunks__:0/);
+        assert.strictEqual(chunks.length, 3);
+        assert.deepStrictEqual(
+          chunks.map((chunk) => chunk.chunk_index),
+          [0, 1, 2],
+        );
+        assert.strictEqual(chunks.map((chunk) => chunk.data).join(""), imageData);
+        assert.deepInclude(user?.content as ReadonlyArray<unknown>, {
+          type: "image",
+          data: imageData,
+          mimeType: "image/png",
+        });
+      }),
+    ),
+  );
+
+  it.effect("replaces assistant image chunks when an assistant message is updated", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "hello" });
+        const firstImage = "a".repeat(MAX_AGENT_CONVERSATION_JSON_LENGTH + 1);
+        const secondImage = "b".repeat(MAX_AGENT_CONVERSATION_JSON_LENGTH + 2);
+        const messageId = `assistant:${input.runId}:0`;
+
+        yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+        yield* sessions.recordAssistantMessageCompleted({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          messageIndex: 0,
+          parts: [{ type: "image", data: firstImage, mimeType: "image/png" }],
+          plainText: "",
+        });
+        yield* sessions.recordAssistantMessageCompleted({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          messageIndex: 0,
+          parts: [{ type: "image", data: secondImage, mimeType: "image/png" }],
+          plainText: "",
+        });
+        const next = submissionInput({
+          submissionId: "submission_after_image",
+          runId: "run_after_image",
+          triggerMessageId: "message_after_image",
+          text: "next",
+        });
+        const replay = yield* sessions.recordSubmissionStarted(recordStartedInput(next));
+
+        const chunks = yield* readImageChunks(sql, input.conversationId, messageId);
+        const agentMessages = (replay.input as { readonly messages: ReadonlyArray<AgentMessage> })
+          .messages;
+        const assistant = agentMessages.find(
+          (message): message is Extract<AgentMessage, { role: "assistant" }> =>
+            message.role === "assistant",
+        );
+
+        assert.strictEqual(chunks.length, 3);
+        assert.strictEqual(chunks.map((chunk) => chunk.data).join(""), secondImage);
+        assert.notStrictEqual(chunks.map((chunk) => chunk.data).join(""), firstImage);
+        assert.deepStrictEqual(assistant?.content as unknown, [
+          { type: "image", data: secondImage, mimeType: "image/png" },
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("fails hydration when persisted image chunks are missing", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "hello" });
+        const imageData = "x".repeat(MAX_AGENT_CONVERSATION_JSON_LENGTH + 1);
+
+        yield* sessions.recordSubmissionStarted({
+          ...recordStartedInput(input),
+          content: {
+            text: "describe this image",
+            image: { type: "image", data: imageData, mimeType: "image/png" },
+          },
+        });
+        yield* sql
+          .exec(
+            `DELETE FROM denora_agent_conversation_message_image_chunks
+             WHERE conversation_id = ? AND message_id = ? AND chunk_index = 1`,
+            input.conversationId,
+            input.triggerMessageId,
+          )
+          .pipe(Effect.asVoid);
+
+        const next = submissionInput({
+          submissionId: "submission_missing_chunk",
+          runId: "run_missing_chunk",
+          triggerMessageId: "message_missing_chunk",
+          text: "next",
+        });
+        const error = yield* sessions
+          .recordSubmissionStarted(recordStartedInput(next))
+          .pipe(Effect.flip);
+
+        assert.strictEqual(error._tag, "EventStorageFailed");
+        assert.strictEqual(error.operation, "parse conversation session message");
       }),
     ),
   );
@@ -1601,6 +1732,19 @@ const readSessionMessages = (sql: TestSqlStorage) =>
     return yield* cursor.toArray();
   });
 
+const readImageChunks = (sql: TestSqlStorage, conversationId: string, messageId: string) =>
+  Effect.gen(function* () {
+    const cursor = yield* sql.exec<ImageChunkRow>(
+      `SELECT image_id, chunk_index, chunk_count, data
+       FROM denora_agent_conversation_message_image_chunks
+       WHERE conversation_id = ? AND message_id = ?
+       ORDER BY image_id, chunk_index`,
+      conversationId,
+      messageId,
+    );
+    return yield* cursor.toArray();
+  });
+
 const countMessages = (sql: TestSqlStorage, role: string) =>
   Effect.gen(function* () {
     const cursor = yield* sql.exec<CountRow>(
@@ -1665,6 +1809,13 @@ interface MessageRow extends Record<string, string | number | null> {
   readonly status: string;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+interface ImageChunkRow extends Record<string, string | number | null> {
+  readonly image_id: string;
+  readonly chunk_index: number;
+  readonly chunk_count: number;
+  readonly data: string;
 }
 
 interface CountRow extends Record<string, string | number | null> {

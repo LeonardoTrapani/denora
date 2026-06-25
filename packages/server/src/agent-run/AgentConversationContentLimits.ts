@@ -1,5 +1,5 @@
 export const MAX_AGENT_CONVERSATION_TEXT_LENGTH = 256 * 1024;
-export const MAX_AGENT_CONVERSATION_IMAGE_DATA_LENGTH = 256 * 1024;
+export const MAX_AGENT_CONVERSATION_IMAGE_DATA_LENGTH = 14 * 1024 * 1024;
 export const MAX_AGENT_CONVERSATION_JSON_LENGTH = 512 * 1024;
 
 export const assertAgentConversationContentWithinLimits = (value: unknown): void => {

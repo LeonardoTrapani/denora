@@ -342,7 +342,8 @@ describe("Api http surface", () => {
           const replayJson = JSON.stringify(events);
           const userMessage = events.find((event) => event.type === "message_start");
 
-          assert.include(JSON.stringify(fake.calls[0]?.payload), IMAGE_BYTES);
+          const modelRequest = fake.calls[0]?.payload ?? fake.gatewayCalls[0]?.request;
+          assert.include(JSON.stringify(modelRequest), IMAGE_BYTES);
           assert.notInclude(replayJson, IMAGE_BYTES);
           assert.property(userMessage ?? {}, "message");
         }).pipe(Effect.provide(appLayer(fake)));

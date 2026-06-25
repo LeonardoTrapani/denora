@@ -15,10 +15,7 @@ export const layer: Layer.Layer<Service, never, PiAgentModel.Service> = Layer.ef
   Service,
   Effect.gen(function* () {
     const modelService = yield* PiAgentModel.Service;
-    const runtime = yield* Effect.acquireRelease(
-      Effect.sync(() => ManagedRuntime.make(Layer.succeed(PiAgentModel.Service, modelService))),
-      (runtime) => runtime.disposeEffect,
-    );
+    const runtime = ManagedRuntime.make(Layer.succeed(PiAgentModel.Service, modelService));
 
     const streamFn: StreamFn = (model, context, options) =>
       runtime.runPromise(

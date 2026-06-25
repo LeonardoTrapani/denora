@@ -9,6 +9,11 @@ export interface Call {
   readonly options: Record<string, unknown> | undefined;
 }
 
+export interface GatewayCall {
+  readonly request: unknown;
+  readonly options: Record<string, unknown> | undefined;
+}
+
 export type SseChunk =
   | string
   | {
@@ -37,8 +42,10 @@ export type Script =
 
 export interface Fake {
   readonly ai: Effect.Success<Cloudflare.AiGatewayClient["raw"]>;
+  readonly gatewayRun: Effect.Success<Cloudflare.AiGatewayClient["gateway"]>["run"];
   readonly client: Cloudflare.AiGatewayClient;
   readonly calls: Call[];
+  readonly gatewayCalls: GatewayCall[];
   readonly gatewayId: string;
   readonly setScript: (script: Script) => void;
 }
@@ -49,6 +56,7 @@ export const make = (
 ): Fake => {
   let currentScript = script;
   const calls: Call[] = [];
+  const gatewayCalls: GatewayCall[] = [];
   const gatewayId = options.id ?? "test-gateway";
   const raw = {
     run: async (
@@ -63,21 +71,33 @@ export const make = (
     },
   };
 
+  const gateway = {
+    run: async (request: unknown, runOptions?: Record<string, unknown>) => {
+      gatewayCalls.push({ request, options: runOptions });
+      if (currentScript.type === "throw") throw currentScript.error;
+      if (currentScript.type === "response") return currentScript.response;
+      return createSseResponse(currentScript.chunks, currentScript.init, signalFrom(runOptions));
+    },
+  };
+
   const client = {
     raw: Effect.succeed(raw),
-    gateway: Effect.succeed({}),
+    gateway: Effect.succeed(gateway),
     id: Effect.succeed(gatewayId),
     patchLog: () => Effect.void,
     getLog: () => Effect.die(new Error("FakeAiGateway.getLog is not implemented.")),
     getUrl: () => Effect.succeed(`https://gateway.test/${gatewayId}`),
-    run: () => Effect.die(new Error("FakeAiGateway.run is not implemented.")),
+    run: (request: unknown, runOptions?: Record<string, unknown>) =>
+      Effect.promise(() => gateway.run(request, runOptions)),
     model: () => Effect.die(new Error("FakeAiGateway.model is not implemented.")),
   } as unknown as Cloudflare.AiGatewayClient;
 
   return {
     ai: raw as Effect.Success<Cloudflare.AiGatewayClient["raw"]>,
+    gatewayRun: gateway.run as Effect.Success<Cloudflare.AiGatewayClient["gateway"]>["run"],
     client,
     calls,
+    gatewayCalls,
     gatewayId,
     setScript: (next) => {
       currentScript = next;
@@ -116,6 +136,7 @@ export const layer = (
         PiAgentModel.AiGateway,
         PiAgentModel.AiGateway.of({
           ai: fake.ai,
+          gatewayRun: fake.gatewayRun,
           id: PiAgentModel.AiGatewayId.make(fake.gatewayId),
         }),
       ),

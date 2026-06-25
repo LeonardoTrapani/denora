@@ -139,7 +139,7 @@ describe("AgentRunLifecycle", () => {
         content: [{ type: "text", text: "still streaming" }],
         api: "openai-completions",
         provider: "cloudflare-workers-ai",
-        model: "@cf/meta/llama-3.1-8b-instruct",
+        model: "@cf/meta/llama-3.1-8b-instruct-fast",
         usage: emptyUsage,
         stopReason: "stop",
         timestamp: Date.now(),

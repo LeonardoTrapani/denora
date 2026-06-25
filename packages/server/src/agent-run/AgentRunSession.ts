@@ -239,20 +239,20 @@ const responseInfoFrom = (message: AssistantMessage): Record<string, unknown> =>
   ...(message.errorMessage === undefined ? {} : { error: { message: message.errorMessage } }),
 });
 
-const DEFAULT_MODEL_ID = "@cf/meta/llama-3.1-8b-instruct";
+const DEFAULT_MODEL_ID = "claude-sonnet-4-5";
 
 const defaultModel = {
   id: DEFAULT_MODEL_ID,
   name: DEFAULT_MODEL_ID,
-  api: "openai-completions",
-  provider: "cloudflare-workers-ai",
+  api: "anthropic-messages",
+  provider: "anthropic",
   baseUrl: "",
   reasoning: true,
   input: ["text", "image"],
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 128_000,
+  contextWindow: 200_000,
   maxTokens: 8192,
-} satisfies Model<"openai-completions">;
+} satisfies Model<"anthropic-messages">;
 
 const systemPromptFrom = (input: unknown): string =>
   stringField(input, "systemPrompt") ?? "You are Denora, a secure personal agent.";

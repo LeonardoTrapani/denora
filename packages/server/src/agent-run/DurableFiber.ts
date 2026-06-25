@@ -2,6 +2,12 @@ import type * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import { EventSerializationFailed, EventStorageFailed } from "./EventStreamStore.ts";
 
+// Denora's scoped equivalent of Cloudflare Agents SDK runFiber for the chat
+// Durable Object runtime. It intentionally does not expose a public
+// onFiberRecovered hook or SDK-style keepAlive abstraction: recovery is routed
+// directly into the conversation coordinator's deterministic reconciliation,
+// and DO-local scheduled/alarm wakes keep interrupted submission recovery alive.
+
 const CREATE_RUNS_TABLE = `
 CREATE TABLE IF NOT EXISTS denora_durable_fiber_runs (
   id            TEXT PRIMARY KEY,

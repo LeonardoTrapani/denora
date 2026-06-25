@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
+import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
 import { ConversationRequestFailed } from "../../conversation/Conversations.ts";
 
@@ -93,7 +94,7 @@ export class ConversationGroup extends HttpApiGroup.make("Conversation", { topLe
     HttpApiEndpoint.post("submitConversationMessage", "/conversations/:conversationId/messages", {
       params: ConversationParams,
       payload: SubmitConversationMessagePayload,
-      success: SubmitConversationMessageResponse,
+      success: SubmitConversationMessageResponse.pipe(HttpApiSchema.status("Accepted")),
       error: ConversationRequestFailed,
     }),
   )

@@ -1,0 +1,42 @@
+{
+	// User-owned wrangler config for this Flue app. Flue reads this file,
+	// merges its own contributions into an ignored Vite input config, and the
+	// official Cloudflare Vite integration emits the deployable Worker output.
+	// src/cloudflare.ts explicitly exports the Sandbox class from @cloudflare/sandbox.
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "assistant",
+	"compatibility_date": "2026-06-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "Sandbox",
+				"name": "Sandbox"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["Sandbox"]
+		},
+		{
+			"tag": "flue-class-Assistant",
+			"new_sqlite_classes": ["Assistant"]
+		},
+		{
+			"tag": "flue-class-FlueRegistry",
+			"new_sqlite_classes": ["FlueRegistry"]
+		},
+		{
+			"tag": "flue-rename-generated-classes",
+			"renamed_classes": [{ "from": "Assistant", "to": "FlueAssistantAgent" }]
+		}
+	],
+	"containers": [
+		{
+			"class_name": "Sandbox",
+			"image": "./Dockerfile"
+		}
+	]
+}

@@ -1,0 +1,12 @@
+**/.astro/
+**/.flue-vite/
+**/.wrangler/
+**/dist/
+**/node_modules/
+**/.turbo/
+**/.cache/
+packages/cli/bin/_blueprints.generated.ts
+blueprints/sandbox*.md
+blueprints/channel*.md
+blueprints/tooling--vitest-evals.md
+plans/

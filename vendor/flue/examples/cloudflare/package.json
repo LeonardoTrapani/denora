@@ -1,0 +1,18 @@
+{
+	"name": "cloudflare",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@cloudflare/codemode": "*",
+		"@cloudflare/shell": "*",
+		"@flue/runtime": "workspace:*",
+		"agents": "^0.14.2",
+		"hono": "^4.7.0",
+		"valibot": "^1.0.0"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20260602.1",
+		"@flue/cli": "workspace:*",
+		"wrangler": "^4.97.0"
+	}
+}

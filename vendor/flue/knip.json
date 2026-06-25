@@ -1,0 +1,36 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema.json",
+	"ignore": [],
+	"ignoreDependencies": ["@flue/cli", "agents", "wrangler"],
+	"ignoreIssues": {
+		"packages/runtime/src/runtime/schemas.ts": ["duplicates"]
+	},
+	"workspaces": {
+		".": {
+			"entry": [".flue/{app,cloudflare,agents/*,workflows/*}.{ts,mts,js,mjs}"],
+			"project": [".flue/**/*.{ts,mts,js,mjs}"],
+			"ignoreDependencies": ["bgproc", "just-bash"]
+		},
+		"examples/*": {
+			"entry": [
+				"{src/{app,cloudflare,agents/*,workflows/*,channels/*},flue.config}.{ts,mts,js,mjs}"
+			],
+			"project": ["src/**/*.{ts,mts,js,mjs}"]
+		},
+		"examples/vitest-evals": {
+			"entry": ["src/evals/**/*.eval.ts", "src/agents/*.ts", "flue.config.ts"],
+			"project": ["src/**/*.ts", "*.ts"]
+		},
+
+		"apps/www": {
+			"entry": [
+				"src/homepage-shaders.ts",
+				"src/pages/**/*.{astro,md,mdx}",
+				"src/layouts/**/*.astro"
+			]
+		},
+		"packages/runtime": {
+			"ignoreDependencies": ["@hono/node-server"]
+		}
+	}
+}

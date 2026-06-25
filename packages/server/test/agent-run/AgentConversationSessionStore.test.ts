@@ -15,6 +15,7 @@ import {
   agentStreamPath,
   type EventStreamStore,
 } from "../../src/agent-run/EventStreamStore.ts";
+import { DurableFiber } from "../../src/agent-run/DurableFiber.ts";
 import { AgentRunLifecycle } from "../../src/agent-run/Lifecycle.ts";
 import { SqlStorage } from "../../src/agent-run/SqlStorage.ts";
 import type { Interface as PiRuntimeInterface } from "../../src/agent-loop/PiRuntime.ts";
@@ -828,6 +829,72 @@ describe("AgentConversationSessionStore", () => {
           phase: "terminal_reserved",
           isError: false,
         });
+        const durableFiber = yield* readDurableFiber(sql, marker?.attempt_id ?? "");
+        assert.strictEqual(durableFiber?.status, "completed");
+        assert.isNumber(durableFiber?.completed_at);
+        assert.strictEqual(yield* countDurableFiberRuns(sql), 0);
+        assert.deepInclude(JSON.parse(durableFiber?.snapshot_json ?? "{}"), {
+          submissionId: input.submissionId,
+          runId: input.runId,
+          phase: "terminal_reserved",
+          isError: false,
+        });
+      }),
+    ),
+  );
+
+  it.effect("durable fibers stash snapshots, reject duplicate starts, and clean up run rows", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql } = yield* AgentConversationHarness;
+        const durableFibers = yield* DurableFiber.makeSqlite(sql);
+        let duplicateRan = false;
+
+        const first = yield* durableFibers.startManaged(
+          {
+            fiberId: "fiber_snapshot",
+            idempotencyKey: "submission_snapshot:attempt_1",
+            name: "agent-conversation-submission",
+            metadata: { submissionId: "submission_snapshot", attemptId: "attempt_1" },
+            initialSnapshot: { phase: "claimed" },
+          },
+          (fiber) =>
+            Effect.gen(function* () {
+              yield* fiber.stash({ phase: "model_started", step: 1 });
+              const run = yield* readDurableRun(sql, fiber.id);
+              const ledger = yield* readDurableFiber(sql, fiber.id);
+
+              assert.strictEqual(run?.name, "agent-conversation-submission");
+              assert.deepInclude(JSON.parse(run?.snapshot_json ?? "{}"), {
+                phase: "model_started",
+                step: 1,
+              });
+              assert.strictEqual(ledger?.status, "running");
+              assert.deepInclude(JSON.parse(ledger?.snapshot_json ?? "{}"), {
+                phase: "model_started",
+                step: 1,
+              });
+            }),
+        );
+        const duplicate = yield* durableFibers.startManaged(
+          {
+            fiberId: "fiber_snapshot",
+            idempotencyKey: "submission_snapshot:attempt_1",
+            name: "agent-conversation-submission",
+          },
+          () =>
+            Effect.sync(() => {
+              duplicateRan = true;
+            }),
+        );
+
+        assert.isTrue(first.accepted);
+        assert.strictEqual(first.fiber.status, "completed");
+        assert.isNumber(first.fiber.completedAt);
+        assert.isFalse(duplicate.accepted);
+        assert.isFalse(duplicateRan);
+        assert.strictEqual(duplicate.fiber.status, "completed");
+        assert.strictEqual(yield* countDurableFiberRuns(sql), 0);
       }),
     ),
   );
@@ -842,6 +909,7 @@ describe("AgentConversationSessionStore", () => {
         yield* admitAndCreate(store, coordinator, input);
         yield* sessions.recordSubmissionStarted(recordStartedInput(input));
         yield* markRunningAppliedWithAttemptMarker(sql, input.submissionId, input.runId);
+        yield* markInterruptedDurableFiberRows(sql, input.submissionId, input.runId);
 
         yield* coordinator.reconcile({
           pi: makePi(["recovered from marker"], contexts),
@@ -849,6 +917,7 @@ describe("AgentConversationSessionStore", () => {
         });
 
         const markers = yield* readAttemptMarkers(sql, input.submissionId);
+        const durableFiber = yield* readDurableFiber(sql, "attempt_crashed");
         assert.includeMembers(
           markers.map((marker) => marker.status),
           ["interrupted", "completed"],
@@ -857,6 +926,8 @@ describe("AgentConversationSessionStore", () => {
           markers.find((marker) => marker.attempt_id === "attempt_crashed")?.status,
           "interrupted",
         );
+        assert.strictEqual(durableFiber?.status, "interrupted");
+        assert.strictEqual(yield* countDurableFiberRuns(sql), 0);
         assert.strictEqual(contexts.length, 1);
         assert.deepStrictEqual(
           contexts[0]?.map((message) => message.role),
@@ -1768,6 +1839,44 @@ const markRunningAppliedWithAttemptMarker = (
       .pipe(Effect.asVoid);
   });
 
+const markInterruptedDurableFiberRows = (
+  sql: TestSqlStorage,
+  submissionId: string,
+  runId: string,
+) =>
+  Effect.gen(function* () {
+    const now = Date.now();
+    const snapshot = JSON.stringify({
+      submissionId,
+      attemptId: "attempt_crashed",
+      runId,
+      phase: "model_started",
+    });
+    yield* sql
+      .exec(
+        `INSERT INTO denora_durable_fibers
+         (fiber_id, idempotency_key, name, status, snapshot_json, metadata_json,
+          error_message, created_at, started_at, completed_at)
+         VALUES (?, ?, 'agent-conversation-submission', 'running', ?, ?, NULL, ?, ?, NULL)`,
+        "attempt_crashed",
+        `agent-conversation:${submissionId}:attempt_crashed`,
+        snapshot,
+        JSON.stringify({ submissionId, attemptId: "attempt_crashed", runId }),
+        now,
+        now,
+      )
+      .pipe(Effect.asVoid);
+    yield* sql
+      .exec(
+        `INSERT INTO denora_durable_fiber_runs (id, name, snapshot_json, created_at)
+         VALUES (?, 'agent-conversation-submission', ?, ?)`,
+        "attempt_crashed",
+        snapshot,
+        now,
+      )
+      .pipe(Effect.asVoid);
+  });
+
 const markRunning = (sql: TestSqlStorage, submissionId: string) =>
   sql
     .exec(
@@ -1980,6 +2089,42 @@ const readAttemptMarkers = (sql: TestSqlStorage, submissionId: string) =>
     return yield* cursor.toArray();
   });
 
+const readDurableFiber = (sql: TestSqlStorage, fiberId: string) =>
+  Effect.gen(function* () {
+    const cursor = yield* sql.exec<DurableFiberRow>(
+      `SELECT fiber_id, idempotency_key, name, status, snapshot_json, metadata_json,
+              error_message, created_at, started_at, completed_at
+       FROM denora_durable_fibers
+       WHERE fiber_id = ?
+       LIMIT 1`,
+      fiberId,
+    );
+    const rows = yield* cursor.toArray();
+    return rows[0] ?? null;
+  });
+
+const readDurableRun = (sql: TestSqlStorage, fiberId: string) =>
+  Effect.gen(function* () {
+    const cursor = yield* sql.exec<DurableRunRow>(
+      `SELECT id, name, snapshot_json, created_at
+       FROM denora_durable_fiber_runs
+       WHERE id = ?
+       LIMIT 1`,
+      fiberId,
+    );
+    const rows = yield* cursor.toArray();
+    return rows[0] ?? null;
+  });
+
+const countDurableFiberRuns = (sql: TestSqlStorage) =>
+  Effect.gen(function* () {
+    const cursor = yield* sql.exec<CountRow>(
+      `SELECT COUNT(*) AS count
+       FROM denora_durable_fiber_runs`,
+    );
+    return (yield* cursor.one()).count;
+  });
+
 const emptyUsage = {
   input: 0,
   output: 0,
@@ -2048,4 +2193,24 @@ interface AttemptMarkerRow extends Record<string, string | number | null> {
   readonly started_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
+}
+
+interface DurableFiberRow extends Record<string, string | number | null> {
+  readonly fiber_id: string;
+  readonly idempotency_key: string | null;
+  readonly name: string;
+  readonly status: string;
+  readonly snapshot_json: string | null;
+  readonly metadata_json: string | null;
+  readonly error_message: string | null;
+  readonly created_at: number;
+  readonly started_at: number | null;
+  readonly completed_at: number | null;
+}
+
+interface DurableRunRow extends Record<string, string | number | null> {
+  readonly id: string;
+  readonly name: string;
+  readonly snapshot_json: string | null;
+  readonly created_at: number;
 }

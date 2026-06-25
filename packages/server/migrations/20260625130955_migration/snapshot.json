@@ -1,7 +1,7 @@
 {
   "dialect": "postgres",
-  "id": "5d8aaefa-00e7-4efe-8e42-21794df2e479",
-  "prevIds": ["bf30a33d-74e7-4c5f-af98-7f2c60e7c3d3"],
+  "id": "cf956841-18e2-4488-b1f0-c3e061215d98",
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "version": "8",
   "ddl": [
     {
@@ -17,7 +17,7 @@
       "schema": "public"
     },
     {
-      "values": ["active", "archived"],
+      "values": ["active", "archiving", "archived", "deleting", "deleted"],
       "name": "conversation_status",
       "entityType": "enums",
       "schema": "public"
@@ -73,24 +73,6 @@
     {
       "isRlsEnabled": false,
       "name": "denora_agent_turn_journals",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "denora_event_stream_entries",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "denora_event_stream_keys",
-      "entityType": "tables",
-      "schema": "public"
-    },
-    {
-      "isRlsEnabled": false,
-      "name": "denora_event_streams",
       "entityType": "tables",
       "schema": "public"
     },
@@ -153,6 +135,19 @@
       "generated": null,
       "identity": null,
       "name": "trigger_message_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "agent_runs"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "submission_id",
       "entityType": "columns",
       "schema": "public",
       "table": "agent_runs"
@@ -1101,136 +1096,6 @@
       "default": null,
       "generated": null,
       "identity": null,
-      "name": "path",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_stream_entries"
-    },
-    {
-      "type": "integer",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "seq",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_stream_entries"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "data",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_stream_entries"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "path",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_stream_keys"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "key",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_stream_keys"
-    },
-    {
-      "type": "integer",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "seq",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_stream_keys"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "data",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_stream_keys"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
-      "name": "path",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_streams"
-    },
-    {
-      "type": "integer",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "0",
-      "generated": null,
-      "identity": null,
-      "name": "next_offset",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_streams"
-    },
-    {
-      "type": "integer",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": "0",
-      "generated": null,
-      "identity": null,
-      "name": "closed",
-      "entityType": "columns",
-      "schema": "public",
-      "table": "denora_event_streams"
-    },
-    {
-      "type": "text",
-      "typeSchema": null,
-      "notNull": true,
-      "dimensions": 0,
-      "default": null,
-      "generated": null,
-      "identity": null,
       "name": "run_id",
       "entityType": "columns",
       "schema": "public",
@@ -1564,6 +1429,27 @@
       "nameExplicit": true,
       "columns": [
         {
+          "value": "submission_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "agent_runs_submission_id_idx",
+      "entityType": "indexes",
+      "schema": "public",
+      "table": "agent_runs"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
           "value": "conversation_id",
           "isExpression": false,
           "asc": true,
@@ -1753,34 +1639,6 @@
       "nameExplicit": true,
       "columns": [
         {
-          "value": "path",
-          "isExpression": false,
-          "asc": true,
-          "nullsFirst": false,
-          "opclass": null
-        },
-        {
-          "value": "seq",
-          "isExpression": false,
-          "asc": true,
-          "nullsFirst": false,
-          "opclass": null
-        }
-      ],
-      "isUnique": true,
-      "where": null,
-      "with": "",
-      "method": "btree",
-      "concurrently": false,
-      "name": "denora_event_stream_keys_path_seq_idx",
-      "entityType": "indexes",
-      "schema": "public",
-      "table": "denora_event_stream_keys"
-    },
-    {
-      "nameExplicit": true,
-      "columns": [
-        {
           "value": "workflow_name",
           "isExpression": false,
           "asc": true,
@@ -1924,22 +1782,6 @@
       "table": "denora_agent_stream_chunks"
     },
     {
-      "columns": ["path", "seq"],
-      "nameExplicit": false,
-      "name": "denora_event_stream_entries_pkey",
-      "entityType": "pks",
-      "schema": "public",
-      "table": "denora_event_stream_entries"
-    },
-    {
-      "columns": ["path", "key"],
-      "nameExplicit": false,
-      "name": "denora_event_stream_keys_pkey",
-      "entityType": "pks",
-      "schema": "public",
-      "table": "denora_event_stream_keys"
-    },
-    {
       "columns": ["session_id", "entry_id"],
       "nameExplicit": false,
       "name": "denora_session_entries_pkey",
@@ -2001,14 +1843,6 @@
       "name": "denora_agent_turn_journals_pkey",
       "schema": "public",
       "table": "denora_agent_turn_journals",
-      "entityType": "pks"
-    },
-    {
-      "columns": ["path"],
-      "nameExplicit": false,
-      "name": "denora_event_streams_pkey",
-      "schema": "public",
-      "table": "denora_event_streams",
       "entityType": "pks"
     },
     {

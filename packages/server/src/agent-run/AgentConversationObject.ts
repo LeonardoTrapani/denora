@@ -48,6 +48,7 @@ export class AgentConversationObject extends Cloudflare.DurableObjectNamespace<
 
 export const AiGateway = Cloudflare.AiGateway("DenoraAiGateway", {
   collectLogs: true,
+  authentication: true,
 });
 
 export const AgentConversationObjectLive = AgentConversationObject.make(

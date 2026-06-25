@@ -23,6 +23,7 @@ import {
   parseOffset,
 } from "./EventStreamStore.ts";
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
+import { DurableFiber } from "./DurableFiber.ts";
 import { SqlStorage } from "./SqlStorage.ts";
 
 const WAKE_DELAY_MS = 30_000;
@@ -186,6 +187,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
   sessionStore: AgentConversationSessionStore.Interface,
 ): Effect.fn.Return<Interface, EventStorageFailed> {
   yield* ensureTables(sql);
+  const durableFibers = yield* DurableFiber.makeSqlite(sql);
   const activeAttempts = new Map<string, AbortController>();
 
   const admitSubmission = Effect.fn("AgentConversationCoordinator.admitSubmission")(function* (
@@ -300,6 +302,8 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       // before any branch that could invoke or requeue model work.
       yield* publishTerminalOutboxes();
       yield* settleInactiveSubmissions();
+      yield* publishTerminalOutboxes();
+      yield* recoverInterruptedDurableFibers();
       yield* publishTerminalOutboxes();
       yield* reconcileUnfinishedAttemptMarkers();
       yield* publishTerminalOutboxes();
@@ -475,167 +479,205 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
   ): Effect.fn.Return<void, EventStreamError> {
     if (submission.attemptId === undefined) return;
     const controller = new AbortController();
-    activeAttempts.set(submission.submissionId, controller);
-    return yield* Effect.gen(function* () {
-      yield* startAttemptMarker(submission, {
-        phase: "claimed",
-        submissionId: submission.submissionId,
-        attemptId: submission.attemptId,
-        runId: submission.runId,
-      });
-      if (yield* settleIfInactiveSubmission(submission)) return;
-      const completed = yield* reconstructCompletedRunResult(submission);
-      if (completed !== null) {
-        yield* reserveTerminal(submission, completed);
-        return;
-      }
-      const prepared = yield* prepareSubmissionForExecution(submission);
-      yield* markSubmissionInputApplied(submission);
-      yield* recordTurnJournalPhase(submission, "input_applied");
-      yield* updateAttemptSnapshot(submission, { phase: "input_applied" });
-      yield* recordTurnJournalPhase(submission, "model_started");
-      yield* updateAttemptSnapshot(submission, { phase: "model_started" });
-      const execution = yield* AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
-        runId: submission.runId,
-        agentName: submission.agentName,
-        conversationId: submission.conversationId ?? "unknown",
-        submissionId: submission.submissionId,
-        triggerMessageId: submission.messageId ?? "unknown",
-        input: prepared.input,
-        pi,
-        initialAssistantMessageIndex: prepared.nextAssistantMessageIndex,
-        beforeEmitEvent: (event) =>
-          rejectInactiveSubmission(submission, `emit ${event.type} event`),
-        onCheckpoint: (checkpoint) => {
-          const conversationId = submission.conversationId ?? "unknown";
-          switch (checkpoint.type) {
-            case "assistant_message_started":
-              return Effect.gen(function* () {
-                yield* rejectInactiveSubmission(submission, "record assistant message start");
-                yield* sessionStore.recordAssistantMessageStarted({
-                  conversationId,
-                  runId: checkpoint.runId,
-                  submissionId: submission.submissionId,
-                  messageIndex: checkpoint.messageIndex,
-                });
-                yield* recordTurnJournalPhase(submission, "assistant_started");
-                yield* updateAttemptSnapshot(submission, {
-                  phase: "assistant_started",
-                  messageIndex: checkpoint.messageIndex,
-                });
-              });
-            case "assistant_text_part_completed":
-              return Effect.gen(function* () {
-                yield* rejectInactiveSubmission(submission, "record assistant text checkpoint");
-                yield* sessionStore.recordAssistantTextPartCompleted({
-                  conversationId,
-                  runId: checkpoint.runId,
-                  submissionId: submission.submissionId,
-                  messageIndex: checkpoint.messageIndex,
-                  contentIndex: checkpoint.contentIndex,
-                  text: checkpoint.text,
-                });
-                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
-                yield* updateAttemptSnapshot(submission, {
-                  phase: "assistant_checkpointed",
-                  messageIndex: checkpoint.messageIndex,
-                  contentIndex: checkpoint.contentIndex,
-                });
-              });
-            case "assistant_message_completed":
-              return Effect.gen(function* () {
-                yield* rejectInactiveSubmission(submission, "record assistant message completion");
-                yield* sessionStore.recordAssistantMessageCompleted({
-                  conversationId,
-                  runId: checkpoint.runId,
-                  submissionId: submission.submissionId,
-                  messageIndex: checkpoint.messageIndex,
-                  parts: checkpoint.message.content,
-                  plainText: assistantPlainText(checkpoint.message.content),
-                });
-                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
-                yield* updateAttemptSnapshot(submission, {
-                  phase: "assistant_completed",
-                  messageIndex: checkpoint.messageIndex,
-                });
-              });
-            case "tool_call_started":
-              return Effect.gen(function* () {
-                yield* rejectInactiveSubmission(submission, "record tool call checkpoint");
-                yield* sessionStore.recordToolCallCheckpoint({
-                  conversationId,
-                  runId: checkpoint.runId,
-                  submissionId: submission.submissionId,
-                  toolCallId: checkpoint.toolCallId,
-                  name: checkpoint.toolName,
-                  args: checkpoint.args,
-                });
-                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
-                yield* updateAttemptSnapshot(submission, {
-                  phase: "tool_call_started",
-                  toolCallId: checkpoint.toolCallId,
-                  toolName: checkpoint.toolName,
-                });
-              });
-            case "tool_result_completed":
-              return Effect.gen(function* () {
-                yield* rejectInactiveSubmission(submission, "record tool result checkpoint");
-                yield* sessionStore.recordToolResultCheckpoint({
-                  conversationId,
-                  runId: checkpoint.runId,
-                  submissionId: submission.submissionId,
-                  toolCallId: checkpoint.toolCallId,
-                  name: checkpoint.toolName,
-                  result: checkpoint.result,
-                  isError: checkpoint.isError,
-                });
-                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
-                yield* updateAttemptSnapshot(submission, {
-                  phase: "tool_result_completed",
-                  toolCallId: checkpoint.toolCallId,
-                  toolName: checkpoint.toolName,
-                  isError: checkpoint.isError,
-                });
-              });
-          }
+    const claimedSnapshot = attemptSnapshot(submission, {
+      phase: "claimed",
+      submissionId: submission.submissionId,
+      attemptId: submission.attemptId,
+      runId: submission.runId,
+    });
+    yield* durableFibers.startManaged(
+      {
+        fiberId: submission.attemptId,
+        idempotencyKey: submissionAttemptIdempotencyKey(submission),
+        name: SUBMISSION_ATTEMPT_MARKER_NAME,
+        metadata: {
+          submissionId: submission.submissionId,
+          attemptId: submission.attemptId,
+          runId: submission.runId,
+          agentName: submission.agentName,
+          conversationId: submission.conversationId ?? null,
         },
+        initialSnapshot: claimedSnapshot,
         signal: controller.signal,
-      }).pipe(
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            yield* Effect.logError("agent run attempt execution failed before terminal outbox", {
-              runId: submission.runId,
-              submissionId: submission.submissionId,
-              attemptId: submission.attemptId,
-              error,
-            });
-            yield* updateAttemptSnapshot(submission, { phase: "execution_failed" });
-            return yield* makeInterruptedResult(submission, errorMessage(error));
-          }),
-        ),
-      );
-      if (yield* settleIfInactiveSubmission(submission)) return;
-      yield* sessionStore.finishRun({
-        conversationId: submission.conversationId ?? "unknown",
-        runId: submission.runId,
-        submissionId: submission.submissionId,
-        isError: execution.isError,
-        result: execution.result,
-      });
-      yield* reserveTerminal(submission, execution, {
-        markerStatus: controller.signal.aborted ? "interrupted" : undefined,
-      });
-    }).pipe(
-      Effect.catch((error) =>
+      },
+      (fiber) =>
         Effect.gen(function* () {
-          yield* settleAttemptMarker(submission, "failed", {
-            phase: "failed",
-            error: error instanceof Error ? error.message : String(error),
-          }).pipe(Effect.catch(() => Effect.void));
-          return yield* error;
-        }),
-      ),
-      Effect.ensuring(Effect.sync(() => activeAttempts.delete(submission.submissionId))),
+          activeAttempts.set(submission.submissionId, controller);
+          yield* startAttemptMarker(submission, {
+            phase: "claimed",
+            submissionId: submission.submissionId,
+            attemptId: submission.attemptId,
+            runId: submission.runId,
+          });
+          if (yield* settleIfInactiveSubmission(submission)) return;
+          const completed = yield* reconstructCompletedRunResult(submission);
+          if (completed !== null) {
+            yield* stashAttemptSnapshot(submission, fiber, {
+              phase: "terminal_reserved",
+              isError: completed.isError,
+            });
+            yield* reserveTerminal(submission, completed);
+            return;
+          }
+          const prepared = yield* prepareSubmissionForExecution(submission);
+          yield* markSubmissionInputApplied(submission);
+          yield* recordTurnJournalPhase(submission, "input_applied");
+          yield* stashAttemptSnapshot(submission, fiber, { phase: "input_applied" });
+          yield* recordTurnJournalPhase(submission, "model_started");
+          yield* stashAttemptSnapshot(submission, fiber, { phase: "model_started" });
+          const execution = yield* AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
+            runId: submission.runId,
+            agentName: submission.agentName,
+            conversationId: submission.conversationId ?? "unknown",
+            submissionId: submission.submissionId,
+            triggerMessageId: submission.messageId ?? "unknown",
+            input: prepared.input,
+            pi,
+            initialAssistantMessageIndex: prepared.nextAssistantMessageIndex,
+            beforeEmitEvent: (event) =>
+              rejectInactiveSubmission(submission, `emit ${event.type} event`),
+            onCheckpoint: (checkpoint) => {
+              const conversationId = submission.conversationId ?? "unknown";
+              switch (checkpoint.type) {
+                case "assistant_message_started":
+                  return Effect.gen(function* () {
+                    yield* rejectInactiveSubmission(submission, "record assistant message start");
+                    yield* sessionStore.recordAssistantMessageStarted({
+                      conversationId,
+                      runId: checkpoint.runId,
+                      submissionId: submission.submissionId,
+                      messageIndex: checkpoint.messageIndex,
+                    });
+                    yield* recordTurnJournalPhase(submission, "assistant_started");
+                    yield* stashAttemptSnapshot(submission, fiber, {
+                      phase: "assistant_started",
+                      messageIndex: checkpoint.messageIndex,
+                    });
+                  });
+                case "assistant_text_part_completed":
+                  return Effect.gen(function* () {
+                    yield* rejectInactiveSubmission(submission, "record assistant text checkpoint");
+                    yield* sessionStore.recordAssistantTextPartCompleted({
+                      conversationId,
+                      runId: checkpoint.runId,
+                      submissionId: submission.submissionId,
+                      messageIndex: checkpoint.messageIndex,
+                      contentIndex: checkpoint.contentIndex,
+                      text: checkpoint.text,
+                    });
+                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                    yield* stashAttemptSnapshot(submission, fiber, {
+                      phase: "assistant_checkpointed",
+                      messageIndex: checkpoint.messageIndex,
+                      contentIndex: checkpoint.contentIndex,
+                    });
+                  });
+                case "assistant_message_completed":
+                  return Effect.gen(function* () {
+                    yield* rejectInactiveSubmission(
+                      submission,
+                      "record assistant message completion",
+                    );
+                    yield* sessionStore.recordAssistantMessageCompleted({
+                      conversationId,
+                      runId: checkpoint.runId,
+                      submissionId: submission.submissionId,
+                      messageIndex: checkpoint.messageIndex,
+                      parts: checkpoint.message.content,
+                      plainText: assistantPlainText(checkpoint.message.content),
+                    });
+                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                    yield* stashAttemptSnapshot(submission, fiber, {
+                      phase: "assistant_completed",
+                      messageIndex: checkpoint.messageIndex,
+                    });
+                  });
+                case "tool_call_started":
+                  return Effect.gen(function* () {
+                    yield* rejectInactiveSubmission(submission, "record tool call checkpoint");
+                    yield* sessionStore.recordToolCallCheckpoint({
+                      conversationId,
+                      runId: checkpoint.runId,
+                      submissionId: submission.submissionId,
+                      toolCallId: checkpoint.toolCallId,
+                      name: checkpoint.toolName,
+                      args: checkpoint.args,
+                    });
+                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                    yield* stashAttemptSnapshot(submission, fiber, {
+                      phase: "tool_call_started",
+                      toolCallId: checkpoint.toolCallId,
+                      toolName: checkpoint.toolName,
+                    });
+                  });
+                case "tool_result_completed":
+                  return Effect.gen(function* () {
+                    yield* rejectInactiveSubmission(submission, "record tool result checkpoint");
+                    yield* sessionStore.recordToolResultCheckpoint({
+                      conversationId,
+                      runId: checkpoint.runId,
+                      submissionId: submission.submissionId,
+                      toolCallId: checkpoint.toolCallId,
+                      name: checkpoint.toolName,
+                      result: checkpoint.result,
+                      isError: checkpoint.isError,
+                    });
+                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                    yield* stashAttemptSnapshot(submission, fiber, {
+                      phase: "tool_result_completed",
+                      toolCallId: checkpoint.toolCallId,
+                      toolName: checkpoint.toolName,
+                      isError: checkpoint.isError,
+                    });
+                  });
+              }
+            },
+            signal: controller.signal,
+          }).pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                yield* Effect.logError(
+                  "agent run attempt execution failed before terminal outbox",
+                  {
+                    runId: submission.runId,
+                    submissionId: submission.submissionId,
+                    attemptId: submission.attemptId,
+                    error,
+                  },
+                );
+                yield* stashAttemptSnapshot(submission, fiber, { phase: "execution_failed" });
+                return yield* makeInterruptedResult(submission, errorMessage(error));
+              }),
+            ),
+          );
+          if (yield* settleIfInactiveSubmission(submission)) return;
+          yield* sessionStore.finishRun({
+            conversationId: submission.conversationId ?? "unknown",
+            runId: submission.runId,
+            submissionId: submission.submissionId,
+            isError: execution.isError,
+            result: execution.result,
+          });
+          yield* stashAttemptSnapshot(submission, fiber, {
+            phase: "terminal_reserved",
+            isError: execution.isError,
+            ...(execution.error?.message !== undefined ? { error: execution.error.message } : {}),
+          });
+          yield* reserveTerminal(submission, execution, {
+            markerStatus: controller.signal.aborted ? "interrupted" : undefined,
+          });
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.gen(function* () {
+              yield* settleAttemptMarker(submission, "failed", {
+                phase: "failed",
+                error: error instanceof Error ? error.message : String(error),
+              }).pipe(Effect.catch(() => Effect.void));
+              return yield* error;
+            }),
+          ),
+          Effect.ensuring(Effect.sync(() => activeAttempts.delete(submission.submissionId))),
+        ),
     );
   });
 
@@ -1100,6 +1142,16 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       ),
     );
 
+  const stashAttemptSnapshot = (
+    submission: Submission,
+    fiber: DurableFiber.FiberContext,
+    snapshot: Record<string, unknown>,
+  ): Effect.Effect<void, EventStreamError> =>
+    Effect.gen(function* () {
+      yield* fiber.stash(attemptSnapshot(submission, snapshot));
+      yield* updateAttemptSnapshot(submission, snapshot);
+    });
+
   const settleAttemptMarker = (
     submission: Submission,
     status: TerminalAttemptMarkerStatus,
@@ -1184,6 +1236,21 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           break;
       }
     }
+  });
+
+  const recoverInterruptedDurableFibers = Effect.fn(
+    "AgentConversationCoordinator.recoverInterruptedDurableFibers",
+  )(function* (): Effect.fn.Return<void, EventStreamError> {
+    yield* durableFibers.recoverInterrupted((fiber) =>
+      Effect.gen(function* () {
+        const submissionId = durableFiberSubmissionId(fiber);
+        if (submissionId === undefined) return;
+        const submission = yield* readSubmission(submissionId);
+        if (submission === null) return;
+        if (submission.status !== "running" || submission.attemptId !== fiber.fiberId) return;
+        yield* reconcileInterruptedSubmission(submission);
+      }),
+    );
   });
 
   const reconcileInterruptedSubmission = Effect.fn(
@@ -1674,6 +1741,21 @@ const assistantPlainText = (parts: ReadonlyArray<unknown>): string =>
 
 const terminalEventKey = (submissionId: string): string =>
   `agent-conversation:${submissionId}:terminal`;
+
+const submissionAttemptIdempotencyKey = (
+  submission: Pick<Submission, "submissionId" | "attemptId">,
+): string => `agent-conversation:${submission.submissionId}:${submission.attemptId ?? "unknown"}`;
+
+const durableFiberSubmissionId = (fiber: DurableFiber.RecoveryContext): string | undefined => {
+  const metadataId = fiber.metadata.submissionId;
+  if (typeof metadataId === "string") return metadataId;
+  const snapshot = fiber.snapshot;
+  if (typeof snapshot === "object" && snapshot !== null) {
+    const snapshotId = (snapshot as { readonly submissionId?: unknown }).submissionId;
+    if (typeof snapshotId === "string") return snapshotId;
+  }
+  return undefined;
+};
 
 const sessionKey = (conversationId: string | undefined): string =>
   `agent-session:${conversationId ?? "unknown"}:default`;

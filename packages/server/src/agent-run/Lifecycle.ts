@@ -8,7 +8,7 @@ import {
   parseOffset,
   runStreamPath,
 } from "./EventStreamStore.ts";
-import { AgentRunSession, type RunEvent } from "./AgentRunSession.ts";
+import { AgentRunSession, type RunCheckpoint, type RunEvent } from "./AgentRunSession.ts";
 import {
   isBufferedRunEvent,
   isStreamExcludedRunEvent,
@@ -64,6 +64,12 @@ export interface ExecuteRunInput extends CreateRunInput {
 export interface ExecuteRunAttemptInput extends ExecuteRunInput {}
 export interface ExecuteConversationSubmissionAttemptInput extends CreateConversationSubmissionInput {
   readonly pi: PiRuntimeInterface;
+  readonly beforeEmitEvent?:
+    | ((event: RunEvent) => Effect.Effect<void, EventStreamError>)
+    | undefined;
+  readonly onCheckpoint?:
+    | ((checkpoint: RunCheckpoint) => Effect.Effect<void, EventStreamError>)
+    | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -346,6 +352,7 @@ export const executeConversationSubmissionAttempt = Effect.fn(
     event: RunEvent,
   ): Effect.fn.Return<void, EventStreamError> {
     if (isStreamExcludedRunEvent(event)) return;
+    if (input.beforeEmitEvent !== undefined) yield* input.beforeEmitEvent(event);
     const decorated = yield* decorateConversationEvent(event);
     for (const subscriber of subscribers) yield* subscriber(decorated);
   });
@@ -357,6 +364,7 @@ export const executeConversationSubmissionAttempt = Effect.fn(
     input: input.input,
     streamFn: input.pi.streamFn,
     onAgentEvent: emitConversationEvent,
+    onCheckpoint: input.onCheckpoint,
     signal: input.signal,
   }).pipe(
     Effect.matchEffect({

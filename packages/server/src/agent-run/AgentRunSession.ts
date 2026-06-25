@@ -13,11 +13,34 @@ export type { RunEvent } from "./RunEventContract.ts";
 
 export type RunEventCallback = (event: RunEvent) => Effect.Effect<void, unknown>;
 
+export type RunCheckpoint =
+  | {
+      readonly type: "assistant_message_started";
+      readonly runId: string;
+      readonly messageIndex: number;
+    }
+  | {
+      readonly type: "assistant_text_part_completed";
+      readonly runId: string;
+      readonly messageIndex: number;
+      readonly contentIndex: number;
+      readonly text: string;
+    }
+  | {
+      readonly type: "assistant_message_completed";
+      readonly runId: string;
+      readonly messageIndex: number;
+      readonly message: Extract<AgentMessage, { role: "assistant" }>;
+    };
+
+export type RunCheckpointCallback = (checkpoint: RunCheckpoint) => Effect.Effect<void, unknown>;
+
 export interface ExecuteInput {
   readonly runId: string;
   readonly input?: unknown;
   readonly streamFn: StreamFn;
   readonly onAgentEvent: RunEventCallback;
+  readonly onCheckpoint?: RunCheckpointCallback | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -47,9 +70,12 @@ export const execute = Effect.fn("AgentRunSession.execute")(function* (
 class AgentRunSession {
   private readonly agentLoop: Agent;
   private readonly eventCallback: RunEventCallback;
+  private readonly checkpointCallback: RunCheckpointCallback | undefined;
   private readonly input: ExecuteInput;
   private activeTurnId: string | undefined;
   private activeTurnStartedAt: number | undefined;
+  private activeAssistantMessageIndex: number | undefined;
+  private nextAssistantMessageIndex = 0;
   private readonly activeToolCalls = new Map<
     string,
     { readonly startedAt: number; readonly toolName: string }
@@ -58,6 +84,7 @@ class AgentRunSession {
   constructor(input: ExecuteInput) {
     this.input = input;
     this.eventCallback = input.onAgentEvent;
+    this.checkpointCallback = input.onCheckpoint;
     this.agentLoop = new Agent({
       initialState: {
         systemPrompt: systemPromptFrom(input.input),
@@ -116,6 +143,14 @@ class AgentRunSession {
       case "message_start": {
         const turnId = this.activeTurnId ?? generateTurnId();
         this.activeTurnId = turnId;
+        if (event.message.role === "assistant") {
+          const messageIndex = this.assistantMessageIndex();
+          await this.checkpoint({
+            type: "assistant_message_started",
+            runId: this.input.runId,
+            messageIndex,
+          });
+        }
         await this.emit({ type: "message_start", message: event.message, turnId });
         break;
       }
@@ -123,6 +158,14 @@ class AgentRunSession {
         const aEvent = event.assistantMessageEvent;
         if (aEvent.type === "text_delta") {
           await this.emit({ type: "text_delta", text: aEvent.delta });
+        } else if (aEvent.type === "text_end") {
+          await this.checkpoint({
+            type: "assistant_text_part_completed",
+            runId: this.input.runId,
+            messageIndex: this.assistantMessageIndex(),
+            contentIndex: aEvent.contentIndex,
+            text: aEvent.content,
+          });
         } else if (aEvent.type === "thinking_start") {
           await this.emit({ type: "thinking_start", contentIndex: aEvent.contentIndex });
         } else if (aEvent.type === "thinking_delta") {
@@ -144,6 +187,7 @@ class AgentRunSession {
         const turnId = this.activeTurnId ?? generateTurnId();
         this.activeTurnId = turnId;
         if (event.message.role === "assistant") {
+          const messageIndex = this.assistantMessageIndex();
           await this.emit({
             type: "turn",
             turnId,
@@ -154,6 +198,17 @@ class AgentRunSession {
             isError:
               event.message.stopReason === "error" || event.message.errorMessage !== undefined,
           });
+          await this.checkpoint({
+            type: "assistant_message_completed",
+            runId: this.input.runId,
+            messageIndex,
+            message: event.message,
+          });
+          this.nextAssistantMessageIndex = Math.max(
+            this.nextAssistantMessageIndex,
+            messageIndex + 1,
+          );
+          this.activeAssistantMessageIndex = undefined;
         }
         await this.emit({ type: "message_end", message: event.message, turnId });
         break;
@@ -214,6 +269,18 @@ class AgentRunSession {
         : {}),
     };
     return Effect.runPromise(this.eventCallback(decorated));
+  }
+
+  private checkpoint(checkpoint: RunCheckpoint): Promise<void> {
+    return this.checkpointCallback === undefined
+      ? Promise.resolve()
+      : Effect.runPromise(this.checkpointCallback(checkpoint));
+  }
+
+  private assistantMessageIndex(): number {
+    if (this.activeAssistantMessageIndex === undefined)
+      this.activeAssistantMessageIndex = this.nextAssistantMessageIndex;
+    return this.activeAssistantMessageIndex;
   }
 
   private turnDurationMs(): number {

@@ -17,7 +17,7 @@ export class Conversation extends Schema.Class<Conversation>("Conversation")({
   id: Schema.String,
   ownerUserId: Schema.String,
   agentId: Schema.NullOr(Schema.String),
-  status: Schema.Literals(["active", "archived"]),
+  status: Schema.Literals(["active", "archiving", "archived", "deleting", "deleted"]),
   title: Schema.NullOr(Schema.String),
   metadata: Schema.Unknown,
   createdAt: Schema.String,

@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS denora_agent_conversation_submissions (
   agent_name            TEXT NOT NULL DEFAULT 'default',
   conversation_id       TEXT,
   message_id            TEXT,
+  parent_message_id     TEXT,
   payload               TEXT NOT NULL,
   status                TEXT NOT NULL,
   accepted_at           INTEGER NOT NULL,
@@ -200,15 +201,17 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     const cursor = yield* sql
       .exec<SubmissionRow>(
         `INSERT OR IGNORE INTO denora_agent_conversation_submissions
-         (submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id, payload, status, accepted_at)
-         VALUES (?, ?, 'message', ?, ?, ?, ?, ?, 'queued', ?)
-         RETURNING ${submissionColumns}`,
+         (submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id,
+          parent_message_id, payload, status, accepted_at)
+         VALUES (?, ?, 'message', ?, ?, ?, ?, ?, ?, 'queued', ?)
+          RETURNING ${submissionColumns}`,
         input.submissionId,
         sessionKey(input.conversationId),
         input.runId,
         input.agentName,
         input.conversationId ?? null,
         input.triggerMessageId ?? null,
+        input.parentMessageId ?? null,
         payload,
         Date.now(),
       )
@@ -223,10 +226,10 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
         cause: new Error("Submission insert returned no row and no existing submission."),
       });
     }
-    if (existing.payload !== payload) {
+    if (existing.payload !== payload || existing.parentMessageId !== input.parentMessageId) {
       return yield* new EventStorageFailed({
         operation: "admit agent conversation submission",
-        cause: new Error(`Submission ${input.submissionId} already has a conflicting payload.`),
+        cause: new Error(`Submission ${input.submissionId} already has conflicting input.`),
       });
     }
     return { admitted: false };
@@ -1469,6 +1472,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
         messageId,
         submissionId: submission.submissionId,
         runId: submission.runId,
+        parentMessageId: submission.parentMessageId,
         content: payload.submittedMessage,
       })
       .pipe(
@@ -1589,6 +1593,7 @@ const ensureTables = (sql: Cloudflare.SqlStorage): Effect.Effect<void, EventStor
       ["last_error", "last_error TEXT"],
       ["timeout_at", "timeout_at INTEGER NOT NULL DEFAULT 0"],
       ["lease_expires_at", "lease_expires_at INTEGER NOT NULL DEFAULT 0"],
+      ["parent_message_id", "parent_message_id TEXT"],
     ] as const) {
       yield* ensureColumn(sql, {
         table: "denora_agent_conversation_submissions",
@@ -1784,7 +1789,7 @@ const submissionPayload = (
 };
 
 const submissionColumns =
-  "sequence, submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id, payload, status, accepted_at, attempt_id, started_at, settled_at, abort_requested_at, input_applied_at, attempt_count, max_attempts, last_error, timeout_at, lease_expires_at, error, terminal_event_key, terminal_event_json, terminal_event_offset";
+  "sequence, submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id, parent_message_id, payload, status, accepted_at, attempt_id, started_at, settled_at, abort_requested_at, input_applied_at, attempt_count, max_attempts, last_error, timeout_at, lease_expires_at, error, terminal_event_key, terminal_event_json, terminal_event_offset";
 
 const parseSubmission = (row: SubmissionRow): Submission => ({
   sequence: row.sequence,
@@ -1795,6 +1800,7 @@ const parseSubmission = (row: SubmissionRow): Submission => ({
   agentName: row.agent_name,
   conversationId: row.conversation_id ?? undefined,
   messageId: row.message_id ?? undefined,
+  parentMessageId: row.parent_message_id ?? undefined,
   payload: row.payload,
   input: JSON.parse(row.payload) as unknown,
   status: row.status,
@@ -1927,6 +1933,7 @@ interface SubmissionRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly agent_name: string;
   readonly conversation_id: string | null;
   readonly message_id: string | null;
+  readonly parent_message_id: string | null;
   readonly payload: string;
   readonly status: SubmissionStatus;
   readonly accepted_at: number;
@@ -2034,6 +2041,7 @@ interface Submission {
   readonly agentName: string;
   readonly conversationId?: string | undefined;
   readonly messageId?: string | undefined;
+  readonly parentMessageId?: string | undefined;
   readonly payload: string;
   readonly input: unknown;
   readonly status: SubmissionStatus;

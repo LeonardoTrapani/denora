@@ -51,6 +51,7 @@ export interface RecordSubmissionStartedInput {
   readonly userId: string;
   readonly agentName: string;
   readonly messageId: string;
+  readonly parentMessageId?: string | null | undefined;
   readonly submissionId: string;
   readonly runId: string;
   readonly content: unknown;
@@ -145,6 +146,10 @@ export interface Interface {
     readonly runId: string;
     readonly submissionId: string;
   }) => Effect.Effect<SubmissionProgress, EventStorageFailed>;
+  readonly readActivePath: (input: {
+    readonly conversationId: string;
+    readonly leafMessageId: string;
+  }) => Effect.Effect<ReadonlyArray<SessionMessageRecord>, EventStorageFailed>;
 }
 
 export class Service extends Context.Service<Service, Interface>()(
@@ -185,6 +190,18 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     return yield* Effect.forEach(rows, (row) => parseMessageRow(sql, row));
   });
 
+  const readActivePath = Effect.fn("AgentConversationSessionStore.readActivePath")(
+    function* (input: {
+      readonly conversationId: string;
+      readonly leafMessageId: string;
+    }): Effect.fn.Return<ReadonlyArray<SessionMessageRecord>, EventStorageFailed> {
+      const messages = yield* readMessages(input.conversationId);
+      return yield* activePathToLeaf(messages, input.leafMessageId, {
+        operation: "read conversation session active path",
+      });
+    },
+  );
+
   const recordSubmissionStarted = Effect.fn(
     "AgentConversationSessionStore.recordSubmissionStarted",
   )(function* (
@@ -192,11 +209,21 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
   ): Effect.fn.Return<RecordedSubmissionStarted, EventStorageFailed> {
     const timestamp = DateTime.formatIso(yield* DateTime.now);
     const content = input.content;
+    const parentMessageId =
+      input.parentMessageId !== undefined
+        ? input.parentMessageId
+        : yield* readLatestMessageId(sql, input.conversationId);
+    if (parentMessageId !== null) {
+      const existingMessages = yield* readMessages(input.conversationId);
+      yield* activePathToLeaf(existingMessages, parentMessageId, {
+        operation: "validate conversation submission parent message",
+      });
+    }
 
     yield* insertMessage(sql, {
       messageId: input.messageId,
       conversationId: input.conversationId,
-      parentMessageId: yield* readLatestMessageId(sql, input.conversationId),
+      parentMessageId,
       runId: input.runId,
       submissionId: input.submissionId,
       role: "user",
@@ -208,15 +235,22 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     });
 
     const messages = yield* readMessages(input.conversationId);
+    const activePath = yield* activePathToLeaf(
+      messages,
+      latestSubmissionMessageId(messages, input.submissionId) ?? input.messageId,
+      {
+        operation: "build conversation submission context",
+      },
+    );
     const runInput = {
       prompt: "",
       submittedMessage: content,
-      messages: messages.flatMap(toAgentMessage),
+      messages: activePath.flatMap(toAgentMessage),
     };
 
     return {
       input: runInput,
-      nextAssistantMessageIndex: nextAssistantMessageIndex(messages, input.runId),
+      nextAssistantMessageIndex: nextAssistantMessageIndex(activePath, input.runId),
     };
   });
 
@@ -443,8 +477,54 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     finishRun,
     inspectSubmissionProgress,
     reconstructCompletedRun,
+    readActivePath,
   } satisfies Interface;
 });
+
+const activePathToLeaf = (
+  messages: ReadonlyArray<MessageRecord>,
+  leafMessageId: string,
+  options: { readonly operation: string },
+): Effect.Effect<ReadonlyArray<SessionMessageRecord>, EventStorageFailed> =>
+  Effect.try({
+    try: () => {
+      const byId = new Map(messages.map((message) => [message.messageId, message]));
+      const path: MessageRecord[] = [];
+      const seen = new Set<string>();
+      let current = byId.get(leafMessageId);
+      if (current === undefined) {
+        throw new Error(`Conversation session leaf message ${leafMessageId} does not exist.`);
+      }
+      while (current !== undefined) {
+        if (seen.has(current.messageId)) {
+          throw new Error(`Conversation session message ${current.messageId} forms a cycle.`);
+        }
+        seen.add(current.messageId);
+        path.push(current);
+        if (current.parentMessageId === null) break;
+        const parent = byId.get(current.parentMessageId);
+        if (parent === undefined) {
+          throw new Error(
+            `Conversation session parent message ${current.parentMessageId} does not exist.`,
+          );
+        }
+        current = parent;
+      }
+      return path.reverse();
+    },
+    catch: (cause) => new EventStorageFailed({ operation: options.operation, cause }),
+  });
+
+const latestSubmissionMessageId = (
+  messages: ReadonlyArray<MessageRecord>,
+  submissionId: string,
+): string | undefined => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.submissionId === submissionId) return message.messageId;
+  }
+  return undefined;
+};
 
 const ensureTables = (sql: Cloudflare.SqlStorage): Effect.Effect<void, EventStorageFailed> =>
   Effect.gen(function* () {
@@ -1026,7 +1106,7 @@ export const toolCallMessageId = (runId: string, toolCallId: string): string =>
 export const toolResultMessageId = (runId: string, toolCallId: string): string =>
   `tool-result:${runId}:${toolCallId}`;
 
-interface MessageRecord {
+export interface SessionMessageRecord {
   readonly messageId: string;
   readonly conversationId: string;
   readonly parentMessageId: string | null;
@@ -1039,6 +1119,8 @@ interface MessageRecord {
   readonly createdAt: string;
   readonly updatedAt: string;
 }
+
+type MessageRecord = SessionMessageRecord;
 
 interface MessageRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly message_id: string;

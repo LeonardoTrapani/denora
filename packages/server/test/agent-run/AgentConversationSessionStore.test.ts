@@ -1000,6 +1000,93 @@ describe("AgentConversationSessionStore", () => {
     ),
   );
 
+  it.effect("builds branch active paths from parent_message_id while retaining flat history", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+        const first = submissionInput({
+          submissionId: "submission_branch_first",
+          runId: "run_branch_first",
+          triggerMessageId: "message_branch_first",
+          text: "first",
+        });
+        const second = submissionInput({
+          submissionId: "submission_branch_second",
+          runId: "run_branch_second",
+          triggerMessageId: "message_branch_second",
+          text: "second",
+        });
+        const branch = submissionInput({
+          submissionId: "submission_branch_regen",
+          runId: "run_branch_regen",
+          triggerMessageId: "message_branch_regen",
+          parentMessageId: `assistant:${first.runId}:0`,
+          text: "regenerate from first",
+        });
+
+        yield* sessions.recordSubmissionStarted(recordStartedInput(first));
+        yield* sessions.finishRun({
+          conversationId: first.conversationId,
+          runId: first.runId,
+          submissionId: first.submissionId,
+          isError: false,
+          result: { assistantText: "first reply" },
+        });
+        yield* sessions.recordSubmissionStarted(recordStartedInput(second));
+        yield* sessions.finishRun({
+          conversationId: second.conversationId,
+          runId: second.runId,
+          submissionId: second.submissionId,
+          isError: false,
+          result: { assistantText: "second reply" },
+        });
+        const replay = yield* sessions.recordSubmissionStarted(recordStartedInput(branch));
+
+        const messages = yield* readSessionMessages(sql);
+        const activePath = yield* sessions.readActivePath({
+          conversationId: branch.conversationId,
+          leafMessageId: branch.triggerMessageId,
+        });
+        const context = (replay.input as { readonly messages: ReadonlyArray<AgentMessage> })
+          .messages;
+
+        assert.deepStrictEqual(
+          messages.map((message) => message.message_id),
+          [
+            "message_branch_first",
+            "assistant:run_branch_first:0",
+            "message_branch_second",
+            "assistant:run_branch_second:0",
+            "message_branch_regen",
+          ],
+        );
+        assert.deepStrictEqual(
+          messages.map((message) => message.parent_message_id),
+          [
+            null,
+            "message_branch_first",
+            "assistant:run_branch_first:0",
+            "message_branch_second",
+            "assistant:run_branch_first:0",
+          ],
+        );
+        assert.deepStrictEqual(
+          activePath.map((message) => message.messageId),
+          ["message_branch_first", "assistant:run_branch_first:0", "message_branch_regen"],
+        );
+        assert.deepStrictEqual(
+          context.map((message) => message.role),
+          ["user", "assistant", "user"],
+        );
+        assert.deepStrictEqual(context.map(agentMessageText), [
+          "first",
+          "first reply",
+          "regenerate from first",
+        ]);
+      }),
+    ),
+  );
+
   it.effect("retries after input was applied using the persisted local session history", () =>
     withHarness(
       Effect.gen(function* () {
@@ -1621,6 +1708,63 @@ describe("AgentConversationSessionStore", () => {
       }),
     ),
   );
+
+  it.effect(
+    "assembles branch submission context through the coordinator without sibling messages",
+    () =>
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, store, coordinator } = yield* AgentConversationHarness;
+          const first = submissionInput({
+            submissionId: "submission_coordinator_branch_first",
+            runId: "run_coordinator_branch_first",
+            triggerMessageId: "message_coordinator_branch_first",
+            text: "first",
+          });
+          const second = submissionInput({
+            submissionId: "submission_coordinator_branch_second",
+            runId: "run_coordinator_branch_second",
+            triggerMessageId: "message_coordinator_branch_second",
+            text: "second",
+          });
+          const branch = submissionInput({
+            submissionId: "submission_coordinator_branch_regen",
+            runId: "run_coordinator_branch_regen",
+            triggerMessageId: "message_coordinator_branch_regen",
+            parentMessageId: `assistant:${first.runId}:0`,
+            text: "branch from first",
+          });
+          const contexts: Array<ReadonlyArray<AgentMessage>> = [];
+
+          yield* admitAndCreate(store, coordinator, first);
+          yield* admitAndCreate(store, coordinator, second);
+          yield* admitAndCreate(store, coordinator, branch);
+          yield* coordinator.reconcile({
+            pi: makePi(["first reply", "second reply", "branch reply"], contexts),
+            scheduleWake: () => Effect.void,
+          });
+
+          const messages = yield* readSessionMessages(sql);
+          const branchUser = messages.find(
+            (message) => message.message_id === branch.triggerMessageId,
+          );
+          assert.strictEqual(contexts.length, 3);
+          assert.deepStrictEqual(contexts[0]?.map(agentMessageText), ["first"]);
+          assert.deepStrictEqual(contexts[1]?.map(agentMessageText), [
+            "first",
+            "first reply",
+            "second",
+          ]);
+          assert.deepStrictEqual(contexts[2]?.map(agentMessageText), [
+            "first",
+            "first reply",
+            "branch from first",
+          ]);
+          assert.strictEqual(branchUser?.parent_message_id, `assistant:${first.runId}:0`);
+          assert.strictEqual(yield* readSubmissionStatus(sql, branch.submissionId), "settled");
+        }),
+      ),
+  );
 });
 
 interface AgentConversationHarnessValue {
@@ -1674,6 +1818,7 @@ const submissionInput = (
     readonly runId?: string | undefined;
     readonly triggerMessageId?: string | undefined;
     readonly conversationId?: string | undefined;
+    readonly parentMessageId?: string | undefined;
     readonly text: string;
   } = { text: "hello" },
 ) => ({
@@ -1682,6 +1827,7 @@ const submissionInput = (
   conversationId: options.conversationId ?? "conversation_1",
   submissionId: options.submissionId ?? "submission_1",
   triggerMessageId: options.triggerMessageId ?? "message_1",
+  parentMessageId: options.parentMessageId,
   input: { userId: "user_1", submittedMessage: { text: options.text } },
 });
 
@@ -1700,10 +1846,31 @@ const recordStartedInput = (input: ReturnType<typeof submissionInput>) => ({
   userId: "user_1",
   agentName: input.agentName,
   messageId: input.triggerMessageId,
+  parentMessageId: input.parentMessageId,
   submissionId: input.submissionId,
   runId: input.runId,
   content: (input.input as { readonly submittedMessage: unknown }).submittedMessage,
 });
+
+const agentMessageText = (message: AgentMessage): string => {
+  if (message.role === "user") {
+    if (typeof message.content === "string") return message.content;
+    return textFromParts(message.content as ReadonlyArray<unknown>);
+  }
+  if (message.role === "assistant" || message.role === "toolResult") {
+    return textFromParts(message.content as ReadonlyArray<unknown>);
+  }
+  return "";
+};
+
+const textFromParts = (parts: ReadonlyArray<unknown>): string =>
+  parts
+    .flatMap((part) => {
+      if (typeof part !== "object" || part === null) return [];
+      const text = (part as { readonly text?: unknown }).text;
+      return typeof text === "string" ? [text] : [];
+    })
+    .join("");
 
 const makePi = (
   replies: ReadonlyArray<string>,

@@ -34,6 +34,7 @@ export interface CreateConversationSubmissionInput {
   readonly conversationId: string;
   readonly submissionId: string;
   readonly triggerMessageId: string;
+  readonly parentMessageId?: string | undefined;
   readonly input?: unknown;
   readonly userId?: string | undefined;
   readonly waitForResult?: boolean | undefined;

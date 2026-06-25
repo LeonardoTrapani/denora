@@ -28,7 +28,22 @@ export class ConversationNotAuthorized extends Schema.TaggedErrorClass<Conversat
   { conversationId: Schema.String },
 ) {}
 
-export type Error = PersistenceFailed | ConversationNotAuthorized;
+export type ConversationLifecycleState =
+  | "active"
+  | "archiving"
+  | "archived"
+  | "deleting"
+  | "deleted";
+
+export class ConversationNotActive extends Schema.TaggedErrorClass<ConversationNotActive>()(
+  "ConversationNotActive",
+  {
+    conversationId: Schema.String,
+    status: Schema.Literals(["archiving", "archived", "deleting", "deleted"]),
+  },
+) {}
+
+export type Error = PersistenceFailed | ConversationNotAuthorized | ConversationNotActive;
 
 export interface CreateConversationInput {
   readonly userId: string;
@@ -42,7 +57,7 @@ export interface ConversationRecord {
   readonly id: string;
   readonly ownerUserId: string;
   readonly agentId: string | null;
-  readonly status: "active" | "archived";
+  readonly status: ConversationLifecycleState;
   readonly title: string | null;
   readonly metadata: unknown;
   readonly createdAt: string;
@@ -121,6 +136,11 @@ export interface Interface {
     readonly conversationId: string;
     readonly userId: string;
   }) => Effect.Effect<void, Error>;
+  readonly setConversationLifecycle: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+    readonly status: ConversationLifecycleState;
+  }) => Effect.Effect<ConversationRecord, Error>;
   readonly finishRun: (input: FinishRunInput) => Effect.Effect<void, Error>;
   readonly markRunStarted: (runId: string) => Effect.Effect<void, Error>;
 }
@@ -163,6 +183,23 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
           return yield* new ConversationNotAuthorized({ conversationId: input.conversationId });
       },
     );
+
+    const authorizeActiveConversation = Effect.fn(
+      "ConversationPersistence.authorizeActiveConversation",
+    )(function* (input: {
+      readonly conversationId: string;
+      readonly userId: string;
+    }): Effect.fn.Return<ConversationRecord, Error> {
+      const found = yield* findConversation(input.conversationId, input.userId);
+      if (found === undefined)
+        return yield* new ConversationNotAuthorized({ conversationId: input.conversationId });
+      if (found.status !== "active")
+        return yield* new ConversationNotActive({
+          conversationId: input.conversationId,
+          status: found.status,
+        });
+      return found;
+    });
 
     const createConversation = Effect.fn("ConversationPersistence.createConversation")(function* (
       input: CreateConversationInput,
@@ -239,11 +276,16 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       input: SubmitMessageInput,
     ): Effect.fn.Return<SubmittedMessage, Error> {
       const agentName = input.agentName ?? "default";
-      yield* createConversation({
+      const conversation = yield* createConversation({
         conversationId: input.conversationId,
         userId: input.userId,
         agentId: agentName,
       });
+      if (conversation.status !== "active")
+        return yield* new ConversationNotActive({
+          conversationId: input.conversationId,
+          status: conversation.status,
+        });
       const messageId = ConversationDomain.makeMessageId();
       const submissionId = ConversationDomain.makeSubmissionId();
       const runId = ConversationDomain.makeRunId();
@@ -268,7 +310,7 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       function* (
         input: RecordSubmissionStartedInput,
       ): Effect.fn.Return<RecordedSubmissionStarted, Error> {
-        yield* authorizeConversation(input);
+        yield* authorizeActiveConversation(input);
         const priorMessages = yield* readMessages(input.conversationId);
         const timestamp = yield* nowIso();
         const content = input.content;
@@ -367,14 +409,31 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
           cause: new Error(`Conversation run ${input.runId} was not found.`),
         });
 
+      const conversationRows = yield* persist(
+        "find run conversation",
+        db.client
+          .select()
+          .from(conversations)
+          .where(eq(conversations.id, row.conversationId))
+          .limit(1),
+      );
+      const conversation = conversationRows[0] as ConversationRecord | undefined;
+      const inactive = conversation !== undefined && conversation.status !== "active";
+      const discardedError =
+        inactive && conversation !== undefined
+          ? {
+              message: `Conversation ${row.conversationId} is ${conversation.status}; run output was discarded.`,
+            }
+          : undefined;
+
       yield* persist(
         "finish conversation run",
         db.client
           .update(agentRuns)
           .set({
-            status: input.isError ? "failed" : "completed",
-            result: input.result,
-            error: input.error,
+            status: inactive ? "cancelled" : input.isError ? "failed" : "completed",
+            result: inactive ? null : input.result,
+            error: inactive ? discardedError : input.error,
             endedAt: timestamp,
             updatedAt: timestamp,
           })
@@ -390,13 +449,13 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
             endedAt: timestamp,
             isError: input.isError ? 1 : 0,
             durationMs: Math.trunc(input.durationMs),
-            result: serializeJson(input.result),
-            error: serializeJson(input.error),
+            result: inactive ? null : serializeJson(input.result),
+            error: serializeJson(inactive ? discardedError : input.error),
           })
           .where(eq(denoraRuns.runId, input.runId)),
       );
 
-      if (!input.isError) {
+      if (!input.isError && !inactive) {
         yield* persist(
           "create assistant conversation message",
           db.client.insert(conversationMessages).values({
@@ -411,14 +470,55 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
         );
       }
 
-      yield* persist(
-        "touch conversation after run",
-        db.client
-          .update(conversations)
-          .set({ updatedAt: timestamp })
-          .where(eq(conversations.id, row.conversationId)),
-      );
+      if (!inactive) {
+        yield* persist(
+          "touch conversation after run",
+          db.client
+            .update(conversations)
+            .set({ updatedAt: timestamp })
+            .where(eq(conversations.id, row.conversationId)),
+        );
+      }
     });
+
+    const setConversationLifecycle = Effect.fn("ConversationPersistence.setConversationLifecycle")(
+      function* (input: {
+        readonly conversationId: string;
+        readonly userId: string;
+        readonly status: ConversationLifecycleState;
+      }): Effect.fn.Return<ConversationRecord, Error> {
+        const existing = yield* findConversation(input.conversationId, input.userId);
+        if (existing === undefined)
+          return yield* new ConversationNotAuthorized({ conversationId: input.conversationId });
+        const timestamp = yield* nowIso();
+        yield* persist(
+          "set conversation lifecycle",
+          db.client
+            .update(conversations)
+            .set({
+              status: input.status,
+              updatedAt: timestamp,
+              archivedAt:
+                input.status === "archiving" || input.status === "archived"
+                  ? (existing.archivedAt ?? timestamp)
+                  : existing.archivedAt,
+            })
+            .where(
+              and(
+                eq(conversations.id, input.conversationId),
+                eq(conversations.ownerUserId, input.userId),
+              ),
+            ),
+        );
+        const updated = yield* findConversation(input.conversationId, input.userId);
+        if (updated === undefined)
+          return yield* new PersistenceFailed({
+            operation: "read lifecycle-updated conversation",
+            cause: new Error("Conversation lifecycle update succeeded without a readable row."),
+          });
+        return updated;
+      },
+    );
 
     return Service.of({
       createConversation,
@@ -427,6 +527,7 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       submitMessage,
       recordSubmissionStarted,
       authorizeConversation,
+      setConversationLifecycle,
       markRunStarted,
       finishRun,
     });

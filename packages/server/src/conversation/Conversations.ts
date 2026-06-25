@@ -25,6 +25,7 @@ import {
 } from "../agent-run/StreamProtocol.ts";
 import {
   ConversationPersistence,
+  type ConversationLifecycleState,
   type ConversationMessageRecord,
   type ConversationRecord,
 } from "./ConversationPersistence.ts";
@@ -41,6 +42,7 @@ export class ConversationRequestFailed extends Schema.TaggedErrorClass<Conversat
       "event_storage_failed",
       "persistence_failed",
       "conversation_not_authorized",
+      "conversation_not_active",
     ]),
     message: Schema.String,
   },
@@ -80,6 +82,10 @@ export interface AgentConversationObjectStub {
   readonly abortConversation: (input?: {
     readonly reason?: string | undefined;
   }) => Effect.Effect<AbortConversationResult, EventStreamError>;
+  readonly setConversationLifecycle: (input: {
+    readonly conversationId: string;
+    readonly status: ConversationLifecycleState;
+  }) => Effect.Effect<AbortConversationResult, EventStreamError>;
   readonly fetch: (
     request: HttpServerRequest.HttpServerRequest,
   ) => Effect.Effect<HttpServerResponse.HttpServerResponse, HttpServerError>;
@@ -112,6 +118,11 @@ export interface Interface {
     readonly userId: string;
     readonly reason?: string | undefined;
   }) => Effect.Effect<AbortConversationResult, ConversationRequestFailed>;
+  readonly setConversationLifecycle: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+    readonly status: ConversationLifecycleState;
+  }) => Effect.Effect<ConversationRecord, ConversationRequestFailed>;
   readonly streamRequest: (
     agentName: string,
     conversationId: string,
@@ -184,6 +195,20 @@ export const layer = (
           persistence.authorizeConversation(input).pipe(
             Effect.flatMap(() =>
               objects.getByName(input.conversationId).abortConversation({ reason: input.reason }),
+            ),
+            Effect.mapError(conversationRequestFailed),
+            Effect.catchCause(conversationRequestFailedFromCause),
+          ),
+        setConversationLifecycle: (input) =>
+          persistence.setConversationLifecycle(input).pipe(
+            Effect.flatMap((updated) =>
+              objects
+                .getByName(input.conversationId)
+                .setConversationLifecycle({
+                  conversationId: input.conversationId,
+                  status: input.status,
+                })
+                .pipe(Effect.as(updated)),
             ),
             Effect.mapError(conversationRequestFailed),
             Effect.catchCause(conversationRequestFailedFromCause),
@@ -368,6 +393,23 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
         }),
       abortConversation: () =>
         Effect.succeed({ abortedSubmissions: 0, needsWake: false, wakeDelayMs: 0 }),
+      setConversationLifecycle: (input) =>
+        Effect.gen(function* () {
+          const existing = conversations.get(input.conversationId);
+          if (existing === undefined || existing.ownerUserId !== input.userId) {
+            return yield* new ConversationRequestFailed({
+              reason: "conversation_not_authorized",
+              message: "Conversation is not available for the authenticated user.",
+            });
+          }
+          const updated = {
+            ...existing,
+            status: input.status,
+            updatedAt: new Date().toISOString(),
+          };
+          conversations.set(input.conversationId, updated);
+          return updated;
+        }),
       streamRequest: (_agentName, _conversationId, _userId, request) =>
         Effect.gen(function* () {
           const webRequest = yield* HttpServerRequest.toWeb(request);
@@ -414,6 +456,12 @@ const conversationRequestFailed = (
     return new ConversationRequestFailed({
       reason: "conversation_not_authorized",
       message: "Conversation is not available for the authenticated user.",
+    });
+  }
+  if (error._tag === "ConversationNotActive") {
+    return new ConversationRequestFailed({
+      reason: "conversation_not_active",
+      message: `Conversation is ${error.status} and cannot accept new messages.`,
     });
   }
   switch (error._tag) {

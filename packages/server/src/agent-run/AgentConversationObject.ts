@@ -10,6 +10,7 @@ import { AgentConversationSessionStore } from "./AgentConversationSessionStore.t
 import {
   AgentConversationCoordinator,
   type AbortConversationResult,
+  type ConversationLifecycleState,
   type Interface as AgentConversationCoordinatorInterface,
 } from "./AgentConversationCoordinator.ts";
 import {
@@ -23,6 +24,10 @@ import { handleConversationObjectRequest, internalErrorResponse } from "./Stream
 export interface Shape {
   readonly abortConversation: (input?: {
     readonly reason?: string | undefined;
+  }) => Effect.Effect<AbortConversationResult, EventStreamError>;
+  readonly setConversationLifecycle: (input: {
+    readonly conversationId: string;
+    readonly status: ConversationLifecycleState;
   }) => Effect.Effect<AbortConversationResult, EventStreamError>;
   readonly submitMessage: (
     input: CreateConversationSubmissionInput,
@@ -70,6 +75,15 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
             abortConversation: (input?: { readonly reason?: string | undefined }) =>
               Effect.gen(function* () {
                 const result = yield* coordinator.abortConversation(input);
+                if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
+                return result;
+              }),
+            setConversationLifecycle: (input: {
+              readonly conversationId: string;
+              readonly status: ConversationLifecycleState;
+            }) =>
+              Effect.gen(function* () {
+                const result = yield* coordinator.setConversationLifecycle(input);
                 if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
                 return result;
               }),

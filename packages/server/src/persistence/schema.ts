@@ -16,7 +16,13 @@ export const records = pgTable("records", {
   createdAt: text("created_at").notNull(),
 });
 
-export const conversationStatus = pgEnum("conversation_status", ["active", "archived"]);
+export const conversationStatus = pgEnum("conversation_status", [
+  "active",
+  "archiving",
+  "archived",
+  "deleting",
+  "deleted",
+]);
 
 export const conversationMessageRole = pgEnum("conversation_message_role", [
   "system",

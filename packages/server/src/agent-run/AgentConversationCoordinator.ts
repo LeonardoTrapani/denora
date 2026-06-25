@@ -9,6 +9,10 @@ import {
 } from "./Lifecycle.ts";
 import { AgentConversationSessionStore } from "./AgentConversationSessionStore.ts";
 import {
+  assertAgentConversationContentWithinLimits,
+  assertAgentConversationJsonWithinLimits,
+} from "./AgentConversationContentLimits.ts";
+import {
   type EventStreamError,
   type EventStreamStore,
   EventSerializationFailed,
@@ -23,6 +27,22 @@ import { SqlStorage } from "./SqlStorage.ts";
 
 const WAKE_DELAY_MS = 30_000;
 const RUNNING_STALE_MS = 15 * 60 * 1000;
+const DEFAULT_MAX_ATTEMPTS = 3;
+const DEFAULT_SUBMISSION_TIMEOUT_MS = DEFAULT_MAX_ATTEMPTS * RUNNING_STALE_MS;
+
+const CREATE_TURN_JOURNALS_TABLE = `
+CREATE TABLE IF NOT EXISTS denora_agent_turn_journals (
+  submission_id TEXT PRIMARY KEY,
+  session_key   TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  attempt_id    TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  phase         TEXT NOT NULL,
+  phase_order   INTEGER NOT NULL,
+  revision      INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+)`;
 
 const CREATE_SUBMISSIONS_TABLE = `
 CREATE TABLE IF NOT EXISTS denora_agent_conversation_submissions (
@@ -42,6 +62,11 @@ CREATE TABLE IF NOT EXISTS denora_agent_conversation_submissions (
   settled_at            INTEGER,
   abort_requested_at    INTEGER,
   input_applied_at      INTEGER,
+  attempt_count         INTEGER NOT NULL DEFAULT 0,
+  max_attempts          INTEGER NOT NULL DEFAULT ${DEFAULT_MAX_ATTEMPTS},
+  last_error            TEXT,
+  timeout_at            INTEGER NOT NULL DEFAULT 0,
+  lease_expires_at      INTEGER NOT NULL DEFAULT 0,
   error                 TEXT,
   terminal_event_key    TEXT,
   terminal_event_json   TEXT,
@@ -51,6 +76,36 @@ CREATE TABLE IF NOT EXISTS denora_agent_conversation_submissions (
 const CREATE_SUBMISSIONS_STATUS_INDEX = `
 CREATE INDEX IF NOT EXISTS denora_agent_conversation_submissions_status_sequence_idx
 ON denora_agent_conversation_submissions (status, sequence ASC)`;
+
+const CREATE_SESSION_LIFECYCLES_TABLE = `
+CREATE TABLE IF NOT EXISTS denora_agent_conversation_session_lifecycles (
+  session_key     TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  updated_at      INTEGER NOT NULL
+)`;
+
+const CREATE_ATTEMPT_MARKERS_TABLE = `
+CREATE TABLE IF NOT EXISTS denora_agent_attempt_markers (
+  attempt_id    TEXT PRIMARY KEY,
+  submission_id TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  snapshot_json TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  max_attempts  INTEGER NOT NULL DEFAULT ${DEFAULT_MAX_ATTEMPTS},
+  last_error    TEXT,
+  started_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL,
+  completed_at  INTEGER
+)`;
+
+const CREATE_ATTEMPT_MARKERS_UNFINISHED_INDEX = `
+CREATE INDEX IF NOT EXISTS denora_agent_attempt_markers_unfinished_idx
+ON denora_agent_attempt_markers (status, started_at ASC)
+WHERE status IN ('running')`;
+
+const SUBMISSION_ATTEMPT_MARKER_NAME = "agent-conversation-submission";
 
 export interface AdmitRunResult {
   readonly admitted: boolean;
@@ -75,6 +130,13 @@ export interface AbortConversationResult {
   readonly wakeDelayMs: number;
 }
 
+export type ConversationLifecycleState =
+  | "active"
+  | "archiving"
+  | "archived"
+  | "deleting"
+  | "deleted";
+
 export interface ReconcileResult {
   readonly needsWake: boolean;
   readonly wakeDelayMs: number;
@@ -87,6 +149,10 @@ export interface Interface {
   readonly abortConversation: (
     input?: AbortConversationInput,
   ) => Effect.Effect<AbortConversationResult, EventStreamError>;
+  readonly setConversationLifecycle: (input: {
+    readonly conversationId: string;
+    readonly status: ConversationLifecycleState;
+  }) => Effect.Effect<AbortConversationResult, EventStreamError>;
   readonly getSubmissionTerminal: (
     submissionId: string,
   ) => Effect.Effect<SubmissionTerminalResult | null, EventStreamError>;
@@ -125,7 +191,10 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
   const admitSubmission = Effect.fn("AgentConversationCoordinator.admitSubmission")(function* (
     input: CreateConversationSubmissionInput,
   ): Effect.fn.Return<AdmitRunResult, EventStreamError> {
+    yield* rejectInactiveConversation(input.conversationId, "admit agent conversation submission");
+    yield* validateSubmissionPayload(input.input);
     const payload = yield* stringify(input.input);
+    yield* validateSerializedSubmissionPayload(payload);
     const cursor = yield* sql
       .exec<SubmissionRow>(
         `INSERT OR IGNORE INTO denora_agent_conversation_submissions
@@ -180,8 +249,44 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       yield* reserveTerminal(submission, yield* makeInterruptedResult(submission, message), {
         attemptId: submission.attemptId ?? `abort:${crypto.randomUUID()}`,
         fromStatuses: ["queued", "running"],
+        markerStatus: "interrupted",
       });
     }
+    yield* publishTerminalOutboxes();
+    const unsettled = yield* hasUnsettledSubmissions();
+    return { abortedSubmissions, needsWake: unsettled, wakeDelayMs: WAKE_DELAY_MS };
+  });
+
+  const setConversationLifecycle = Effect.fn(
+    "AgentConversationCoordinator.setConversationLifecycle",
+  )(function* (input: {
+    readonly conversationId: string;
+    readonly status: ConversationLifecycleState;
+  }): Effect.fn.Return<AbortConversationResult, EventStreamError> {
+    const key = sessionKey(input.conversationId);
+    yield* sql
+      .exec(
+        `INSERT INTO denora_agent_conversation_session_lifecycles
+         (session_key, conversation_id, status, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_key) DO UPDATE SET
+           conversation_id = excluded.conversation_id,
+           status = excluded.status,
+           updated_at = excluded.updated_at`,
+        key,
+        input.conversationId,
+        input.status,
+        Date.now(),
+      )
+      .pipe(storageFailure("set conversation lifecycle"), Effect.asVoid);
+    const abortedSubmissions =
+      input.status === "active"
+        ? 0
+        : yield* interruptActiveAttemptsForSession(
+            key,
+            inactiveConversationMessage(input.conversationId, input.status),
+          );
+    yield* settleInactiveSubmissions();
     yield* publishTerminalOutboxes();
     const unsettled = yield* hasUnsettledSubmissions();
     return { abortedSubmissions, needsWake: unsettled, wakeDelayMs: WAKE_DELAY_MS };
@@ -191,8 +296,16 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     input: ReconcileInput,
   ): Effect.fn.Return<ReconcileResult, EventStreamError> {
     while (true) {
+      // Recovery is intentionally ordered: terminal outbox publication always wins
+      // before any branch that could invoke or requeue model work.
       yield* publishTerminalOutboxes();
-      yield* interruptStaleRunningSubmissions();
+      yield* settleInactiveSubmissions();
+      yield* publishTerminalOutboxes();
+      yield* reconcileUnfinishedAttemptMarkers();
+      yield* publishTerminalOutboxes();
+      yield* interruptExpiredRunningSubmissions();
+      yield* publishTerminalOutboxes();
+      yield* settleQueuedRetryExhaustedSubmissions();
       yield* publishTerminalOutboxes();
 
       const claim = yield* claimNextSubmission();
@@ -323,11 +436,15 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       const cursor = yield* sql
         .exec<SubmissionRow>(
           `UPDATE denora_agent_conversation_submissions
-           SET status = 'running', attempt_id = ?, started_at = ?
-           WHERE submission_id = (
+           SET status = 'running', attempt_id = ?, started_at = ?,
+               attempt_count = attempt_count + 1,
+               timeout_at = CASE WHEN timeout_at = 0 THEN ? ELSE timeout_at END,
+               lease_expires_at = ?
+            WHERE submission_id = (
              SELECT current.submission_id
               FROM denora_agent_conversation_submissions AS current
              WHERE current.status = 'queued'
+               AND current.attempt_count < current.max_attempts
                AND NOT EXISTS (
                  SELECT 1
                    FROM denora_agent_conversation_submissions AS earlier
@@ -341,6 +458,8 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
            RETURNING ${submissionColumns}`,
           crypto.randomUUID(),
           Date.now(),
+          Date.now() + DEFAULT_SUBMISSION_TIMEOUT_MS,
+          Date.now() + RUNNING_STALE_MS,
         )
         .pipe(storageFailure("claim agent conversation submission"));
       const rows = yield* cursor.toArray().pipe(storageFailure("collect claimed submission"));
@@ -357,7 +476,14 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     if (submission.attemptId === undefined) return;
     const controller = new AbortController();
     activeAttempts.set(submission.submissionId, controller);
-    try {
+    return yield* Effect.gen(function* () {
+      yield* startAttemptMarker(submission, {
+        phase: "claimed",
+        submissionId: submission.submissionId,
+        attemptId: submission.attemptId,
+        runId: submission.runId,
+      });
+      if (yield* settleIfInactiveSubmission(submission)) return;
       const completed = yield* reconstructCompletedRunResult(submission);
       if (completed !== null) {
         yield* reserveTerminal(submission, completed);
@@ -365,6 +491,10 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       }
       const prepared = yield* prepareSubmissionForExecution(submission);
       yield* markSubmissionInputApplied(submission);
+      yield* recordTurnJournalPhase(submission, "input_applied");
+      yield* updateAttemptSnapshot(submission, { phase: "input_applied" });
+      yield* recordTurnJournalPhase(submission, "model_started");
+      yield* updateAttemptSnapshot(submission, { phase: "model_started" });
       const execution = yield* AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
         runId: submission.runId,
         agentName: submission.agentName,
@@ -373,6 +503,63 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
         triggerMessageId: submission.messageId ?? "unknown",
         input: prepared.input,
         pi,
+        beforeEmitEvent: (event) =>
+          rejectInactiveSubmission(submission, `emit ${event.type} event`),
+        onCheckpoint: (checkpoint) => {
+          const conversationId = submission.conversationId ?? "unknown";
+          switch (checkpoint.type) {
+            case "assistant_message_started":
+              return Effect.gen(function* () {
+                yield* rejectInactiveSubmission(submission, "record assistant message start");
+                yield* sessionStore.recordAssistantMessageStarted({
+                  conversationId,
+                  runId: checkpoint.runId,
+                  submissionId: submission.submissionId,
+                  messageIndex: checkpoint.messageIndex,
+                });
+                yield* recordTurnJournalPhase(submission, "assistant_started");
+                yield* updateAttemptSnapshot(submission, {
+                  phase: "assistant_started",
+                  messageIndex: checkpoint.messageIndex,
+                });
+              });
+            case "assistant_text_part_completed":
+              return Effect.gen(function* () {
+                yield* rejectInactiveSubmission(submission, "record assistant text checkpoint");
+                yield* sessionStore.recordAssistantTextPartCompleted({
+                  conversationId,
+                  runId: checkpoint.runId,
+                  submissionId: submission.submissionId,
+                  messageIndex: checkpoint.messageIndex,
+                  contentIndex: checkpoint.contentIndex,
+                  text: checkpoint.text,
+                });
+                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                yield* updateAttemptSnapshot(submission, {
+                  phase: "assistant_checkpointed",
+                  messageIndex: checkpoint.messageIndex,
+                  contentIndex: checkpoint.contentIndex,
+                });
+              });
+            case "assistant_message_completed":
+              return Effect.gen(function* () {
+                yield* rejectInactiveSubmission(submission, "record assistant message completion");
+                yield* sessionStore.recordAssistantMessageCompleted({
+                  conversationId,
+                  runId: checkpoint.runId,
+                  submissionId: submission.submissionId,
+                  messageIndex: checkpoint.messageIndex,
+                  parts: checkpoint.message.content,
+                  plainText: assistantPlainText(checkpoint.message.content),
+                });
+                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                yield* updateAttemptSnapshot(submission, {
+                  phase: "assistant_completed",
+                  messageIndex: checkpoint.messageIndex,
+                });
+              });
+          }
+        },
         signal: controller.signal,
       }).pipe(
         Effect.catch((error) =>
@@ -383,69 +570,194 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
               attemptId: submission.attemptId,
               error,
             });
+            yield* updateAttemptSnapshot(submission, { phase: "execution_failed" });
             return yield* makeInterruptedResult(submission, errorMessage(error));
           }),
         ),
       );
+      if (yield* settleIfInactiveSubmission(submission)) return;
       yield* sessionStore.finishRun({
         conversationId: submission.conversationId ?? "unknown",
         runId: submission.runId,
+        submissionId: submission.submissionId,
         isError: execution.isError,
         result: execution.result,
       });
-      yield* reserveTerminal(submission, execution);
-    } finally {
-      activeAttempts.delete(submission.submissionId);
+      yield* reserveTerminal(submission, execution, {
+        markerStatus: controller.signal.aborted ? "interrupted" : undefined,
+      });
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          yield* settleAttemptMarker(submission, "failed", {
+            phase: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          }).pipe(Effect.catch(() => Effect.void));
+          return yield* error;
+        }),
+      ),
+      Effect.ensuring(Effect.sync(() => activeAttempts.delete(submission.submissionId))),
+    );
+  });
+
+  const interruptExpiredRunningSubmissions = Effect.fn(
+    "AgentConversationCoordinator.interruptExpiredRunningSubmissions",
+  )(function* (): Effect.fn.Return<void, EventStreamError> {
+    const now = Date.now();
+    const cursor = yield* sql
+      .exec<SubmissionRow>(
+        `SELECT ${submissionColumns}
+          FROM denora_agent_conversation_submissions
+         WHERE status = 'running'
+           AND (
+             (lease_expires_at > 0 AND lease_expires_at <= ?)
+             OR (timeout_at > 0 AND timeout_at <= ?)
+             OR (started_at IS NOT NULL AND started_at <= ?)
+           )
+          ORDER BY sequence ASC`,
+        now,
+        now,
+        now - RUNNING_STALE_MS,
+      )
+      .pipe(storageFailure("list expired running submissions"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect expired running submissions"));
+    for (const row of rows) {
+      const submission = parseSubmission(row);
+      const active = activeAttempts.get(submission.submissionId);
+      if (active !== undefined) {
+        if (isTimedOut(submission)) active.abort(new Error(timeoutErrorMessage(submission)));
+        continue;
+      }
+      yield* reconcileInterruptedSubmission(submission);
     }
   });
 
-  const interruptStaleRunningSubmissions = Effect.fn(
-    "AgentConversationCoordinator.interruptStaleRunningSubmissions",
+  const requeueInterruptedSubmission = (
+    submission: Submission,
+    lastError: string,
+  ): Effect.Effect<void, EventStorageFailed> =>
+    sql
+      .exec(
+        `UPDATE denora_agent_conversation_submissions
+         SET status = 'queued', attempt_id = NULL, started_at = NULL,
+             lease_expires_at = 0, last_error = ?
+         WHERE submission_id = ? AND status = 'running' AND attempt_id = ?
+           AND attempt_count < max_attempts`,
+        lastError,
+        submission.submissionId,
+        submission.attemptId ?? "",
+      )
+      .pipe(storageFailure("requeue interrupted conversation submission"), Effect.asVoid);
+
+  const failInterruptedSubmission = (
+    submission: Submission,
+    message: string,
+    phase: string,
+    options: { readonly markerStatus?: TerminalAttemptMarkerStatus | undefined } = {},
+  ): Effect.Effect<void, EventStreamError> =>
+    Effect.gen(function* () {
+      yield* reserveTerminal(submission, yield* makeInterruptedResult(submission, message), {
+        markerStatus: options.markerStatus ?? "failed",
+      });
+      yield* settleAttemptMarker(submission, options.markerStatus ?? "failed", {
+        phase,
+        error: message,
+      });
+    });
+
+  const settleQueuedRetryExhaustedSubmissions = Effect.fn(
+    "AgentConversationCoordinator.settleQueuedRetryExhaustedSubmissions",
   )(function* (): Effect.fn.Return<void, EventStreamError> {
     const cursor = yield* sql
       .exec<SubmissionRow>(
         `SELECT ${submissionColumns}
           FROM denora_agent_conversation_submissions
-         WHERE status = 'running' AND started_at IS NOT NULL AND started_at <= ?
+         WHERE status = 'queued' AND attempt_count >= max_attempts
          ORDER BY sequence ASC`,
-        Date.now() - RUNNING_STALE_MS,
       )
-      .pipe(storageFailure("list stale running submissions"));
-    const rows = yield* cursor.toArray().pipe(storageFailure("collect stale running submissions"));
-    for (const row of rows) {
-      const submission = parseSubmission(row);
-      const completed = yield* reconstructCompletedRunResult(submission);
-      if (completed !== null) {
-        yield* reserveTerminal(submission, completed);
-        continue;
-      }
-      if (submission.inputAppliedAt !== undefined && submission.abortRequestedAt === undefined) {
-        yield* requeueStaleAppliedSubmission(submission);
-        continue;
-      }
+      .pipe(storageFailure("list retry-exhausted queued submissions"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect retry-exhausted queued submissions"));
+    for (const submission of rows.map(parseSubmission)) {
       yield* reserveTerminal(
         submission,
-        yield* makeInterruptedResult(
-          submission,
-          "Agent run was interrupted because its Durable Object stopped before completion. Please retry.",
-        ),
+        yield* makeInterruptedResult(submission, retryExhaustedMessage(submission)),
+        {
+          attemptId: `exhausted:${crypto.randomUUID()}`,
+          fromStatuses: ["queued"],
+          markerStatus: "failed",
+        },
       );
     }
   });
 
-  const requeueStaleAppliedSubmission = (
-    submission: Submission,
-  ): Effect.Effect<void, EventStorageFailed> =>
-    sql
-      .exec(
-        `UPDATE denora_agent_conversation_submissions
-         SET status = 'queued', attempt_id = NULL, started_at = NULL
-         WHERE submission_id = ? AND status = 'running' AND attempt_id = ?
-           AND input_applied_at IS NOT NULL`,
-        submission.submissionId,
-        submission.attemptId ?? "",
+  const settleInactiveSubmissions = Effect.fn(
+    "AgentConversationCoordinator.settleInactiveSubmissions",
+  )(function* (): Effect.fn.Return<void, EventStreamError> {
+    const cursor = yield* sql
+      .exec<SubmissionWithLifecycleRow>(
+        `SELECT ${submissionColumnsFor("s")}, l.status AS lifecycle_status
+          FROM denora_agent_conversation_submissions AS s
+          INNER JOIN denora_agent_conversation_session_lifecycles AS l
+             ON l.session_key = s.session_key
+         WHERE s.status IN ('queued', 'running')
+           AND l.status IN ('archiving', 'archived', 'deleting', 'deleted')
+         ORDER BY s.sequence ASC`,
       )
-      .pipe(storageFailure("requeue stale applied conversation submission"), Effect.asVoid);
+      .pipe(storageFailure("list inactive conversation submissions"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect inactive conversation submissions"));
+    for (const row of rows) {
+      const submission = parseSubmission(row);
+      const lifecycleStatus = row.lifecycle_status;
+      const message = inactiveConversationMessage(
+        submission.conversationId ?? "unknown",
+        lifecycleStatus,
+      );
+      const active = activeAttempts.get(submission.submissionId);
+      if (active !== undefined) {
+        yield* markAbortRequested(submission);
+        active.abort(new Error(message));
+        continue;
+      }
+      yield* reserveTerminal(submission, yield* makeInterruptedResult(submission, message), {
+        attemptId: submission.attemptId ?? `lifecycle:${crypto.randomUUID()}`,
+        fromStatuses: ["queued", "running"],
+        markerStatus: "interrupted",
+      });
+    }
+  });
+
+  const interruptActiveAttemptsForSession = Effect.fn(
+    "AgentConversationCoordinator.interruptActiveAttemptsForSession",
+  )(function* (key: string, message: string): Effect.fn.Return<number, EventStorageFailed> {
+    const cursor = yield* sql
+      .exec<SubmissionRow>(
+        `SELECT ${submissionColumns}
+          FROM denora_agent_conversation_submissions
+         WHERE session_key = ? AND status = 'running'
+         ORDER BY sequence ASC`,
+        key,
+      )
+      .pipe(storageFailure("list active lifecycle-interrupted submissions"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect active lifecycle-interrupted submissions"));
+    let aborted = 0;
+    for (const row of rows) {
+      const submission = parseSubmission(row);
+      const active = activeAttempts.get(submission.submissionId);
+      if (active === undefined) continue;
+      aborted += 1;
+      yield* markAbortRequested(submission);
+      active.abort(new Error(message));
+    }
+    return aborted;
+  });
 
   const publishTerminalOutboxes = Effect.fn("AgentConversationCoordinator.publishTerminalOutboxes")(
     function* (): Effect.fn.Return<void, EventStreamError> {
@@ -502,30 +814,52 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     options: {
       readonly attemptId?: string | undefined;
       readonly fromStatuses?: ReadonlyArray<SubmissionStatus> | undefined;
+      readonly markerStatus?: TerminalAttemptMarkerStatus | undefined;
     } = {},
   ): Effect.Effect<void, EventStreamError> =>
     stringify(execution.terminalEvent).pipe(
-      Effect.flatMap((eventJson) => {
-        const attemptId = options.attemptId ?? submission.attemptId ?? "";
-        const fromStatuses = options.fromStatuses ?? ["running"];
-        const statusPlaceholders = fromStatuses.map(() => "?").join(", ");
-        return sql
-          .exec(
-            `UPDATE denora_agent_conversation_submissions
-             SET status = 'terminalizing', attempt_id = COALESCE(attempt_id, ?),
-                 terminal_event_key = ?, terminal_event_json = ?, error = ?
-             WHERE submission_id = ? AND status IN (${statusPlaceholders})
-               AND (attempt_id = ? OR attempt_id IS NULL)`,
-            attemptId,
-            terminalEventKey(submission.submissionId),
-            eventJson,
-            execution.isError ? (execution.error?.message ?? "Agent run failed.") : null,
-            submission.submissionId,
-            ...fromStatuses,
-            attemptId,
-          )
-          .pipe(storageFailure("reserve terminal outbox"), Effect.asVoid);
-      }),
+      Effect.flatMap((eventJson) =>
+        Effect.gen(function* () {
+          const attemptId = options.attemptId ?? submission.attemptId ?? "";
+          const fromStatuses = options.fromStatuses ?? ["running"];
+          const statusPlaceholders = fromStatuses.map(() => "?").join(", ");
+          const cursor = yield* sql
+            .exec<Row>(
+              `UPDATE denora_agent_conversation_submissions
+               SET status = 'terminalizing', attempt_id = COALESCE(attempt_id, ?),
+                    terminal_event_key = ?, terminal_event_json = ?, error = ?, last_error = ?
+               WHERE submission_id = ? AND status IN (${statusPlaceholders})
+                 AND (attempt_id = ? OR attempt_id IS NULL)
+               RETURNING 1 AS value`,
+              attemptId,
+              terminalEventKey(submission.submissionId),
+              eventJson,
+              execution.isError ? (execution.error?.message ?? "Agent run failed.") : null,
+              execution.isError ? (execution.error?.message ?? "Agent run failed.") : null,
+              submission.submissionId,
+              ...fromStatuses,
+              attemptId,
+            )
+            .pipe(storageFailure("reserve terminal outbox"));
+          const rows = yield* cursor
+            .toArray()
+            .pipe(storageFailure("collect terminal outbox reservation"));
+          if (rows[0] !== undefined) {
+            yield* recordTurnJournalPhase(submission, "terminal_reserved");
+            yield* settleAttemptMarker(
+              submission,
+              options.markerStatus ?? attemptMarkerTerminalStatus(execution),
+              {
+                phase: "terminal_reserved",
+                isError: execution.isError,
+                ...(execution.error?.message !== undefined
+                  ? { error: execution.error.message }
+                  : {}),
+              },
+            );
+          }
+        }),
+      ),
     );
 
   const recordTerminalOffset = (
@@ -609,18 +943,392 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
   );
 
   const finalizeTerminal = (outbox: TerminalOutbox): Effect.Effect<void, EventStorageFailed> =>
-    sql
+    Effect.gen(function* () {
+      const cursor = yield* sql
+        .exec<Row>(
+          `UPDATE denora_agent_conversation_submissions
+           SET status = 'settled', settled_at = ?
+           WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ?
+             AND terminal_event_key = ? AND terminal_event_offset IS NOT NULL
+           RETURNING 1 AS value`,
+          Date.now(),
+          outbox.submissionId,
+          outbox.attemptId,
+          outbox.eventKey,
+        )
+        .pipe(storageFailure("finalize terminal submission"));
+      const rows = yield* cursor
+        .toArray()
+        .pipe(storageFailure("collect finalized terminal submission"));
+      if (rows[0] !== undefined)
+        yield* recordTurnJournalPhase(
+          {
+            submissionId: outbox.submissionId,
+            sessionKey: sessionKey(outbox.conversationId),
+            kind: "message",
+            attemptId: outbox.attemptId,
+            runId: outbox.runId,
+          },
+          "settled",
+        );
+    });
+
+  const recordTurnJournalPhase = (
+    submission: Pick<Submission, "submissionId" | "sessionKey" | "kind" | "attemptId" | "runId">,
+    phase: TurnJournalPhase,
+  ): Effect.Effect<void, EventStorageFailed> => {
+    const attemptId = submission.attemptId ?? "";
+    const phaseOrder = turnJournalPhaseOrder(phase);
+    const now = Date.now();
+    return sql
       .exec(
-        `UPDATE denora_agent_conversation_submissions
-         SET status = 'settled', settled_at = ?
-         WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ?
-           AND terminal_event_key = ? AND terminal_event_offset IS NOT NULL`,
-        Date.now(),
-        outbox.submissionId,
-        outbox.attemptId,
-        outbox.eventKey,
+        `INSERT INTO denora_agent_turn_journals
+         (submission_id, session_key, kind, attempt_id, run_id, phase, phase_order, revision, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+         ON CONFLICT(submission_id) DO UPDATE SET
+           attempt_id = excluded.attempt_id,
+           run_id = excluded.run_id,
+           phase = excluded.phase,
+           phase_order = excluded.phase_order,
+           revision = denora_agent_turn_journals.revision + 1,
+           updated_at = excluded.updated_at
+         WHERE denora_agent_turn_journals.phase_order < excluded.phase_order`,
+        submission.submissionId,
+        submission.sessionKey,
+        submission.kind,
+        attemptId,
+        submission.runId,
+        phase,
+        phaseOrder,
+        now,
+        now,
       )
-      .pipe(storageFailure("finalize terminal submission"), Effect.asVoid);
+      .pipe(storageFailure("record turn journal phase"), Effect.asVoid);
+  };
+
+  const startAttemptMarker = (
+    submission: Submission,
+    snapshot: Record<string, unknown>,
+  ): Effect.Effect<void, EventStreamError> =>
+    stringify(attemptSnapshot(submission, snapshot)).pipe(
+      Effect.flatMap((snapshotJson) => {
+        const now = Date.now();
+        return sql
+          .exec(
+            `INSERT INTO denora_agent_attempt_markers
+             (attempt_id, submission_id, name, status, snapshot_json, attempt_count, max_attempts, last_error, started_at, updated_at, completed_at)
+              VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, NULL)
+              ON CONFLICT(attempt_id) DO UPDATE SET
+                submission_id = excluded.submission_id,
+                name = excluded.name,
+                status = 'running',
+                snapshot_json = excluded.snapshot_json,
+                attempt_count = excluded.attempt_count,
+                max_attempts = excluded.max_attempts,
+                last_error = excluded.last_error,
+                updated_at = excluded.updated_at,
+                completed_at = NULL`,
+            submission.attemptId ?? "",
+            submission.submissionId,
+            SUBMISSION_ATTEMPT_MARKER_NAME,
+            snapshotJson,
+            submission.attemptCount,
+            submission.maxAttempts,
+            submission.lastError ?? null,
+            now,
+            now,
+          )
+          .pipe(storageFailure("start agent attempt marker"), Effect.asVoid);
+      }),
+    );
+
+  const updateAttemptSnapshot = (
+    submission: Submission,
+    snapshot: Record<string, unknown>,
+  ): Effect.Effect<void, EventStreamError> =>
+    stringify(attemptSnapshot(submission, snapshot)).pipe(
+      Effect.flatMap((snapshotJson) =>
+        sql
+          .exec(
+            `UPDATE denora_agent_attempt_markers
+             SET snapshot_json = ?, updated_at = ?
+             WHERE attempt_id = ? AND status = 'running'`,
+            snapshotJson,
+            Date.now(),
+            submission.attemptId ?? "",
+          )
+          .pipe(storageFailure("update agent attempt marker snapshot"), Effect.asVoid),
+      ),
+    );
+
+  const settleAttemptMarker = (
+    submission: Submission,
+    status: TerminalAttemptMarkerStatus,
+    snapshot: Record<string, unknown>,
+  ): Effect.Effect<void, EventStreamError> =>
+    stringify(attemptSnapshot(submission, snapshot)).pipe(
+      Effect.flatMap((snapshotJson) =>
+        sql
+          .exec(
+            `UPDATE denora_agent_attempt_markers
+             SET status = ?, snapshot_json = ?, last_error = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?)
+              WHERE attempt_id = ? AND status = 'running'`,
+            status,
+            snapshotJson,
+            typeof snapshot.error === "string" ? snapshot.error : null,
+            Date.now(),
+            Date.now(),
+            submission.attemptId ?? "",
+          )
+          .pipe(storageFailure("settle agent attempt marker"), Effect.asVoid),
+      ),
+    );
+
+  const reconcileUnfinishedAttemptMarkers = Effect.fn(
+    "AgentConversationCoordinator.reconcileUnfinishedAttemptMarkers",
+  )(function* (): Effect.fn.Return<void, EventStreamError> {
+    const cursor = yield* sql
+      .exec<AttemptMarkerRow>(
+        `SELECT ${attemptMarkerColumns}
+         FROM denora_agent_attempt_markers
+         WHERE status = 'running'
+         ORDER BY started_at ASC`,
+      )
+      .pipe(storageFailure("list unfinished agent attempt markers"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect unfinished agent attempt markers"));
+    for (const marker of rows.map(parseAttemptMarker)) {
+      if (activeAttempts.has(marker.submissionId)) continue;
+      const submission = yield* readSubmission(marker.submissionId);
+      if (submission === null) {
+        yield* markOrphanAttemptMarkerInterrupted(marker);
+        continue;
+      }
+      if (submission.attemptId !== marker.attemptId) {
+        yield* markAttemptMarkerInterrupted(marker, {
+          phase: "superseded",
+          submissionStatus: submission.status,
+          currentAttemptId: submission.attemptId ?? null,
+        });
+        continue;
+      }
+      switch (submission.status) {
+        case "settled":
+          yield* settleAttemptMarker(
+            submission,
+            submission.error === undefined ? "completed" : "failed",
+            {
+              phase: "settled_recovered",
+              submissionStatus: submission.status,
+            },
+          );
+          break;
+        case "terminalizing":
+          yield* settleAttemptMarker(
+            submission,
+            submission.error === undefined ? "completed" : "failed",
+            {
+              phase: "terminalizing_recovered",
+              submissionStatus: submission.status,
+            },
+          );
+          break;
+        case "running":
+          yield* reconcileInterruptedSubmission(submission);
+          break;
+        case "queued":
+          yield* markAttemptMarkerInterrupted(marker, {
+            phase: "queued_recovered",
+            submissionStatus: submission.status,
+          });
+          break;
+      }
+    }
+  });
+
+  const reconcileInterruptedSubmission = Effect.fn(
+    "AgentConversationCoordinator.reconcileInterruptedSubmission",
+  )(function* (submission: Submission): Effect.fn.Return<void, EventStreamError> {
+    const decision = yield* decideInterruptedRecovery(submission);
+    yield* applyInterruptedRecoveryDecision(submission, decision);
+  });
+
+  const decideInterruptedRecovery = Effect.fn(
+    "AgentConversationCoordinator.decideInterruptedRecovery",
+  )(function* (
+    submission: Submission,
+  ): Effect.fn.Return<InterruptedRecoveryDecision, EventStreamError> {
+    if (submission.status === "terminalizing" && submission.attemptId !== undefined) {
+      return { _tag: "PublishTerminalOutbox" };
+    }
+
+    const progress = yield* sessionStore.inspectSubmissionProgress({
+      conversationId: submission.conversationId ?? "unknown",
+      runId: submission.runId,
+      submissionId: submission.submissionId,
+    });
+    const journal = yield* readTurnJournal(submission.submissionId);
+    if (progress.assistantCompleted !== null) {
+      return { _tag: "ReserveCompletedAssistant", completed: progress.assistantCompleted };
+    }
+
+    if (progress.toolResultCompletedWithoutAssistant) {
+      return { _tag: "ContinueAfterToolResult" };
+    }
+
+    if (isTimedOut(submission)) {
+      return { _tag: "FailTimedOut", message: timeoutErrorMessage(submission) };
+    }
+
+    const inputApplied =
+      submission.inputAppliedAt !== undefined ||
+      progress.inputApplied ||
+      (journal?.phaseOrder ?? 0) >= turnJournalPhaseOrder("input_applied");
+    const assistantStarted =
+      progress.assistantStarted ||
+      (journal?.phaseOrder ?? 0) >= turnJournalPhaseOrder("assistant_started");
+    if (inputApplied && !assistantStarted && submission.abortRequestedAt === undefined) {
+      if (submission.attemptCount >= submission.maxAttempts) {
+        return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
+      }
+      return { _tag: "RetryAppliedInput", message: staleAttemptMessage(submission) };
+    }
+
+    if (!inputApplied) {
+      if (assistantStarted) {
+        return {
+          _tag: "FailInterruptedAfterInput",
+          message: interruptedAfterInputMessage,
+        };
+      }
+      if (submission.attemptCount >= submission.maxAttempts) {
+        return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
+      }
+      return {
+        _tag: "RequeueBeforeInput",
+        message: preInputStaleAttemptMessage(submission),
+      };
+    }
+
+    if (submission.attemptCount >= submission.maxAttempts) {
+      return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
+    }
+
+    return {
+      _tag: "FailInterruptedAfterInput",
+      message: interruptedAfterInputMessage,
+    };
+  });
+
+  const applyInterruptedRecoveryDecision = Effect.fn(
+    "AgentConversationCoordinator.applyInterruptedRecoveryDecision",
+  )(function* (
+    submission: Submission,
+    decision: InterruptedRecoveryDecision,
+  ): Effect.fn.Return<void, EventStreamError> {
+    switch (decision._tag) {
+      case "PublishTerminalOutbox":
+        yield* publishTerminalOutboxes();
+        return;
+      case "ReserveCompletedAssistant":
+        yield* reserveTerminal(
+          submission,
+          yield* makeCompletedResult(submission, decision.completed.assistantText),
+        );
+        return;
+      case "ContinueAfterToolResult":
+        yield* settleAttemptMarker(submission, "interrupted", {
+          phase: "tool_result_continuation_not_available",
+          error: "Tool result continuation is not available until Denora has a tool runtime.",
+        });
+        return;
+      case "RetryAppliedInput":
+        yield* requeueInterruptedSubmission(submission, decision.message);
+        yield* settleAttemptMarker(submission, "interrupted", {
+          phase: "requeued_after_input_application",
+          error: decision.message,
+        });
+        return;
+      case "RequeueBeforeInput":
+        yield* requeueInterruptedSubmission(submission, decision.message);
+        yield* settleAttemptMarker(submission, "interrupted", {
+          phase: "requeued_before_input_application",
+          error: decision.message,
+        });
+        return;
+      case "FailTimedOut":
+        yield* failInterruptedSubmission(submission, decision.message, "timeout_terminal_reserved");
+        return;
+      case "FailRetryExhausted":
+        yield* failInterruptedSubmission(
+          submission,
+          decision.message,
+          "retry_exhausted_terminal_reserved",
+        );
+        return;
+      case "FailInterruptedAfterInput":
+        yield* failInterruptedSubmission(
+          submission,
+          decision.message,
+          "interrupted_terminal_reserved",
+          {
+            markerStatus: "interrupted",
+          },
+        );
+        return;
+    }
+  });
+
+  const readTurnJournal = Effect.fn("AgentConversationCoordinator.readTurnJournal")(function* (
+    submissionId: string,
+  ): Effect.fn.Return<TurnJournal | null, EventStorageFailed> {
+    const cursor = yield* sql
+      .exec<TurnJournalRow>(
+        `SELECT submission_id, attempt_id, phase, phase_order, revision
+         FROM denora_agent_turn_journals
+         WHERE submission_id = ?
+         LIMIT 1`,
+        submissionId,
+      )
+      .pipe(storageFailure("read agent turn journal"));
+    const rows = yield* cursor.toArray().pipe(storageFailure("collect agent turn journal"));
+    const row = rows[0];
+    if (row === undefined) return null;
+    return {
+      submissionId: row.submission_id,
+      attemptId: row.attempt_id,
+      phase: row.phase,
+      phaseOrder: row.phase_order,
+      revision: row.revision,
+    };
+  });
+
+  const markAttemptMarkerInterrupted = (
+    marker: AttemptMarker,
+    snapshot: Record<string, unknown>,
+  ): Effect.Effect<void, EventStreamError> =>
+    stringify({ ...marker.snapshot, ...snapshot }).pipe(
+      Effect.flatMap((snapshotJson) =>
+        sql
+          .exec(
+            `UPDATE denora_agent_attempt_markers
+             SET status = 'interrupted', snapshot_json = ?, last_error = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?)
+              WHERE attempt_id = ? AND status = 'running'`,
+            snapshotJson,
+            typeof snapshot.error === "string" ? snapshot.error : null,
+            Date.now(),
+            Date.now(),
+            marker.attemptId,
+          )
+          .pipe(storageFailure("interrupt agent attempt marker"), Effect.asVoid),
+      ),
+    );
+
+  const markOrphanAttemptMarkerInterrupted = (
+    marker: AttemptMarker,
+  ): Effect.Effect<void, EventStreamError> =>
+    markAttemptMarkerInterrupted(marker, { phase: "orphaned", submissionStatus: null });
 
   const prepareSubmissionForExecution = Effect.fn(
     "AgentConversationCoordinator.prepareSubmissionForExecution",
@@ -635,6 +1343,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
         cause: new Error("Conversation submission is missing its conversation or message id."),
       });
     }
+    yield* rejectInactiveSubmission(submission, "prepare conversation submission");
     const payload = yield* Effect.try({
       try: () => submissionPayload(submission.input),
       catch: (cause) => new EventStorageFailed({ operation: "read submission payload", cause }),
@@ -656,6 +1365,72 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       );
   });
 
+  const rejectInactiveConversation = Effect.fn(
+    "AgentConversationCoordinator.rejectInactiveConversation",
+  )(function* (
+    conversationId: string,
+    operation: string,
+  ): Effect.fn.Return<void, EventStorageFailed> {
+    const status = yield* readConversationLifecycleStatus(conversationId);
+    if (status === "active") return;
+    return yield* new EventStorageFailed({
+      operation,
+      cause: new Error(inactiveConversationMessage(conversationId, status)),
+    });
+  });
+
+  const rejectInactiveSubmission = Effect.fn(
+    "AgentConversationCoordinator.rejectInactiveSubmission",
+  )(function* (
+    submission: Submission,
+    operation: string,
+  ): Effect.fn.Return<void, EventStorageFailed> {
+    const status = yield* readSessionLifecycleStatus(submission.sessionKey);
+    if (status === "active") return;
+    const message = inactiveConversationMessage(submission.conversationId ?? "unknown", status);
+    const active = activeAttempts.get(submission.submissionId);
+    if (active !== undefined) {
+      yield* markAbortRequested(submission);
+      active.abort(new Error(message));
+    }
+    return yield* new EventStorageFailed({ operation, cause: new Error(message) });
+  });
+
+  const settleIfInactiveSubmission = Effect.fn(
+    "AgentConversationCoordinator.settleIfInactiveSubmission",
+  )(function* (submission: Submission): Effect.fn.Return<boolean, EventStreamError> {
+    const status = yield* readSessionLifecycleStatus(submission.sessionKey);
+    if (status === "active") return false;
+    const message = inactiveConversationMessage(submission.conversationId ?? "unknown", status);
+    yield* reserveTerminal(submission, yield* makeInterruptedResult(submission, message), {
+      attemptId: submission.attemptId ?? `lifecycle:${crypto.randomUUID()}`,
+      fromStatuses: ["queued", "running"],
+      markerStatus: "interrupted",
+    });
+    return true;
+  });
+
+  const readConversationLifecycleStatus = (
+    conversationId: string,
+  ): Effect.Effect<ConversationLifecycleState, EventStorageFailed> =>
+    readSessionLifecycleStatus(sessionKey(conversationId));
+
+  const readSessionLifecycleStatus = Effect.fn(
+    "AgentConversationCoordinator.readSessionLifecycleStatus",
+  )(function* (key: string): Effect.fn.Return<ConversationLifecycleState, EventStorageFailed> {
+    const cursor = yield* sql
+      .exec<LifecycleRow>(
+        `SELECT status
+          FROM denora_agent_conversation_session_lifecycles
+         WHERE session_key = ?
+         LIMIT 1`,
+        key,
+      )
+      .pipe(storageFailure("read conversation lifecycle"));
+    const rows = yield* cursor.toArray().pipe(storageFailure("collect conversation lifecycle"));
+    return rows[0]?.status ?? "active";
+  });
+
   const reconstructCompletedRunResult = Effect.fn(
     "AgentConversationCoordinator.reconstructCompletedRunResult",
   )(function* (
@@ -672,6 +1447,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
   return {
     abortConversation,
     admitSubmission,
+    setConversationLifecycle,
     getSubmissionTerminal,
     reconcile,
   } satisfies Interface;
@@ -680,8 +1456,12 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
 const ensureTables = (sql: Cloudflare.SqlStorage): Effect.Effect<void, EventStorageFailed> =>
   Effect.gen(function* () {
     for (const [operation, statement] of [
+      ["create agent turn journals table", CREATE_TURN_JOURNALS_TABLE],
       ["create agent conversation submissions table", CREATE_SUBMISSIONS_TABLE],
       ["create agent conversation submissions status index", CREATE_SUBMISSIONS_STATUS_INDEX],
+      ["create agent conversation session lifecycles table", CREATE_SESSION_LIFECYCLES_TABLE],
+      ["create agent attempt markers table", CREATE_ATTEMPT_MARKERS_TABLE],
+      ["create agent attempt markers unfinished index", CREATE_ATTEMPT_MARKERS_UNFINISHED_INDEX],
     ] as const) {
       yield* sql.exec(statement).pipe(storageFailure(operation), Effect.asVoid);
     }
@@ -690,6 +1470,30 @@ const ensureTables = (sql: Cloudflare.SqlStorage): Effect.Effect<void, EventStor
       column: "input_applied_at",
       definition: "input_applied_at INTEGER",
     });
+    for (const [column, definition] of [
+      ["attempt_count", "attempt_count INTEGER NOT NULL DEFAULT 0"],
+      ["max_attempts", `max_attempts INTEGER NOT NULL DEFAULT ${DEFAULT_MAX_ATTEMPTS}`],
+      ["last_error", "last_error TEXT"],
+      ["timeout_at", "timeout_at INTEGER NOT NULL DEFAULT 0"],
+      ["lease_expires_at", "lease_expires_at INTEGER NOT NULL DEFAULT 0"],
+    ] as const) {
+      yield* ensureColumn(sql, {
+        table: "denora_agent_conversation_submissions",
+        column,
+        definition,
+      });
+    }
+    for (const [column, definition] of [
+      ["attempt_count", "attempt_count INTEGER NOT NULL DEFAULT 0"],
+      ["max_attempts", `max_attempts INTEGER NOT NULL DEFAULT ${DEFAULT_MAX_ATTEMPTS}`],
+      ["last_error", "last_error TEXT"],
+    ] as const) {
+      yield* ensureColumn(sql, {
+        table: "denora_agent_attempt_markers",
+        column,
+        definition,
+      });
+    }
   });
 
 const ensureColumn = (
@@ -727,6 +1531,23 @@ const stringify = (value: unknown): Effect.Effect<string, EventSerializationFail
         : Effect.succeed(data),
     ),
   );
+
+const validateSubmissionPayload = (input: unknown): Effect.Effect<void, EventStorageFailed> =>
+  Effect.try({
+    try: () => assertAgentConversationContentWithinLimits(input),
+    catch: (cause) =>
+      new EventStorageFailed({ operation: "validate agent conversation submission", cause }),
+  });
+
+const validateSerializedSubmissionPayload = (
+  payload: string,
+): Effect.Effect<void, EventStorageFailed> =>
+  Effect.try({
+    try: () =>
+      assertAgentConversationJsonWithinLimits(payload, "Agent conversation submission payload"),
+    catch: (cause) =>
+      new EventStorageFailed({ operation: "validate agent conversation submission", cause }),
+  });
 
 const makeInterruptedResult = Effect.fn("AgentConversationCoordinator.makeInterruptedResult")(
   function* (submission: Submission, message: string): Effect.fn.Return<ExecuteRunAttemptResult> {
@@ -772,11 +1593,52 @@ const errorMessage = (error: EventStreamError): string =>
     ? `Agent run storage failed during ${error.operation}.`
     : "Agent run execution failed.";
 
+const staleAttemptMessage = (submission: Submission): string =>
+  `Agent run attempt ${submission.attemptCount} was interrupted before completion and will be retried.`;
+
+const preInputStaleAttemptMessage = (submission: Submission): string =>
+  `Agent run attempt ${submission.attemptCount} was interrupted before user input was applied and will be retried.`;
+
+const retryExhaustedMessage = (submission: Submission): string =>
+  `Agent run exceeded its retry budget after ${submission.attemptCount} of ${submission.maxAttempts} attempts.`;
+
+const timeoutErrorMessage = (submission: Submission): string =>
+  `Agent run timed out after ${submission.attemptCount} of ${submission.maxAttempts} attempts.`;
+
+const interruptedAfterInputMessage =
+  "Agent run was interrupted after partial assistant progress and cannot be safely resumed yet. Please retry.";
+
+const isTimedOut = (submission: Submission): boolean =>
+  submission.timeoutAt > 0 && Date.now() >= submission.timeoutAt;
+
+const assistantPlainText = (parts: ReadonlyArray<unknown>): string =>
+  parts
+    .flatMap((part) =>
+      typeof part === "object" &&
+      part !== null &&
+      (part as { readonly type?: unknown }).type === "text" &&
+      typeof (part as { readonly text?: unknown }).text === "string"
+        ? [(part as { readonly text: string }).text]
+        : [],
+    )
+    .join("");
+
 const terminalEventKey = (submissionId: string): string =>
   `agent-conversation:${submissionId}:terminal`;
 
 const sessionKey = (conversationId: string | undefined): string =>
   `agent-session:${conversationId ?? "unknown"}:default`;
+
+const inactiveConversationMessage = (
+  conversationId: string,
+  status: Exclude<ConversationLifecycleState, "active">,
+): string => `Conversation ${conversationId} is ${status}; agent submissions are not accepted.`;
+
+const submissionColumnsFor = (table: string): string =>
+  submissionColumns
+    .split(", ")
+    .map((column) => `${table}.${column}`)
+    .join(", ");
 
 const submissionPayload = (
   value: unknown,
@@ -791,7 +1653,7 @@ const submissionPayload = (
 };
 
 const submissionColumns =
-  "sequence, submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id, payload, status, accepted_at, attempt_id, started_at, settled_at, abort_requested_at, input_applied_at, error, terminal_event_key, terminal_event_json, terminal_event_offset";
+  "sequence, submission_id, session_key, kind, run_id, agent_name, conversation_id, message_id, payload, status, accepted_at, attempt_id, started_at, settled_at, abort_requested_at, input_applied_at, attempt_count, max_attempts, last_error, timeout_at, lease_expires_at, error, terminal_event_key, terminal_event_json, terminal_event_offset";
 
 const parseSubmission = (row: SubmissionRow): Submission => ({
   sequence: row.sequence,
@@ -811,8 +1673,71 @@ const parseSubmission = (row: SubmissionRow): Submission => ({
   settledAt: row.settled_at ?? undefined,
   abortRequestedAt: row.abort_requested_at ?? undefined,
   inputAppliedAt: row.input_applied_at ?? undefined,
+  attemptCount: row.attempt_count,
+  maxAttempts: row.max_attempts,
+  lastError: row.last_error ?? undefined,
+  timeoutAt: row.timeout_at,
+  leaseExpiresAt: row.lease_expires_at,
   error: row.error ?? undefined,
 });
+
+const attemptMarkerColumns =
+  "attempt_id, submission_id, name, status, snapshot_json, attempt_count, max_attempts, last_error, started_at, updated_at, completed_at";
+
+const parseAttemptMarker = (row: AttemptMarkerRow): AttemptMarker => ({
+  attemptId: row.attempt_id,
+  submissionId: row.submission_id,
+  name: row.name,
+  status: row.status,
+  snapshot: parseAttemptMarkerSnapshot(row.snapshot_json),
+  attemptCount: row.attempt_count,
+  maxAttempts: row.max_attempts,
+  lastError: row.last_error ?? undefined,
+  startedAt: row.started_at,
+  updatedAt: row.updated_at,
+  completedAt: row.completed_at ?? undefined,
+});
+
+const parseAttemptMarkerSnapshot = (value: string | null): Record<string, unknown> => {
+  if (value === null) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const attemptSnapshot = (
+  submission: Pick<
+    Submission,
+    | "submissionId"
+    | "attemptId"
+    | "runId"
+    | "agentName"
+    | "conversationId"
+    | "attemptCount"
+    | "maxAttempts"
+    | "lastError"
+  >,
+  snapshot: Record<string, unknown>,
+): Record<string, unknown> => ({
+  submissionId: submission.submissionId,
+  attemptId: submission.attemptId ?? null,
+  runId: submission.runId,
+  agentName: submission.agentName,
+  conversationId: submission.conversationId ?? null,
+  attemptCount: submission.attemptCount,
+  maxAttempts: submission.maxAttempts,
+  lastError: submission.lastError ?? null,
+  ...snapshot,
+});
+
+const attemptMarkerTerminalStatus = (
+  execution: ExecuteRunAttemptResult,
+): TerminalAttemptMarkerStatus => (execution.isError ? "failed" : "completed");
 
 const idleEventKey = (submissionId: string): string => `agent-conversation:${submissionId}:idle`;
 
@@ -879,10 +1804,23 @@ interface SubmissionRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly settled_at: number | null;
   readonly abort_requested_at: number | null;
   readonly input_applied_at: number | null;
+  readonly attempt_count: number;
+  readonly max_attempts: number;
+  readonly last_error: string | null;
+  readonly timeout_at: number;
+  readonly lease_expires_at: number;
   readonly error: string | null;
   readonly terminal_event_key: string | null;
   readonly terminal_event_json: string | null;
   readonly terminal_event_offset: string | null;
+}
+
+interface SubmissionWithLifecycleRow extends SubmissionRow {
+  readonly lifecycle_status: Exclude<ConversationLifecycleState, "active">;
+}
+
+interface LifecycleRow extends Record<string, Cloudflare.SqlStorageValue> {
+  readonly status: ConversationLifecycleState;
 }
 
 interface TerminalOutboxRow extends Record<string, Cloudflare.SqlStorageValue> {
@@ -905,8 +1843,56 @@ interface EventKeyRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly data: string;
 }
 
+interface AttemptMarkerRow extends Record<string, Cloudflare.SqlStorageValue> {
+  readonly attempt_id: string;
+  readonly submission_id: string;
+  readonly name: string;
+  readonly status: AttemptMarkerStatus;
+  readonly snapshot_json: string | null;
+  readonly attempt_count: number;
+  readonly max_attempts: number;
+  readonly last_error: string | null;
+  readonly started_at: number;
+  readonly updated_at: number;
+  readonly completed_at: number | null;
+}
+
+interface TurnJournalRow extends Record<string, Cloudflare.SqlStorageValue> {
+  readonly submission_id: string;
+  readonly attempt_id: string;
+  readonly phase: TurnJournalPhase;
+  readonly phase_order: number;
+  readonly revision: number;
+}
+
 type SubmissionStatus = "queued" | "running" | "terminalizing" | "settled";
 type SubmissionKind = "message" | "dispatch";
+type AttemptMarkerStatus = "running" | TerminalAttemptMarkerStatus;
+type TerminalAttemptMarkerStatus = "completed" | "failed" | "interrupted";
+type TurnJournalPhase =
+  | "input_applied"
+  | "model_started"
+  | "assistant_started"
+  | "assistant_checkpointed"
+  | "terminal_reserved"
+  | "settled";
+
+const turnJournalPhaseOrder = (phase: TurnJournalPhase): number => {
+  switch (phase) {
+    case "input_applied":
+      return 1;
+    case "model_started":
+      return 2;
+    case "assistant_started":
+      return 3;
+    case "assistant_checkpointed":
+      return 4;
+    case "terminal_reserved":
+      return 5;
+    case "settled":
+      return 6;
+  }
+};
 
 interface Submission {
   readonly sequence: number;
@@ -926,6 +1912,11 @@ interface Submission {
   readonly settledAt?: number | undefined;
   readonly abortRequestedAt?: number | undefined;
   readonly inputAppliedAt?: number | undefined;
+  readonly attemptCount: number;
+  readonly maxAttempts: number;
+  readonly lastError?: string | undefined;
+  readonly timeoutAt: number;
+  readonly leaseExpiresAt: number;
   readonly error?: string | undefined;
 }
 
@@ -939,5 +1930,40 @@ interface TerminalOutbox {
   readonly event: unknown;
   readonly offset?: string | undefined;
 }
+
+interface AttemptMarker {
+  readonly attemptId: string;
+  readonly submissionId: string;
+  readonly name: string;
+  readonly status: AttemptMarkerStatus;
+  readonly snapshot: Record<string, unknown>;
+  readonly attemptCount: number;
+  readonly maxAttempts: number;
+  readonly lastError?: string | undefined;
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly completedAt?: number | undefined;
+}
+
+interface TurnJournal {
+  readonly submissionId: string;
+  readonly attemptId: string;
+  readonly phase: TurnJournalPhase;
+  readonly phaseOrder: number;
+  readonly revision: number;
+}
+
+type InterruptedRecoveryDecision =
+  | { readonly _tag: "PublishTerminalOutbox" }
+  | {
+      readonly _tag: "ReserveCompletedAssistant";
+      readonly completed: AgentConversationSessionStore.CompletedAssistantRun;
+    }
+  | { readonly _tag: "ContinueAfterToolResult" }
+  | { readonly _tag: "RetryAppliedInput"; readonly message: string }
+  | { readonly _tag: "RequeueBeforeInput"; readonly message: string }
+  | { readonly _tag: "FailTimedOut"; readonly message: string }
+  | { readonly _tag: "FailRetryExhausted"; readonly message: string }
+  | { readonly _tag: "FailInterruptedAfterInput"; readonly message: string };
 
 export * as AgentConversationCoordinator from "./AgentConversationCoordinator.ts";

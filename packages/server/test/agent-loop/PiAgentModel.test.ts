@@ -9,37 +9,17 @@ import { Type } from "@earendil-works/pi-ai";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { expect } from "vitest";
+import { CloudflareAiGatewayModels } from "../../src/agent-loop/CloudflareAiGatewayModels.ts";
 import { PiAgentModel } from "../../src/agent-loop/PiAgentModel.ts";
 import { FakeAiGateway, type Fake } from "../helpers/FakeAiGateway.ts";
 
-const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fast";
+const MODEL_ID = "workers-ai/@cf/moonshotai/kimi-k2.6";
 const SONNET_ID = "claude-sonnet-4-5";
+const GPT_ID = "gpt-5.1";
 
-const testModel = {
-  id: MODEL_ID,
-  name: MODEL_ID,
-  api: "openai-completions",
-  provider: "cloudflare-workers-ai",
-  baseUrl: "",
-  reasoning: true,
-  input: ["text", "image"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 128_000,
-  maxTokens: 8192,
-} satisfies Model<"openai-completions">;
-
-const anthropicModel = {
-  id: SONNET_ID,
-  name: SONNET_ID,
-  api: "anthropic-messages",
-  provider: "anthropic",
-  baseUrl: "",
-  reasoning: true,
-  input: ["text", "image"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 200_000,
-  maxTokens: 8192,
-} satisfies Model<"anthropic-messages">;
+const testModel = CloudflareAiGatewayModels.models[MODEL_ID].model;
+const anthropicModel = CloudflareAiGatewayModels.models[SONNET_ID].model;
+const gptModel = CloudflareAiGatewayModels.models[GPT_ID].model;
 
 const emptyContext = { messages: [] } satisfies PiContext;
 
@@ -84,7 +64,7 @@ const finish = (finishReason = "stop") =>
   FakeAiGateway.json({ choices: [{ finish_reason: finishReason }] });
 
 describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
-  it.effect("invokes raw AI through the gateway with streaming options", () =>
+  it.effect("routes Kimi through the Cloudflare AI Gateway Workers AI provider", () =>
     Effect.gen(function* () {
       const fake = FakeAiGateway.make(FakeAiGateway.sse(finish(), FakeAiGateway.done()), {
         id: "production-gateway",
@@ -92,17 +72,21 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
 
       const events = yield* streamWithFake(fake);
 
-      assert.strictEqual(fake.calls.length, 1);
-      expect(fake.calls[0]).toMatchObject({
-        model: MODEL_ID,
-        payload: {
-          messages: [],
-          stream: true,
-          stream_options: { include_usage: true },
+      assert.strictEqual(fake.calls.length, 0);
+      assert.strictEqual(fake.gatewayCalls.length, 1);
+      expect(fake.gatewayCalls[0]).toMatchObject({
+        request: {
+          provider: "workers-ai",
+          endpoint: "@cf/moonshotai/kimi-k2.6",
+          headers: { "content-type": "application/json" },
+          query: {
+            messages: [],
+            stream: true,
+            stream_options: { include_usage: true },
+          },
         },
         options: {
           gateway: { id: "production-gateway" },
-          returnRawResponse: true,
         },
       });
       expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
@@ -115,7 +99,7 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
 
       yield* streamWithFake(fake, { options: { sessionId: "session-123" } });
 
-      expect(fake.calls[0]?.options).toMatchObject({
+      expect(fake.gatewayCalls[0]?.options).toMatchObject({
         extraHeaders: { "x-session-affinity": "session-123" },
       });
     }),
@@ -215,6 +199,101 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
     }),
   );
 
+  it.effect("routes GPT models through provider AI Gateway Responses", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(
+        FakeAiGateway.sse(
+          openAiEvent({ type: "response.created", response: { id: "resp_123" } }),
+          openAiEvent({
+            type: "response.output_item.added",
+            item: { type: "message", id: "msg_123" },
+          }),
+          openAiEvent({ type: "response.output_text.delta", delta: "hello" }),
+          openAiEvent({
+            type: "response.output_item.done",
+            item: {
+              type: "message",
+              id: "msg_123",
+              content: [{ type: "output_text", text: "hello", annotations: [] }],
+            },
+          }),
+          openAiEvent({
+            type: "response.completed",
+            response: {
+              id: "resp_123",
+              model: GPT_ID,
+              status: "completed",
+              usage: {
+                input_tokens: 12,
+                output_tokens: 2,
+                total_tokens: 14,
+                input_tokens_details: { cached_tokens: 5 },
+              },
+            },
+          }),
+        ),
+        { id: "production-gateway" },
+      );
+
+      const events = yield* streamWithFake(fake, {
+        model: gptModel,
+        context: {
+          systemPrompt: "You are Denora.",
+          messages: [{ role: "user", content: "Say hello.", timestamp: 1 }],
+          tools: contextWithWeatherTool.tools,
+        },
+        options: { maxTokens: 456, temperature: 0.3, sessionId: "session-456" },
+      });
+
+      assert.strictEqual(fake.calls.length, 0);
+      assert.strictEqual(fake.gatewayCalls.length, 1);
+      expect(fake.gatewayCalls[0]).toMatchObject({
+        request: {
+          provider: "openai",
+          endpoint: "v1/responses",
+          headers: { "content-type": "application/json" },
+          query: {
+            model: GPT_ID,
+            input: [
+              { role: "developer", content: "You are Denora." },
+              { role: "user", content: "Say hello." },
+            ],
+            stream: true,
+            store: false,
+            max_output_tokens: 456,
+            temperature: 0.3,
+            tools: [
+              {
+                type: "function",
+                name: "weather",
+                description: "Get weather for a city.",
+                parameters: {
+                  type: "object",
+                  properties: { city: { type: "string" } },
+                  required: ["city"],
+                },
+                strict: false,
+              },
+            ],
+          },
+        },
+        options: {
+          gateway: { id: "production-gateway" },
+          extraHeaders: { "x-session-affinity": "session-456" },
+        },
+      });
+      expect(events.at(-1)).toMatchObject({
+        type: "done",
+        reason: "stop",
+        message: {
+          responseId: "resp_123",
+          content: [{ type: "text", text: "hello" }],
+          usage: { input: 7, output: 2, cacheRead: 5, totalTokens: 14 },
+        },
+      });
+    }),
+  );
+
   it.effect("applies model parameters and request hooks", () =>
     Effect.gen(function* () {
       const fake = FakeAiGateway.make(FakeAiGateway.sse(finish()));
@@ -234,7 +313,9 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
         },
       });
 
-      expect(fake.calls[0]?.payload).toMatchObject({ max_tokens: 123, temperature: 0.2 });
+      expect(fake.gatewayCalls[0]?.request).toMatchObject({
+        query: { max_tokens: 123, temperature: 0.2 },
+      });
       expect(payloads[0]).toMatchObject({ max_tokens: 123, temperature: 0.2 });
       expect(responses[0]).toMatchObject({ status: 200 });
     }),
@@ -830,7 +911,7 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
 
       const events = yield* streamWithFake(fake, { options: { signal: controller.signal } });
 
-      expect(fake.calls[0]?.options).toMatchObject({ signal: controller.signal });
+      expect(fake.gatewayCalls[0]?.options).toMatchObject({ signal: controller.signal });
       expect(events.at(-1)).toMatchObject({
         type: "error",
         reason: "aborted",
@@ -902,24 +983,25 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
     }),
   );
 
-  it.effect("rejects non-openai-completions models without calling AI Gateway", () =>
+  it.effect("rejects unregistered models without calling AI Gateway", () =>
     Effect.gen(function* () {
       const fake = FakeAiGateway.make(FakeAiGateway.sse(finish()));
       const invalidModel = {
         ...testModel,
-        api: "openai-responses",
-      } satisfies Model<"openai-responses">;
+        id: "unregistered-model",
+      } satisfies Model<"openai-completions">;
 
       const events = yield* streamWithFake(fake, { model: invalidModel });
 
       assert.strictEqual(fake.calls.length, 0);
+      assert.strictEqual(fake.gatewayCalls.length, 0);
       expect(events).toEqual([
         expect.objectContaining({
           type: "error",
           reason: "error",
           error: expect.objectContaining({
             stopReason: "error",
-            errorMessage: expect.stringContaining("requires an openai-completions Pi model"),
+            errorMessage: expect.stringContaining("registry entry"),
           }),
         }),
       ]);
@@ -937,3 +1019,6 @@ const readEvent = async (
 
 const anthropicEvent = (event: string, data: unknown, delayMs?: number): FakeAiGateway.SseChunk =>
   FakeAiGateway.raw(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`, delayMs);
+
+const openAiEvent = (data: unknown, delayMs?: number): FakeAiGateway.SseChunk =>
+  FakeAiGateway.raw(`data: ${JSON.stringify(data)}\n\n`, delayMs);

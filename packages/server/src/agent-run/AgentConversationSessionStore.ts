@@ -44,6 +44,7 @@ export interface RecordSubmissionStartedInput {
 
 export interface RecordedSubmissionStarted {
   readonly input: unknown;
+  readonly nextAssistantMessageIndex: number;
 }
 
 export interface FinishRunInput {
@@ -85,6 +86,7 @@ export interface RecordToolResultCheckpointInput {
   readonly runId: string;
   readonly submissionId: string;
   readonly toolCallId: string;
+  readonly name: string;
   readonly result: unknown;
   readonly isError: boolean;
 }
@@ -112,6 +114,12 @@ export interface Interface {
   ) => Effect.Effect<void, EventStorageFailed>;
   readonly recordAssistantMessageCompleted: (
     input: RecordAssistantMessageCompletedInput,
+  ) => Effect.Effect<void, EventStorageFailed>;
+  readonly recordToolCallCheckpoint: (
+    input: RecordToolCallCheckpointInput,
+  ) => Effect.Effect<void, EventStorageFailed>;
+  readonly recordToolResultCheckpoint: (
+    input: RecordToolResultCheckpointInput,
   ) => Effect.Effect<void, EventStorageFailed>;
   readonly finishRun: (input: FinishRunInput) => Effect.Effect<void, EventStorageFailed>;
   readonly reconstructCompletedRun: (input: {
@@ -192,7 +200,10 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
       messages: messages.flatMap(toAgentMessage),
     };
 
-    return { input: runInput };
+    return {
+      input: runInput,
+      nextAssistantMessageIndex: nextAssistantMessageIndex(messages, input.runId),
+    };
   });
 
   const recordAssistantMessageStarted = Effect.fn(
@@ -274,6 +285,13 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     input: FinishRunInput,
   ): Effect.fn.Return<void, EventStorageFailed> {
     if (input.isError) return;
+    if (
+      (yield* reconstructCompletedRun({
+        conversationId: input.conversationId,
+        runId: input.runId,
+      })) !== null
+    )
+      return;
     const assistantText = ConversationDomain.assistantTextFromResult(input.result);
     yield* recordAssistantMessageCompleted({
       runId: input.runId,
@@ -282,6 +300,51 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
       submissionId: input.submissionId,
       parts: textParts(assistantText),
       plainText: assistantText,
+    });
+  });
+
+  const recordToolCallCheckpoint = Effect.fn(
+    "AgentConversationSessionStore.recordToolCallCheckpoint",
+  )(function* (input: RecordToolCallCheckpointInput): Effect.fn.Return<void, EventStorageFailed> {
+    const timestamp = DateTime.formatIso(yield* DateTime.now);
+    const messageId = toolCallMessageId(input.runId, input.toolCallId);
+    yield* insertMessage(sql, {
+      messageId,
+      conversationId: input.conversationId,
+      parentMessageId: yield* readLatestMessageId(sql, input.conversationId, {
+        exceptMessageId: messageId,
+      }),
+      runId: input.runId,
+      submissionId: input.submissionId,
+      role: "toolCall",
+      parts: [toolCallPart(input)],
+      plainText: "",
+      status: "started",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+  });
+
+  const recordToolResultCheckpoint = Effect.fn(
+    "AgentConversationSessionStore.recordToolResultCheckpoint",
+  )(function* (input: RecordToolResultCheckpointInput): Effect.fn.Return<void, EventStorageFailed> {
+    const timestamp = DateTime.formatIso(yield* DateTime.now);
+    const messageId = toolResultMessageId(input.runId, input.toolCallId);
+    const parts = partsFromToolResult(input);
+    yield* insertMessage(sql, {
+      messageId,
+      conversationId: input.conversationId,
+      parentMessageId: yield* readLatestMessageId(sql, input.conversationId, {
+        exceptMessageId: messageId,
+      }),
+      runId: input.runId,
+      submissionId: input.submissionId,
+      role: "toolResult",
+      parts,
+      plainText: plainTextFromParts(parts),
+      status: input.isError ? "error" : "completed",
+      createdAt: timestamp,
+      updatedAt: timestamp,
     });
   });
 
@@ -296,19 +359,19 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
         `SELECT message_id, conversation_id, parent_message_id, run_id, submission_id, role,
                 parts_json, plain_text, status, created_at, updated_at
            FROM denora_agent_conversation_session_messages
-          WHERE conversation_id = ? AND message_id = ? AND run_id = ? AND role = 'assistant'
+          WHERE conversation_id = ? AND run_id = ? AND role = 'assistant'
             AND status = 'completed'
-          LIMIT 1`,
+          ORDER BY sequence DESC`,
         input.conversationId,
-        assistantMessageId(input.runId, 0),
         input.runId,
       )
       .pipe(storageFailure("read completed assistant run"));
     const rows = yield* cursor.toArray().pipe(storageFailure("collect completed assistant run"));
-    const row = rows[0];
-    if (row === undefined) return null;
-    const message = yield* parseMessageRow(row);
-    return { assistantText: message.plainText };
+    for (const row of rows) {
+      const message = yield* parseMessageRow(row);
+      if (!hasToolCallPart(message.parts)) return { assistantText: message.plainText };
+    }
+    return null;
   });
 
   const inspectSubmissionProgress = Effect.fn(
@@ -339,13 +402,20 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     const assistantMessages = messages.filter(
       (message) => message.runId === input.runId && message.role === "assistant",
     );
-    const completed = assistantMessages.find((message) => message.status === "completed");
+    const completed = assistantMessages.find(
+      (message) => message.status === "completed" && !hasToolCallPart(message.parts),
+    );
+    const toolResultCompleted = messages.some(
+      (message) =>
+        message.runId === input.runId &&
+        message.role === "toolResult" &&
+        message.status === "completed",
+    );
     return {
       inputApplied,
       assistantStarted: assistantMessages.length > 0,
       assistantCompleted: completed === undefined ? null : { assistantText: completed.plainText },
-      // Denora has no tool runtime yet; keep the recovery branch explicit and inert.
-      toolResultCompletedWithoutAssistant: false,
+      toolResultCompletedWithoutAssistant: completed === undefined && toolResultCompleted,
     };
   });
 
@@ -354,6 +424,8 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     recordAssistantMessageStarted,
     recordAssistantTextPartCompleted,
     recordAssistantMessageCompleted,
+    recordToolCallCheckpoint,
+    recordToolResultCheckpoint,
     finishRun,
     inspectSubmissionProgress,
     reconstructCompletedRun,
@@ -505,7 +577,8 @@ const parseMessageRow = (row: MessageRow): Effect.Effect<MessageRecord, EventSto
   });
 
 const parseRole = (role: string): MessageRecord["role"] => {
-  if (role === "user" || role === "assistant") return role;
+  if (role === "user" || role === "assistant" || role === "toolCall" || role === "toolResult")
+    return role;
   throw new Error(`Unsupported conversation session role ${role}.`);
 };
 
@@ -561,13 +634,50 @@ const toAgentMessage = (message: MessageRecord): ReadonlyArray<AgentMessage> => 
       } as AgentMessage,
     ];
   }
+  if (message.role === "toolResult") {
+    const part = message.parts[0];
+    const metadata = toolResultMetadata(part);
+    return [
+      {
+        role: "toolResult",
+        toolCallId: metadata.toolCallId,
+        toolName: metadata.toolName,
+        content: message.parts.map(stripToolResultMetadata),
+        details: metadata.details,
+        isError: message.status === "error",
+        timestamp: Date.parse(message.createdAt),
+      } as AgentMessage,
+    ];
+  }
+  if (message.role === "toolCall") return [];
   return [
     {
       role: "assistant",
       content: message.parts,
+      stopReason: hasToolCallPart(message.parts) ? "toolUse" : "stop",
       timestamp: Date.parse(message.createdAt),
     } as AgentMessage,
   ];
+};
+
+const nextAssistantMessageIndex = (
+  messages: ReadonlyArray<MessageRecord>,
+  runId: string,
+): number => {
+  let next = 0;
+  for (const message of messages) {
+    if (message.role !== "assistant" || message.runId !== runId) continue;
+    const index = assistantIndexFromMessageId(message.messageId, runId);
+    if (index !== undefined) next = Math.max(next, index + 1);
+  }
+  return next;
+};
+
+const assistantIndexFromMessageId = (messageId: string, runId: string): number | undefined => {
+  const prefix = `assistant:${runId}:`;
+  if (!messageId.startsWith(prefix)) return undefined;
+  const index = Number(messageId.slice(prefix.length));
+  return Number.isSafeInteger(index) && index >= 0 ? index : undefined;
 };
 
 const userMessageContent = (message: MessageRecord): string | ReadonlyArray<unknown> => {
@@ -623,6 +733,84 @@ const plainTextFromParts = (parts: ReadonlyArray<unknown>): string =>
     )
     .join("");
 
+const toolCallPart = (input: RecordToolCallCheckpointInput): Record<string, unknown> => ({
+  type: "toolCall",
+  id: input.toolCallId,
+  name: input.name,
+  arguments: input.args,
+});
+
+const partsFromToolResult = (input: RecordToolResultCheckpointInput): ReadonlyArray<unknown> => {
+  const result = input.result;
+  const content =
+    typeof result === "object" && result !== null
+      ? (result as { readonly content?: unknown }).content
+      : undefined;
+  const parts = Array.isArray(content) ? content.slice() : textParts(stringFromUnknown(result));
+  return parts.map((part) => addToolResultMetadata(part, input));
+};
+
+const addToolResultMetadata = (part: unknown, input: RecordToolResultCheckpointInput): unknown => {
+  if (typeof part !== "object" || part === null || Array.isArray(part)) return part;
+  const result = input.result;
+  const details =
+    typeof result === "object" && result !== null
+      ? (result as { readonly details?: unknown }).details
+      : undefined;
+  return {
+    ...part,
+    toolCallId: input.toolCallId,
+    toolName: input.name,
+    ...(details === undefined ? {} : { details }),
+  };
+};
+
+const stringFromUnknown = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
+};
+
+const hasToolCallPart = (parts: ReadonlyArray<unknown>): boolean =>
+  parts.some(
+    (part) =>
+      typeof part === "object" &&
+      part !== null &&
+      (part as { readonly type?: unknown }).type === "toolCall",
+  );
+
+const toolResultMetadata = (
+  part: unknown,
+): { readonly toolCallId: string; readonly toolName: string; readonly details: unknown } => {
+  if (typeof part === "object" && part !== null) {
+    const record = part as {
+      readonly toolCallId?: unknown;
+      readonly toolName?: unknown;
+      readonly details?: unknown;
+    };
+    return {
+      toolCallId: typeof record.toolCallId === "string" ? record.toolCallId : "unknown",
+      toolName: typeof record.toolName === "string" ? record.toolName : "unknown",
+      details: record.details ?? {},
+    };
+  }
+  return { toolCallId: "unknown", toolName: "unknown", details: {} };
+};
+
+const stripToolResultMetadata = (part: unknown): unknown => {
+  if (typeof part !== "object" || part === null || Array.isArray(part)) return part;
+  const {
+    toolCallId: _toolCallId,
+    toolName: _toolName,
+    details: _details,
+    ...content
+  } = part as Record<string, unknown>;
+  return content;
+};
+
 export const assistantMessageId = (runId: string, messageIndex: number): string =>
   `assistant:${runId}:${messageIndex}`;
 
@@ -638,7 +826,7 @@ interface MessageRecord {
   readonly parentMessageId: string | null;
   readonly runId: string | null;
   readonly submissionId: string | null;
-  readonly role: "user" | "assistant";
+  readonly role: "user" | "assistant" | "toolCall" | "toolResult";
   readonly parts: ReadonlyArray<unknown>;
   readonly plainText: string;
   readonly status: string;

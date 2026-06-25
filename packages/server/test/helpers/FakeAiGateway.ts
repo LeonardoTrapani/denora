@@ -135,7 +135,6 @@ export const layer = (
       Layer.succeed(
         PiAgentModel.AiGateway,
         PiAgentModel.AiGateway.of({
-          ai: fake.ai,
           gatewayRun: fake.gatewayRun,
           id: PiAgentModel.AiGatewayId.make(fake.gatewayId),
         }),

@@ -503,6 +503,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
         triggerMessageId: submission.messageId ?? "unknown",
         input: prepared.input,
         pi,
+        initialAssistantMessageIndex: prepared.nextAssistantMessageIndex,
         beforeEmitEvent: (event) =>
           rejectInactiveSubmission(submission, `emit ${event.type} event`),
         onCheckpoint: (checkpoint) => {
@@ -556,6 +557,44 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
                 yield* updateAttemptSnapshot(submission, {
                   phase: "assistant_completed",
                   messageIndex: checkpoint.messageIndex,
+                });
+              });
+            case "tool_call_started":
+              return Effect.gen(function* () {
+                yield* rejectInactiveSubmission(submission, "record tool call checkpoint");
+                yield* sessionStore.recordToolCallCheckpoint({
+                  conversationId,
+                  runId: checkpoint.runId,
+                  submissionId: submission.submissionId,
+                  toolCallId: checkpoint.toolCallId,
+                  name: checkpoint.toolName,
+                  args: checkpoint.args,
+                });
+                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                yield* updateAttemptSnapshot(submission, {
+                  phase: "tool_call_started",
+                  toolCallId: checkpoint.toolCallId,
+                  toolName: checkpoint.toolName,
+                });
+              });
+            case "tool_result_completed":
+              return Effect.gen(function* () {
+                yield* rejectInactiveSubmission(submission, "record tool result checkpoint");
+                yield* sessionStore.recordToolResultCheckpoint({
+                  conversationId,
+                  runId: checkpoint.runId,
+                  submissionId: submission.submissionId,
+                  toolCallId: checkpoint.toolCallId,
+                  name: checkpoint.toolName,
+                  result: checkpoint.result,
+                  isError: checkpoint.isError,
+                });
+                yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                yield* updateAttemptSnapshot(submission, {
+                  phase: "tool_result_completed",
+                  toolCallId: checkpoint.toolCallId,
+                  toolName: checkpoint.toolName,
+                  isError: checkpoint.isError,
                 });
               });
           }
@@ -1174,6 +1213,9 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     }
 
     if (progress.toolResultCompletedWithoutAssistant) {
+      if (submission.attemptCount >= submission.maxAttempts) {
+        return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
+      }
       return { _tag: "ContinueAfterToolResult" };
     }
 
@@ -1238,9 +1280,10 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
         );
         return;
       case "ContinueAfterToolResult":
+        yield* requeueInterruptedSubmission(submission, toolResultContinuationMessage);
         yield* settleAttemptMarker(submission, "interrupted", {
-          phase: "tool_result_continuation_not_available",
-          error: "Tool result continuation is not available until Denora has a tool runtime.",
+          phase: "requeued_after_tool_result",
+          error: toolResultContinuationMessage,
         });
         return;
       case "RetryAppliedInput":
@@ -1334,7 +1377,10 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     "AgentConversationCoordinator.prepareSubmissionForExecution",
   )(function* (
     submission: Submission,
-  ): Effect.fn.Return<{ readonly input: unknown }, EventStreamError> {
+  ): Effect.fn.Return<
+    { readonly input: unknown; readonly nextAssistantMessageIndex: number },
+    EventStreamError
+  > {
     const conversationId = submission.conversationId;
     const messageId = submission.messageId;
     if (conversationId === undefined || messageId === undefined) {
@@ -1604,6 +1650,9 @@ const retryExhaustedMessage = (submission: Submission): string =>
 
 const timeoutErrorMessage = (submission: Submission): string =>
   `Agent run timed out after ${submission.attemptCount} of ${submission.maxAttempts} attempts.`;
+
+const toolResultContinuationMessage =
+  "Agent run recovered completed tool results and will continue without re-executing tools.";
 
 const interruptedAfterInputMessage =
   "Agent run was interrupted after partial assistant progress and cannot be safely resumed yet. Please retry.";

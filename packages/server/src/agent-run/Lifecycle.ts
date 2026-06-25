@@ -70,6 +70,7 @@ export interface ExecuteConversationSubmissionAttemptInput extends CreateConvers
   readonly onCheckpoint?:
     | ((checkpoint: RunCheckpoint) => Effect.Effect<void, EventStreamError>)
     | undefined;
+  readonly initialAssistantMessageIndex?: number | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -260,6 +261,7 @@ export const executeRunAttempt = Effect.fn("AgentRunLifecycle.executeRunAttempt"
     runId: input.runId,
     input: input.input,
     streamFn: input.pi.streamFn,
+    tools: input.pi.tools,
     onAgentEvent: emitRunEvent,
     signal: input.signal,
   }).pipe(
@@ -363,8 +365,10 @@ export const executeConversationSubmissionAttempt = Effect.fn(
     runId: input.runId,
     input: input.input,
     streamFn: input.pi.streamFn,
+    tools: input.pi.tools,
     onAgentEvent: emitConversationEvent,
     onCheckpoint: input.onCheckpoint,
+    initialAssistantMessageIndex: input.initialAssistantMessageIndex,
     signal: input.signal,
   }).pipe(
     Effect.matchEffect({

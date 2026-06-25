@@ -2,11 +2,13 @@ import {
   Agent,
   type AgentEvent,
   type AgentMessage,
+  type AgentTool,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { CloudflareAiGatewayModels } from "../agent-loop/CloudflareAiGatewayModels.ts";
 import { redactRunEventImages, type RunEvent, toTurnMessage } from "./RunEventContract.ts";
 
 export type { RunEvent } from "./RunEventContract.ts";
@@ -31,6 +33,23 @@ export type RunCheckpoint =
       readonly runId: string;
       readonly messageIndex: number;
       readonly message: Extract<AgentMessage, { role: "assistant" }>;
+    }
+  | {
+      readonly type: "tool_call_started";
+      readonly checkpointId: string;
+      readonly runId: string;
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly args: unknown;
+    }
+  | {
+      readonly type: "tool_result_completed";
+      readonly checkpointId: string;
+      readonly runId: string;
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly result: unknown;
+      readonly isError: boolean;
     };
 
 export type RunCheckpointCallback = (checkpoint: RunCheckpoint) => Effect.Effect<void, unknown>;
@@ -39,8 +58,10 @@ export interface ExecuteInput {
   readonly runId: string;
   readonly input?: unknown;
   readonly streamFn: StreamFn;
+  readonly tools?: ReadonlyArray<AgentTool<any>> | undefined;
   readonly onAgentEvent: RunEventCallback;
   readonly onCheckpoint?: RunCheckpointCallback | undefined;
+  readonly initialAssistantMessageIndex?: number | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -75,7 +96,7 @@ class AgentRunSession {
   private activeTurnId: string | undefined;
   private activeTurnStartedAt: number | undefined;
   private activeAssistantMessageIndex: number | undefined;
-  private nextAssistantMessageIndex = 0;
+  private nextAssistantMessageIndex: number;
   private readonly activeToolCalls = new Map<
     string,
     { readonly startedAt: number; readonly toolName: string }
@@ -85,11 +106,12 @@ class AgentRunSession {
     this.input = input;
     this.eventCallback = input.onAgentEvent;
     this.checkpointCallback = input.onCheckpoint;
+    this.nextAssistantMessageIndex = input.initialAssistantMessageIndex ?? 0;
     this.agentLoop = new Agent({
       initialState: {
         systemPrompt: systemPromptFrom(input.input),
         model: modelFrom(input.input),
-        tools: [],
+        tools: toolsFrom(input),
         messages: messagesFrom(input.input),
         thinkingLevel: thinkingLevelFrom(input.input),
       },
@@ -218,6 +240,14 @@ class AgentRunSession {
           startedAt: Date.now(),
           toolName: event.toolName,
         });
+        await this.checkpoint({
+          type: "tool_call_started",
+          checkpointId: toolCallCheckpointId(this.input.runId, event.toolCallId),
+          runId: this.input.runId,
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          args: event.args,
+        });
         await this.emit({
           type: "tool_start",
           toolName: event.toolName,
@@ -228,6 +258,15 @@ class AgentRunSession {
         break;
       case "tool_execution_end": {
         const call = this.activeToolCalls.get(event.toolCallId);
+        await this.checkpoint({
+          type: "tool_result_completed",
+          checkpointId: toolResultCheckpointId(this.input.runId, event.toolCallId),
+          runId: this.input.runId,
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          result: event.result,
+          isError: event.isError,
+        });
         await this.emit({
           type: "tool",
           toolName: event.toolName,
@@ -306,20 +345,7 @@ const responseInfoFrom = (message: AssistantMessage): Record<string, unknown> =>
   ...(message.errorMessage === undefined ? {} : { error: { message: message.errorMessage } }),
 });
 
-const DEFAULT_MODEL_ID = "claude-sonnet-4-5";
-
-const defaultModel = {
-  id: DEFAULT_MODEL_ID,
-  name: DEFAULT_MODEL_ID,
-  api: "anthropic-messages",
-  provider: "anthropic",
-  baseUrl: "",
-  reasoning: true,
-  input: ["text", "image"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 200_000,
-  maxTokens: 8192,
-} satisfies Model<"anthropic-messages">;
+const defaultModel = CloudflareAiGatewayModels.defaultModel;
 
 const systemPromptFrom = (input: unknown): string =>
   stringField(input, "systemPrompt") ?? "You are Denora, a secure personal agent.";
@@ -333,6 +359,12 @@ const modelFrom = (input: unknown): Model<Api> => {
 const messagesFrom = (input: unknown): AgentMessage[] => {
   const messages = arrayField(input, "messages");
   return messages === undefined ? [] : (messages as AgentMessage[]).slice();
+};
+
+const toolsFrom = (input: ExecuteInput): AgentTool<any>[] => {
+  if (input.tools !== undefined) return input.tools.slice();
+  const tools = arrayField(input.input, "tools");
+  return tools === undefined ? [] : (tools as AgentTool<any>[]).slice();
 };
 
 const thinkingLevelFrom = (
@@ -386,5 +418,11 @@ const findLatestAssistant = (
 };
 
 const generateTurnId = (): string => `turn_${crypto.randomUUID()}`;
+
+const toolCallCheckpointId = (runId: string, toolCallId: string): string =>
+  `tool-call:${runId}:${toolCallId}`;
+
+const toolResultCheckpointId = (runId: string, toolCallId: string): string =>
+  `tool-result:${runId}:${toolCallId}`;
 
 export * as AgentRunSession from "./AgentRunSession.ts";

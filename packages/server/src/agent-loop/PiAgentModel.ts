@@ -22,11 +22,14 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import { CloudflareAiGatewayModels } from "./CloudflareAiGatewayModels.ts";
 
-type WorkersAiRunBinding = Effect.Success<Cloudflare.AiGatewayClient["raw"]>;
 type AiGatewayRunBinding = Effect.Success<Cloudflare.AiGatewayClient["gateway"]>["run"];
+type AiGatewayRunRequest = Parameters<AiGatewayRunBinding>[0];
+type AiGatewayRunOptions = NonNullable<Parameters<AiGatewayRunBinding>[1]>;
 type WorkersAIReasoningEffort = "low" | "medium" | "high";
 type ProviderHeaders = Record<string, string | null>;
+type AiGatewayRuntimeModel = CloudflareAiGatewayModels.RegistryEntry;
 type StreamingTextBlock = TextContent;
 type StreamingThinkingBlock = ThinkingContent;
 type StreamingToolCallBlock = ToolCall & { partialArgs?: string; streamIndex?: number };
@@ -66,6 +69,14 @@ interface AnthropicTool {
     readonly properties: unknown;
     readonly required?: ReadonlyArray<string> | undefined;
   };
+}
+
+interface OpenAiResponsesTool {
+  readonly type: "function";
+  readonly name: string;
+  readonly description?: string | undefined;
+  readonly parameters: unknown;
+  readonly strict: boolean;
 }
 
 type AnthropicContentBlock =
@@ -114,6 +125,11 @@ interface WorkersAiUsage {
         readonly cache_write_tokens?: number | undefined;
       }
     | undefined;
+  readonly input_tokens_details?:
+    | {
+        readonly cached_tokens?: number | undefined;
+      }
+    | undefined;
 }
 
 const WORKERS_AI_COMPAT: Required<Omit<OpenAICompletionsCompat, "cacheControlFormat">> & {
@@ -142,9 +158,6 @@ const WORKERS_AI_COMPAT: Required<Omit<OpenAICompletionsCompat, "cacheControlFor
 export const AiGatewayId = Schema.String.pipe(Schema.brand("AiGatewayId"));
 export type AiGatewayId = typeof AiGatewayId.Type;
 
-export const WorkersAiModelId = Schema.String.pipe(Schema.brand("WorkersAiModelId"));
-export type WorkersAiModelId = typeof WorkersAiModelId.Type;
-
 export interface AiGatewayModelOptions {
   readonly defaultModelId?: string | undefined;
   readonly maxTokens?: number | undefined;
@@ -167,7 +180,6 @@ export interface Interface {
 }
 
 export interface AiGatewayRuntime {
-  readonly ai: WorkersAiRunBinding;
   readonly gatewayRun: AiGatewayRunBinding;
   readonly id: AiGatewayId;
 }
@@ -181,6 +193,7 @@ export class AiGateway extends Context.Service<AiGateway, AiGatewayRuntime>()(
 export class InvalidPiModel extends Schema.TaggedErrorClass<InvalidPiModel>()("InvalidPiModel", {
   message: Schema.String,
   api: Schema.String,
+  modelId: Schema.String,
 }) {}
 
 export class ModelCallFailed extends Schema.TaggedErrorClass<ModelCallFailed>()("ModelCallFailed", {
@@ -201,7 +214,6 @@ export const layer = (config: AiGatewayModelOptions = {}) =>
     Service,
     Effect.gen(function* () {
       const aiGateway = yield* AiGateway;
-      const ai = aiGateway.ai;
       const gatewayRun = aiGateway.gatewayRun;
       const gatewayId = aiGateway.id;
 
@@ -210,11 +222,28 @@ export const layer = (config: AiGatewayModelOptions = {}) =>
         context,
         options,
       }: StreamInput) {
-        const requestedModel = WorkersAiModelId.make(config.defaultModelId ?? model.id);
         const eventStream = createAssistantMessageEventStream();
+        const requestedModelId = config.defaultModelId ?? model.id;
+        const runtimeModel = yield* resolveRuntimeModel(requestedModelId, model).pipe(
+          Effect.catch((error) =>
+            Effect.sync(() => {
+              const output = makeAssistantMessage({
+                model,
+                modelId: requestedModelId,
+                content: [],
+                stopReason: "error",
+                errorMessage: error.message,
+              });
+              eventStream.push({ type: "error", reason: "error", error: output });
+              eventStream.end();
+              return undefined;
+            }),
+          ),
+        );
+        if (runtimeModel === undefined) return eventStream;
         const output = makeAssistantMessage({
-          model,
-          modelId: requestedModel,
+          model: runtimeModel.model,
+          modelId: runtimeModel.model.id,
           content: [],
           stopReason: "stop",
         });
@@ -227,27 +256,15 @@ export const layer = (config: AiGatewayModelOptions = {}) =>
           ...(temperature !== undefined ? { temperature } : {}),
         };
 
-        const turn = isAnthropicRequest(model, requestedModel)
-          ? runAnthropicTurn({
-              gatewayRun,
-              gatewayId,
-              requestedModel,
-              context,
-              model,
-              options: turnOptions,
-              stream: eventStream,
-              output,
-            })
-          : runWorkersAiTurn({
-              ai,
-              gatewayId,
-              requestedModel,
-              context,
-              model,
-              options: turnOptions,
-              stream: eventStream,
-              output,
-            });
+        const turn = runRuntimeModelTurn({
+          gatewayRun,
+          gatewayId,
+          runtimeModel,
+          context,
+          options: turnOptions,
+          stream: eventStream,
+          output,
+        });
 
         yield* turn.pipe(
           Effect.catch((error) =>
@@ -267,19 +284,40 @@ export const aiGatewayLayerFromClient = (client: Cloudflare.AiGatewayClient) =>
   Layer.effect(
     AiGateway,
     Effect.gen(function* () {
-      const ai = yield* client.raw;
       const gateway = yield* client.gateway;
       const id = AiGatewayId.make(yield* client.id);
-      return AiGateway.of({ ai, gatewayRun: gateway.run.bind(gateway) as AiGatewayRunBinding, id });
+      const gatewayRun: AiGatewayRunBinding = (
+        data: AiGatewayRunRequest,
+        options?: AiGatewayRunOptions,
+      ) => gateway.run(data, options);
+      return AiGateway.of({ gatewayRun, id });
     }),
   );
+
+const runRuntimeModelTurn = (input: {
+  readonly gatewayRun: AiGatewayRunBinding;
+  readonly gatewayId: AiGatewayId;
+  readonly runtimeModel: AiGatewayRuntimeModel;
+  readonly context: PiContext;
+  readonly options: SimpleStreamOptions | undefined;
+  readonly stream: AssistantMessageEventStream;
+  readonly output: AssistantMessage;
+}): Effect.Effect<void, ModelTurnError> => {
+  switch (input.runtimeModel.model.api) {
+    case "anthropic-messages":
+      return runAnthropicTurn(input);
+    case "openai-responses":
+      return runOpenAiResponsesTurn(input);
+    case "openai-completions":
+      return runWorkersAiTurn(input);
+  }
+};
 
 const runAnthropicTurn = Effect.fn("PiAgentModel.runAnthropicTurn")(function* (input: {
   readonly gatewayRun: AiGatewayRunBinding;
   readonly gatewayId: AiGatewayId;
-  readonly requestedModel: string;
+  readonly runtimeModel: AiGatewayRuntimeModel;
   readonly context: PiContext;
-  readonly model: Model<Api>;
   readonly options: SimpleStreamOptions | undefined;
   readonly stream: AssistantMessageEventStream;
   readonly output: AssistantMessage;
@@ -317,17 +355,52 @@ const processAnthropicResponse = Effect.fn("PiAgentModel.processAnthropicRespons
   },
 );
 
-const runWorkersAiTurn = Effect.fn("PiAgentModel.runWorkersAiTurn")(function* (input: {
-  readonly ai: WorkersAiRunBinding;
+const runOpenAiResponsesTurn = Effect.fn("PiAgentModel.runOpenAiResponsesTurn")(function* (input: {
+  readonly gatewayRun: AiGatewayRunBinding;
   readonly gatewayId: AiGatewayId;
-  readonly requestedModel: WorkersAiModelId;
+  readonly runtimeModel: AiGatewayRuntimeModel;
   readonly context: PiContext;
-  readonly model: Model<Api>;
   readonly options: SimpleStreamOptions | undefined;
   readonly stream: AssistantMessageEventStream;
   readonly output: AssistantMessage;
 }): Effect.fn.Return<void, ModelTurnError> {
-  const model = yield* requireOpenAiCompletionsModel(input.model);
+  const model = yield* requireOpenAiResponsesModel(input.runtimeModel.model);
+  const response = yield* callOpenAiResponses({ ...input, model });
+  return yield* processOpenAiResponsesResponse({ ...input, response }).pipe(
+    Effect.catch((error) =>
+      cancelResponseBody(response).pipe(Effect.flatMap(() => Effect.fail(error))),
+    ),
+  );
+});
+
+const processOpenAiResponsesResponse = Effect.fn("PiAgentModel.processOpenAiResponsesResponse")(
+  function* (input: {
+    readonly response: Response;
+    readonly options: SimpleStreamOptions | undefined;
+    readonly stream: AssistantMessageEventStream;
+    readonly output: AssistantMessage;
+  }): Effect.fn.Return<void, ModelStreamFailed> {
+    yield* tryStreamSync(() => input.stream.push({ type: "start", partial: input.output }));
+    const parser = new OpenAiResponsesStreamParser({ output: input.output, stream: input.stream });
+    const body = input.response.body;
+    if (body !== null) yield* readSseChunks(body, (data) => parser.handleData(data));
+    if (input.options?.signal?.aborted) {
+      return yield* streamFailure(new Error("Request was aborted"));
+    }
+    yield* parser.finalize();
+  },
+);
+
+const runWorkersAiTurn = Effect.fn("PiAgentModel.runWorkersAiTurn")(function* (input: {
+  readonly gatewayId: AiGatewayId;
+  readonly gatewayRun: AiGatewayRunBinding;
+  readonly runtimeModel: AiGatewayRuntimeModel;
+  readonly context: PiContext;
+  readonly options: SimpleStreamOptions | undefined;
+  readonly stream: AssistantMessageEventStream;
+  readonly output: AssistantMessage;
+}): Effect.fn.Return<void, ModelTurnError> {
+  const model = yield* requireOpenAiCompletionsModel(input.runtimeModel.model);
   const response = yield* callWorkersAi({ ...input, model });
   return yield* processWorkersAiResponse({ ...input, model, response }).pipe(
     Effect.catch((error) =>
@@ -360,17 +433,102 @@ const processWorkersAiResponse = Effect.fn("PiAgentModel.processWorkersAiRespons
   },
 );
 
-const callWorkersAi = Effect.fn("PiAgentModel.callWorkersAi")(function* ({
-  ai,
+const callOpenAiResponses = Effect.fn("PiAgentModel.callOpenAiResponses")(function* ({
+  gatewayRun,
   gatewayId,
-  requestedModel,
+  runtimeModel,
   context,
   model,
   options,
 }: {
-  readonly ai: WorkersAiRunBinding;
+  readonly gatewayRun: AiGatewayRunBinding;
   readonly gatewayId: AiGatewayId;
-  readonly requestedModel: WorkersAiModelId;
+  readonly runtimeModel: AiGatewayRuntimeModel;
+  readonly context: PiContext;
+  readonly model: Model<"openai-responses">;
+  readonly options: SimpleStreamOptions | undefined;
+}): Effect.fn.Return<Response, ModelCallFailed> {
+  const payload: Record<string, unknown> = {
+    model: runtimeModel.route.model,
+    input: toOpenAiResponsesInput(context, model),
+    stream: true,
+    store: false,
+  };
+  if (options?.maxTokens !== undefined) payload.max_output_tokens = options.maxTokens;
+  if (options?.temperature !== undefined) payload.temperature = options.temperature;
+  if (context.tools && context.tools.length > 0)
+    payload.tools = context.tools.map(toOpenAiResponsesTool);
+  applyOpenAiResponsesReasoning(payload, model, options?.reasoning);
+
+  const overridden = yield* Effect.tryPromise({
+    try: () => Promise.resolve(options?.onPayload?.(payload, model)),
+    catch: (cause) =>
+      new ModelCallFailed({
+        message: errorMessage(cause) || "Cloudflare AI Gateway OpenAI payload hook failed.",
+        cause,
+      }),
+  });
+  const finalPayload = yield* resolvePayloadOverride({
+    payload,
+    overridden,
+    failureMessage: "Cloudflare AI Gateway OpenAI payload hook must return a JSON object.",
+  });
+  const headers = mergeHeaders(
+    { "content-type": "application/json" },
+    options?.apiKey === undefined ? undefined : { authorization: `Bearer ${options.apiKey}` },
+    options?.headers,
+  );
+
+  const response = yield* invokeGatewayRun({
+    gatewayRun,
+    gatewayId,
+    request: {
+      provider: runtimeModel.route.provider,
+      endpoint: runtimeModel.route.endpoint,
+      headers,
+      query: finalPayload,
+    },
+    options,
+    failureMessage: "Cloudflare AI Gateway OpenAI Responses model call failed.",
+  });
+
+  yield* Effect.tryPromise({
+    try: () =>
+      Promise.resolve(
+        options?.onResponse?.(
+          { status: response.status, headers: headersToRecord(response.headers) },
+          model,
+        ),
+      ),
+    catch: (cause) =>
+      new ModelCallFailed({
+        message: errorMessage(cause) || "Cloudflare AI Gateway OpenAI response hook failed.",
+        cause,
+      }),
+  });
+  if (!response.ok) {
+    const errorBody = yield* safeReadText(response);
+    return yield* new ModelCallFailed({
+      message:
+        `Cloudflare AI Gateway returned ${response.status} ${response.statusText}` +
+        (errorBody ? `: ${errorBody}` : ""),
+      cause: response,
+    });
+  }
+  return response;
+});
+
+const callWorkersAi = Effect.fn("PiAgentModel.callWorkersAi")(function* ({
+  gatewayRun,
+  gatewayId,
+  runtimeModel,
+  context,
+  model,
+  options,
+}: {
+  readonly gatewayRun: AiGatewayRunBinding;
+  readonly gatewayId: AiGatewayId;
+  readonly runtimeModel: AiGatewayRuntimeModel;
   readonly context: PiContext;
   readonly model: Model<"openai-completions">;
   readonly options: SimpleStreamOptions | undefined;
@@ -396,31 +554,23 @@ const callWorkersAi = Effect.fn("PiAgentModel.callWorkersAi")(function* ({
         cause,
       }),
   });
-  const finalPayload = overridden === undefined ? payload : (overridden as Record<string, unknown>);
-  const response = yield* Effect.tryPromise({
-    try: () =>
-      ai.run(
-        requestedModel as never,
-        finalPayload as never,
-        {
-          gateway: { id: gatewayId },
-          returnRawResponse: true,
-          ...(options?.signal ? { signal: options.signal } : {}),
-          ...extraHeadersOption(options),
-        } as never,
-      ),
-    catch: (cause) =>
-      new ModelCallFailed({
-        message: errorMessage(cause) || "Cloudflare AI Gateway model call failed.",
-        cause,
-      }),
+  const finalPayload = yield* resolvePayloadOverride({
+    payload,
+    overridden,
+    failureMessage: "Cloudflare AI Gateway payload hook must return a JSON object.",
   });
-  if (!(response instanceof globalThis.Response)) {
-    return yield* new ModelCallFailed({
-      message: "Cloudflare AI Gateway did not return a raw Response.",
-      cause: response,
-    });
-  }
+  const response = yield* invokeGatewayRun({
+    gatewayRun,
+    gatewayId,
+    request: {
+      provider: runtimeModel.route.provider,
+      endpoint: runtimeModel.route.endpoint,
+      headers: { "content-type": "application/json" },
+      query: finalPayload,
+    },
+    options,
+    failureMessage: "Cloudflare AI Gateway Workers AI model call failed.",
+  });
 
   yield* Effect.tryPromise({
     try: () =>
@@ -451,20 +601,19 @@ const callWorkersAi = Effect.fn("PiAgentModel.callWorkersAi")(function* ({
 const callAnthropic = Effect.fn("PiAgentModel.callAnthropic")(function* ({
   gatewayRun,
   gatewayId,
-  requestedModel,
+  runtimeModel,
   context,
-  model,
   options,
 }: {
   readonly gatewayRun: AiGatewayRunBinding;
   readonly gatewayId: AiGatewayId;
-  readonly requestedModel: string;
+  readonly runtimeModel: AiGatewayRuntimeModel;
   readonly context: PiContext;
-  readonly model: Model<Api>;
   readonly options: SimpleStreamOptions | undefined;
 }): Effect.fn.Return<Response, ModelCallFailed> {
+  const model = runtimeModel.model;
   const payload: Record<string, unknown> = {
-    model: requestedModel,
+    model: runtimeModel.route.model,
     messages: toAnthropicMessages(context),
     max_tokens: options?.maxTokens ?? model.maxTokens,
     stream: true,
@@ -481,7 +630,11 @@ const callAnthropic = Effect.fn("PiAgentModel.callAnthropic")(function* ({
         cause,
       }),
   });
-  const finalPayload = overridden === undefined ? payload : overridden;
+  const finalPayload = yield* resolvePayloadOverride({
+    payload,
+    overridden,
+    failureMessage: "Cloudflare AI Gateway Anthropic payload hook must return a JSON object.",
+  });
   const headers = mergeHeaders(
     {
       "content-type": "application/json",
@@ -491,33 +644,18 @@ const callAnthropic = Effect.fn("PiAgentModel.callAnthropic")(function* ({
     options?.headers,
   );
 
-  const response = yield* Effect.tryPromise({
-    try: () =>
-      gatewayRun(
-        {
-          provider: "anthropic",
-          endpoint: "v1/messages",
-          headers,
-          query: finalPayload,
-        } as never,
-        {
-          gateway: { id: gatewayId },
-          ...(options?.signal ? { signal: options.signal } : {}),
-          ...extraHeadersOption(options),
-        } as never,
-      ),
-    catch: (cause) =>
-      new ModelCallFailed({
-        message: errorMessage(cause) || "Cloudflare AI Gateway Anthropic model call failed.",
-        cause,
-      }),
+  const response = yield* invokeGatewayRun({
+    gatewayRun,
+    gatewayId,
+    request: {
+      provider: runtimeModel.route.provider,
+      endpoint: runtimeModel.route.endpoint,
+      headers,
+      query: finalPayload,
+    },
+    options,
+    failureMessage: "Cloudflare AI Gateway Anthropic model call failed.",
   });
-  if (!(response instanceof globalThis.Response)) {
-    return yield* new ModelCallFailed({
-      message: "Cloudflare AI Gateway Anthropic call did not return a Response.",
-      cause: response,
-    });
-  }
 
   yield* Effect.tryPromise({
     try: () =>
@@ -544,6 +682,333 @@ const callAnthropic = Effect.fn("PiAgentModel.callAnthropic")(function* ({
   }
   return response;
 });
+
+const invokeGatewayRun = Effect.fn("PiAgentModel.invokeGatewayRun")(function* ({
+  gatewayRun,
+  gatewayId,
+  request,
+  options,
+  failureMessage,
+}: {
+  readonly gatewayRun: AiGatewayRunBinding;
+  readonly gatewayId: AiGatewayId;
+  readonly request: AiGatewayRunRequest;
+  readonly options: SimpleStreamOptions | undefined;
+  readonly failureMessage: string;
+}): Effect.fn.Return<Response, ModelCallFailed> {
+  const runOptions: AiGatewayRunOptions = {
+    gateway: { id: gatewayId },
+    ...(options?.signal ? { signal: options.signal } : {}),
+    ...extraHeadersOption(options),
+  };
+  const response = yield* Effect.tryPromise({
+    try: () => gatewayRun(request, runOptions),
+    catch: (cause) =>
+      new ModelCallFailed({
+        message: errorMessage(cause) || failureMessage,
+        cause,
+      }),
+  });
+  if (!(response instanceof globalThis.Response)) {
+    return yield* new ModelCallFailed({
+      message: "Cloudflare AI Gateway did not return a Response.",
+      cause: response,
+    });
+  }
+  return response;
+});
+
+class OpenAiResponsesStreamParser {
+  private currentBlock: StreamingBlock | null = null;
+  private receivedDone = false;
+  private receivedCompleted = false;
+  private readonly input: {
+    readonly output: AssistantMessage;
+    readonly stream: AssistantMessageEventStream;
+  };
+
+  constructor(input: {
+    readonly output: AssistantMessage;
+    readonly stream: AssistantMessageEventStream;
+  }) {
+    this.input = input;
+  }
+
+  handleData(data: string): Effect.Effect<void, ModelStreamFailed> {
+    return tryStreamSync(() => {
+      if (data.length === 0) return;
+      if (data === "[DONE]") {
+        this.receivedDone = true;
+        return;
+      }
+      const event = parseChunk(data);
+      const type = stringField(event, "type");
+      if (type === undefined) return;
+
+      switch (type) {
+        case "response.created":
+          this.handleCreated(event);
+          break;
+        case "response.output_item.added":
+          this.handleOutputItemAdded(event);
+          break;
+        case "response.output_text.delta":
+        case "response.refusal.delta":
+          this.handleTextDelta(stringField(event, "delta") ?? "");
+          break;
+        case "response.reasoning_summary_text.delta":
+        case "response.reasoning_text.delta":
+          this.handleThinkingDelta(stringField(event, "delta") ?? "");
+          break;
+        case "response.function_call_arguments.delta":
+          this.handleToolCallDelta(stringField(event, "delta") ?? "");
+          break;
+        case "response.function_call_arguments.done":
+          this.handleToolCallDone(stringField(event, "arguments") ?? "{}");
+          break;
+        case "response.output_item.done":
+          this.handleOutputItemDone(event);
+          break;
+        case "response.completed":
+          this.handleCompleted(event);
+          break;
+        case "error":
+          throw new Error(
+            `Error Code ${stringField(event, "code") ?? "unknown"}: ${stringField(event, "message") ?? "Unknown error"}`,
+          );
+        case "response.failed":
+          throw new Error(openAiResponsesFailureMessage(event));
+      }
+    });
+  }
+
+  finalize(): Effect.Effect<void, ModelStreamFailed> {
+    return tryStreamSync(() => {
+      if (!this.receivedCompleted && !this.receivedDone) {
+        throw new Error("Stream ended without response.completed or [DONE]");
+      }
+      this.closeCurrentBlock();
+      cleanupStreamingScratch(this.input.output);
+      if (hasToolCalls(this.input.output) && this.input.output.stopReason === "stop") {
+        this.input.output.stopReason = "toolUse";
+      }
+      if (this.input.output.stopReason === "error") {
+        this.input.stream.push({ type: "error", reason: "error", error: this.input.output });
+      } else {
+        this.input.stream.push({
+          type: "done",
+          reason: doneReason(this.input.output.stopReason),
+          message: this.input.output,
+        });
+      }
+      this.input.stream.end();
+    });
+  }
+
+  private handleCreated(event: Record<string, unknown>): void {
+    const response = optionalObjectField(event, "response");
+    const id = response === undefined ? undefined : stringField(response, "id");
+    if (id !== undefined) this.input.output.responseId = id;
+  }
+
+  private handleOutputItemAdded(event: Record<string, unknown>): void {
+    const item = optionalObjectField(event, "item");
+    if (item === undefined) return;
+    const itemType = stringField(item, "type");
+    if (itemType === "message") {
+      this.ensureTextBlock();
+      return;
+    }
+    if (itemType === "reasoning") {
+      this.ensureThinkingBlock("openai-responses");
+      return;
+    }
+    if (itemType === "function_call") {
+      const block = this.ensureToolCallBlock(item);
+      const args = stringField(item, "arguments");
+      if (args && args.length > 0) this.appendToolCallArgs(block, args);
+    }
+  }
+
+  private handleTextDelta(delta: string): void {
+    if (delta.length === 0) return;
+    const block = this.ensureTextBlock();
+    block.text += delta;
+    this.input.stream.push({
+      type: "text_delta",
+      contentIndex: this.contentIndex(block),
+      delta,
+      partial: this.input.output,
+    });
+  }
+
+  private handleThinkingDelta(delta: string): void {
+    if (delta.length === 0) return;
+    const block = this.ensureThinkingBlock("openai-responses");
+    block.thinking += delta;
+    this.input.stream.push({
+      type: "thinking_delta",
+      contentIndex: this.contentIndex(block),
+      delta,
+      partial: this.input.output,
+    });
+  }
+
+  private handleToolCallDelta(delta: string): void {
+    if (delta.length === 0) return;
+    const block = this.currentBlock?.type === "toolCall" ? this.currentBlock : undefined;
+    if (block === undefined) return;
+    this.appendToolCallArgs(block, delta);
+  }
+
+  private handleToolCallDone(args: string): void {
+    const block = this.currentBlock?.type === "toolCall" ? this.currentBlock : undefined;
+    if (block === undefined) return;
+    const previous = block.partialArgs ?? "";
+    if (args.startsWith(previous) && args.length > previous.length) {
+      this.appendToolCallArgs(block, args.slice(previous.length));
+      return;
+    }
+    block.partialArgs = args;
+    block.arguments = parseStreamingJson<Record<string, unknown>>(args);
+  }
+
+  private handleOutputItemDone(event: Record<string, unknown>): void {
+    const item = optionalObjectField(event, "item");
+    if (item === undefined) {
+      this.closeCurrentBlock();
+      return;
+    }
+    const itemType = stringField(item, "type");
+    if (itemType === "message" && this.currentBlock?.type === "text") {
+      const text = openAiResponsesItemText(item);
+      if (text !== undefined) this.currentBlock.text = text;
+    } else if (itemType === "reasoning" && this.currentBlock?.type === "thinking") {
+      const thinking = openAiResponsesReasoningText(item);
+      if (thinking !== undefined) this.currentBlock.thinking = thinking;
+      this.currentBlock.thinkingSignature = JSON.stringify(item);
+    } else if (itemType === "function_call" && this.currentBlock?.type === "toolCall") {
+      this.currentBlock.name = stringField(item, "name") ?? this.currentBlock.name;
+      this.handleToolCallDone(
+        stringField(item, "arguments") ?? this.currentBlock.partialArgs ?? "{}",
+      );
+    }
+    this.closeCurrentBlock();
+  }
+
+  private handleCompleted(event: Record<string, unknown>): void {
+    this.receivedCompleted = true;
+    const response = optionalObjectField(event, "response");
+    if (response === undefined) return;
+    const id = stringField(response, "id");
+    if (id !== undefined) this.input.output.responseId = id;
+    const model = stringField(response, "model");
+    if (model !== undefined && model !== this.input.output.model)
+      this.input.output.responseModel = model;
+    this.input.output.stopReason = mapOpenAiResponsesStatus(stringField(response, "status"));
+    const usage = optionalUsage(response.usage);
+    if (usage !== undefined) this.input.output.usage = toUsage(usage);
+  }
+
+  private ensureTextBlock(): StreamingTextBlock {
+    if (this.currentBlock?.type === "text") return this.currentBlock;
+    this.closeCurrentBlock();
+    const block: StreamingTextBlock = { type: "text", text: "" };
+    this.blocks.push(block);
+    this.currentBlock = block;
+    this.input.stream.push({
+      type: "text_start",
+      contentIndex: this.contentIndex(block),
+      partial: this.input.output,
+    });
+    return block;
+  }
+
+  private ensureThinkingBlock(thinkingSignature: string): StreamingThinkingBlock {
+    if (this.currentBlock?.type === "thinking") return this.currentBlock;
+    this.closeCurrentBlock();
+    const block: StreamingThinkingBlock = { type: "thinking", thinking: "", thinkingSignature };
+    this.blocks.push(block);
+    this.currentBlock = block;
+    this.input.stream.push({
+      type: "thinking_start",
+      contentIndex: this.contentIndex(block),
+      partial: this.input.output,
+    });
+    return block;
+  }
+
+  private ensureToolCallBlock(item: Record<string, unknown>): StreamingToolCallBlock {
+    if (this.currentBlock?.type === "toolCall") return this.currentBlock;
+    this.closeCurrentBlock();
+    const callId = stringField(item, "call_id") ?? makeGeneratedToolCallId();
+    const itemId = stringField(item, "id");
+    const block: StreamingToolCallBlock = {
+      type: "toolCall",
+      id: itemId === undefined ? callId : `${callId}|${itemId}`,
+      name: stringField(item, "name") ?? "",
+      arguments: {},
+      partialArgs: "",
+    };
+    this.blocks.push(block);
+    this.currentBlock = block;
+    this.input.stream.push({
+      type: "toolcall_start",
+      contentIndex: this.contentIndex(block),
+      partial: this.input.output,
+    });
+    return block;
+  }
+
+  private appendToolCallArgs(block: StreamingToolCallBlock, delta: string): void {
+    block.partialArgs = (block.partialArgs ?? "") + delta;
+    block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
+    this.input.stream.push({
+      type: "toolcall_delta",
+      contentIndex: this.contentIndex(block),
+      delta,
+      partial: this.input.output,
+    });
+  }
+
+  private closeCurrentBlock(): void {
+    const block = this.currentBlock;
+    if (block === null) return;
+    this.currentBlock = null;
+    if (block.type === "text") {
+      this.input.stream.push({
+        type: "text_end",
+        contentIndex: this.contentIndex(block),
+        content: block.text,
+        partial: this.input.output,
+      });
+    } else if (block.type === "thinking") {
+      this.input.stream.push({
+        type: "thinking_end",
+        contentIndex: this.contentIndex(block),
+        content: block.thinking,
+        partial: this.input.output,
+      });
+    } else {
+      block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs ?? "{}");
+      delete block.partialArgs;
+      this.input.stream.push({
+        type: "toolcall_end",
+        contentIndex: this.contentIndex(block),
+        toolCall: block,
+        partial: this.input.output,
+      });
+    }
+  }
+
+  private get blocks(): StreamingBlock[] {
+    return this.input.output.content as StreamingBlock[];
+  }
+
+  private contentIndex(block: StreamingBlock): number {
+    return this.blocks.indexOf(block);
+  }
+}
 
 class WorkersAiStreamParser {
   private textBlock: StreamingTextBlock | null = null;
@@ -943,15 +1408,61 @@ const emitTurnError = ({
   stream.end();
 };
 
+const resolveRuntimeModel = Effect.fn("PiAgentModel.resolveRuntimeModel")(function* (
+  modelId: string,
+  requestedModel: Model<Api>,
+): Effect.fn.Return<AiGatewayRuntimeModel, InvalidPiModel> {
+  const runtimeModel = CloudflareAiGatewayModels.find(modelId);
+  if (runtimeModel !== undefined) return runtimeModel;
+  return yield* new InvalidPiModel({
+    api: requestedModel.api,
+    modelId,
+    message: `PiAgentModel does not have a Cloudflare AI Gateway registry entry for model ${modelId}.`,
+  });
+});
+
+const isModelApi = <TApi extends Api>(model: Model<Api>, api: TApi): model is Model<TApi> =>
+  model.api === api;
+
 const requireOpenAiCompletionsModel = Effect.fn("PiAgentModel.requireOpenAiCompletionsModel")(
   function* (model: Model<Api>): Effect.fn.Return<Model<"openai-completions">, InvalidPiModel> {
-    if (model.api === "openai-completions") return model as Model<"openai-completions">;
+    if (isModelApi(model, "openai-completions")) return model;
     return yield* new InvalidPiModel({
       api: model.api,
+      modelId: model.id,
       message: `PiAgentModel requires an openai-completions Pi model for Workers AI payload conversion; received ${model.api}.`,
     });
   },
 );
+
+const requireOpenAiResponsesModel = Effect.fn("PiAgentModel.requireOpenAiResponsesModel")(
+  function* (model: Model<Api>): Effect.fn.Return<Model<"openai-responses">, InvalidPiModel> {
+    if (isModelApi(model, "openai-responses")) return model;
+    return yield* new InvalidPiModel({
+      api: model.api,
+      modelId: model.id,
+      message: `PiAgentModel requires an openai-responses Pi model for OpenAI Responses payload conversion; received ${model.api}.`,
+    });
+  },
+);
+
+const resolvePayloadOverride = Effect.fn("PiAgentModel.resolvePayloadOverride")(function* ({
+  payload,
+  overridden,
+  failureMessage,
+}: {
+  readonly payload: Record<string, unknown>;
+  readonly overridden: unknown;
+  readonly failureMessage: string;
+}): Effect.fn.Return<Record<string, unknown>, ModelCallFailed> {
+  if (overridden === undefined) return payload;
+  if (typeof overridden === "object" && overridden !== null && !Array.isArray(overridden)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(overridden)) out[key] = value;
+    return out;
+  }
+  return yield* new ModelCallFailed({ message: failureMessage, cause: overridden });
+});
 
 const toWorkersAiTool = (tool: Tool): WorkersAiTool => ({
   type: "function",
@@ -962,6 +1473,110 @@ const toWorkersAiTool = (tool: Tool): WorkersAiTool => ({
     strict: false,
   },
 });
+
+const toOpenAiResponsesTool = (tool: Tool): OpenAiResponsesTool => ({
+  type: "function",
+  name: tool.name,
+  description: tool.description,
+  parameters: tool.parameters,
+  strict: false,
+});
+
+const toOpenAiResponsesInput = (
+  context: PiContext,
+  model: Model<"openai-responses">,
+): ReadonlyArray<Record<string, unknown>> => {
+  const input: Record<string, unknown>[] = [];
+  if (context.systemPrompt) {
+    input.push({
+      role:
+        model.reasoning && model.compat?.supportsDeveloperRole !== false ? "developer" : "system",
+      content: context.systemPrompt,
+    });
+  }
+
+  for (const message of context.messages) {
+    switch (message.role) {
+      case "user":
+        input.push({ role: "user", content: toOpenAiResponsesUserContent(message.content) });
+        break;
+      case "assistant":
+        input.push(...toOpenAiResponsesAssistantItems(message));
+        break;
+      case "toolResult":
+        input.push({
+          type: "function_call_output",
+          call_id: openAiResponsesToolCallId(message.toolCallId),
+          output: toOpenAiResponsesToolResult(message.content),
+        });
+        break;
+    }
+  }
+  return input;
+};
+
+const toOpenAiResponsesUserContent = (
+  content: string | ReadonlyArray<TextContent | ImageContent>,
+): string | ReadonlyArray<Record<string, unknown>> => {
+  if (typeof content === "string") return content;
+  return content.flatMap((block): ReadonlyArray<Record<string, unknown>> => {
+    if (block.type === "text") return [{ type: "input_text", text: block.text }];
+    return [
+      {
+        type: "input_image",
+        detail: "auto",
+        image_url: `data:${block.mimeType};base64,${block.data}`,
+      },
+    ];
+  });
+};
+
+const toOpenAiResponsesAssistantItems = (
+  message: Extract<PiContext["messages"][number], { readonly role: "assistant" }>,
+): ReadonlyArray<Record<string, unknown>> =>
+  message.content.flatMap((block): ReadonlyArray<Record<string, unknown>> => {
+    if (block.type === "text") {
+      return block.text.length === 0
+        ? []
+        : [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: block.text, annotations: [] }],
+              status: "completed",
+            },
+          ];
+    }
+    if (block.type === "thinking") return [];
+    return [
+      {
+        type: "function_call",
+        call_id: openAiResponsesToolCallId(block.id),
+        name: block.name,
+        arguments: JSON.stringify(block.arguments ?? {}),
+      },
+    ];
+  });
+
+const toOpenAiResponsesToolResult = (
+  content: ReadonlyArray<TextContent | ImageContent>,
+): string | ReadonlyArray<Record<string, unknown>> => {
+  const text = content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+  const images = content.flatMap((block): ReadonlyArray<Record<string, unknown>> => {
+    if (block.type === "text") return [];
+    return [
+      {
+        type: "input_image",
+        detail: "auto",
+        image_url: `data:${block.mimeType};base64,${block.data}`,
+      },
+    ];
+  });
+  if (images.length === 0) return text;
+  return [...(text.length > 0 ? [{ type: "input_text", text }] : []), ...images];
+};
+
+const openAiResponsesToolCallId = (id: string): string => id.split("|")[0] ?? id;
 
 const toAnthropicTool = (tool: Tool): AnthropicTool => {
   const schema = tool.parameters as { readonly properties?: unknown; readonly required?: string[] };
@@ -1071,11 +1686,7 @@ const normalizeAnthropicToolCallId = (id: string): string =>
   id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 
 const parseChunk = (data: string): Record<string, unknown> => {
-  const parsed = JSON.parse(data) as unknown;
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("Workers AI stream chunk must be a JSON object.");
-  }
-  return parsed as Record<string, unknown>;
+  return requireObject(JSON.parse(data), "chunk");
 };
 
 const normalizeAnthropicStreamData = (data: string): string => {
@@ -1215,7 +1826,9 @@ const requireObject = (value: unknown, label: string): Record<string, unknown> =
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`Workers AI stream ${label} must be a JSON object.`);
   }
-  return value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) out[key] = item;
+  return out;
 };
 
 const nullableStringField = (
@@ -1316,11 +1929,15 @@ const decodeNativeToolBuffer = (
   const items = Array.isArray(parsed) ? parsed : [parsed];
   const calls = items.flatMap(
     (item): ReadonlyArray<{ readonly name: string; readonly args: string }> => {
-      if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
-      const record = item as Record<string, unknown>;
+      let record: Record<string, unknown>;
+      try {
+        record = requireObject(item, "native tool call");
+      } catch {
+        return [];
+      }
       const fn =
         typeof record.function === "object" && record.function !== null
-          ? (record.function as Record<string, unknown>)
+          ? requireObject(record.function, "native tool function")
           : undefined;
       const name = fn?.name ?? record.name;
       if (typeof name !== "string" || name.length === 0) return [];
@@ -1438,6 +2055,18 @@ const applyReasoningEffort = (
   payload.reasoning_effort = mapReasoningEffort(level);
 };
 
+const applyOpenAiResponsesReasoning = (
+  payload: Record<string, unknown>,
+  model: Model<"openai-responses">,
+  level: SimpleStreamOptions["reasoning"] | undefined,
+): void => {
+  if (!model.reasoning || level === undefined) return;
+  const effort = model.thinkingLevelMap?.[level] ?? level;
+  if (effort === null) return;
+  payload.reasoning = { effort, summary: "auto" };
+  payload.include = ["reasoning.encrypted_content"];
+};
+
 const mapReasoningEffort = (
   level: NonNullable<SimpleStreamOptions["reasoning"]>,
 ): WorkersAIReasoningEffort => {
@@ -1452,11 +2081,6 @@ const mapReasoningEffort = (
       return "high";
   }
 };
-
-const isAnthropicRequest = (model: Model<Api>, requestedModel: string): boolean =>
-  model.api === "anthropic-messages" ||
-  model.provider === "anthropic" ||
-  requestedModel.startsWith("claude-");
 
 const mapFinishReason = (
   value: string,
@@ -1492,6 +2116,66 @@ const mapFinishReason = (
   }
 };
 
+const mapOpenAiResponsesStatus = (status: string | undefined): StopReason => {
+  switch (status) {
+    case undefined:
+    case "completed":
+    case "in_progress":
+    case "queued":
+      return "stop";
+    case "incomplete":
+      return "length";
+    case "failed":
+    case "cancelled":
+      return "error";
+    default:
+      return "error";
+  }
+};
+
+const openAiResponsesFailureMessage = (event: Record<string, unknown>): string => {
+  const response = optionalObjectField(event, "response");
+  const error = response === undefined ? undefined : optionalObjectField(response, "error");
+  const code = error === undefined ? undefined : stringField(error, "code");
+  const message = error === undefined ? undefined : stringField(error, "message");
+  if (message !== undefined) return `${code ?? "unknown"}: ${message}`;
+  const details =
+    response === undefined ? undefined : optionalObjectField(response, "incomplete_details");
+  const reason = details === undefined ? undefined : stringField(details, "reason");
+  return reason === undefined ? "OpenAI Responses stream failed." : `incomplete: ${reason}`;
+};
+
+const openAiResponsesItemText = (item: Record<string, unknown>): string | undefined => {
+  const content = optionalArrayField(item, "content");
+  if (content === undefined) return undefined;
+  return content
+    .flatMap((raw) => {
+      const part = requireObject(raw, "OpenAI Responses content part");
+      const text = stringField(part, "text") ?? stringField(part, "refusal");
+      return text === undefined ? [] : [text];
+    })
+    .join("");
+};
+
+const openAiResponsesReasoningText = (item: Record<string, unknown>): string | undefined => {
+  const summary = textParts(item, "summary");
+  if (summary !== undefined && summary.length > 0) return summary;
+  const content = textParts(item, "content");
+  return content === undefined || content.length === 0 ? undefined : content;
+};
+
+const textParts = (item: Record<string, unknown>, field: string): string | undefined => {
+  const parts = optionalArrayField(item, field);
+  if (parts === undefined) return undefined;
+  return parts
+    .flatMap((raw) => {
+      const part = requireObject(raw, `OpenAI Responses ${field} part`);
+      const text = stringField(part, "text");
+      return text === undefined ? [] : [text];
+    })
+    .join("\n\n");
+};
+
 const doneReason = (reason: StopReason): "stop" | "length" | "toolUse" =>
   reason === "length" || reason === "toolUse" ? reason : "stop";
 
@@ -1500,6 +2184,7 @@ const toUsage = (raw: WorkersAiUsage): Usage => {
   const output = numberOrZero(raw.completion_tokens ?? raw.output_tokens);
   const cacheRead = numberOrZero(
     raw.prompt_tokens_details?.cached_tokens ??
+      raw.input_tokens_details?.cached_tokens ??
       raw.cache_read_input_tokens ??
       raw.cache_read_tokens ??
       raw.prompt_cache_hit_tokens,
@@ -1533,6 +2218,7 @@ const hasNonZeroUsage = (usage: WorkersAiUsage): boolean =>
   numberOrZero(usage.cache_write_tokens) > 0 ||
   numberOrZero(usage.prompt_cache_hit_tokens) > 0 ||
   numberOrZero(usage.prompt_tokens_details?.cached_tokens) > 0 ||
+  numberOrZero(usage.input_tokens_details?.cached_tokens) > 0 ||
   numberOrZero(usage.prompt_tokens_details?.cache_write_tokens) > 0;
 
 const mergeUsage = (previous: WorkersAiUsage, next: WorkersAiUsage): WorkersAiUsage => ({
@@ -1557,6 +2243,12 @@ const mergeUsage = (previous: WorkersAiUsage, next: WorkersAiUsage): WorkersAiUs
     cache_write_tokens:
       next.prompt_tokens_details?.cache_write_tokens ??
       previous.prompt_tokens_details?.cache_write_tokens,
+  },
+  input_tokens_details: {
+    ...previous.input_tokens_details,
+    ...next.input_tokens_details,
+    cached_tokens:
+      next.input_tokens_details?.cached_tokens ?? previous.input_tokens_details?.cached_tokens,
   },
 });
 

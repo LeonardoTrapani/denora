@@ -430,6 +430,97 @@ describe("AgentConversationSessionStore", () => {
     ),
   );
 
+  it.effect("records durable tool call and result checkpoints idempotently", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "use a tool" });
+
+        yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+        yield* sessions.recordAssistantMessageCompleted({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          messageIndex: 0,
+          parts: [
+            {
+              type: "toolCall",
+              id: "call_1",
+              name: "sample_tool",
+              arguments: { value: "ok" },
+            },
+          ],
+          plainText: "",
+        });
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          yield* sessions.recordToolCallCheckpoint({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            toolCallId: "call_1",
+            name: "sample_tool",
+            args: { value: "ok" },
+          });
+          yield* sessions.recordToolResultCheckpoint({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            toolCallId: "call_1",
+            name: "sample_tool",
+            result: {
+              content: [{ type: "text", text: "tool result" }],
+              details: { value: "ok" },
+            },
+            isError: false,
+          });
+        }
+
+        const messages = yield* readSessionMessages(sql);
+        const progress = yield* sessions.inspectSubmissionProgress({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+        });
+        const completed = yield* sessions.reconstructCompletedRun({
+          conversationId: input.conversationId,
+          runId: input.runId,
+        });
+
+        assert.deepStrictEqual(
+          messages.map((message) => message.message_id),
+          [
+            input.triggerMessageId,
+            `assistant:${input.runId}:0`,
+            `tool-call:${input.runId}:call_1`,
+            `tool-result:${input.runId}:call_1`,
+          ],
+        );
+        assert.deepStrictEqual(
+          messages.map((message) => message.role),
+          ["user", "assistant", "toolCall", "toolResult"],
+        );
+        assert.strictEqual(messages[2]?.status, "started");
+        assert.strictEqual(messages[3]?.status, "completed");
+        assert.strictEqual(messages[3]?.plain_text, "tool result");
+        assert.deepInclude(JSON.parse(messages[3]?.parts_json ?? "[]")[0], {
+          type: "text",
+          text: "tool result",
+          toolCallId: "call_1",
+          toolName: "sample_tool",
+        });
+        assert.strictEqual(yield* countMessages(sql, "toolCall"), 1);
+        assert.strictEqual(yield* countMessages(sql, "toolResult"), 1);
+        assert.deepStrictEqual(completed, null);
+        assert.deepInclude(progress, {
+          inputApplied: true,
+          assistantStarted: true,
+          assistantCompleted: null,
+          toolResultCompletedWithoutAssistant: true,
+        });
+      }),
+    ),
+  );
+
   it.effect("persists assistant checkpoints during a running coordinator turn", () =>
     withHarness(
       Effect.gen(function* () {
@@ -974,6 +1065,107 @@ describe("AgentConversationSessionStore", () => {
           assert.strictEqual(event?.outcome, "completed");
           assert.deepStrictEqual(event?.result, { assistantText: "already done" });
           assert.strictEqual(yield* countMessages(sql, "assistant"), 1);
+        }),
+      ),
+  );
+
+  it.effect(
+    "continues after recovered tool results and unblocks later same-session submissions",
+    () =>
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, store, sessions, coordinator } = yield* AgentConversationHarness;
+          const input = submissionInput({ text: "recover tool result" });
+          const next = submissionInput({
+            submissionId: "submission_after_tool_recovery",
+            runId: "run_after_tool_recovery",
+            triggerMessageId: "message_after_tool_recovery",
+            text: "after recovery",
+          });
+          const contexts: Array<ReadonlyArray<AgentMessage>> = [];
+
+          yield* admitAndCreate(store, coordinator, input);
+          yield* admitAndCreate(store, coordinator, next);
+          yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+          yield* sessions.recordAssistantMessageCompleted({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            messageIndex: 0,
+            parts: [
+              {
+                type: "toolCall",
+                id: "call_1",
+                name: "sample_tool",
+                arguments: { value: "ok" },
+              },
+            ],
+            plainText: "",
+          });
+          yield* sessions.recordToolResultCheckpoint({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            toolCallId: "call_1",
+            name: "sample_tool",
+            result: {
+              content: [{ type: "text", text: "tool result" }],
+              details: { value: "ok" },
+            },
+            isError: false,
+          });
+          yield* markRunningAppliedWithAttemptMarker(sql, input.submissionId, input.runId);
+
+          const result = yield* coordinator.reconcile({
+            pi: makePi(["continued after tool", "second settled"], contexts),
+            scheduleWake: () => Effect.void,
+          });
+          const markers = yield* readAttemptMarkers(sql, input.submissionId);
+          const marker = markers.find((candidate) => candidate.attempt_id === "attempt_crashed");
+          const terminal = yield* coordinator.getSubmissionTerminal(input.submissionId);
+          const event = terminal?.event as Record<string, unknown> | undefined;
+          const messages = yield* readSessionMessages(sql);
+
+          assert.isFalse(result.needsWake);
+          assert.strictEqual(yield* readSubmissionStatus(sql, input.submissionId), "settled");
+          assert.strictEqual(yield* readSubmissionStatus(sql, next.submissionId), "settled");
+          assert.strictEqual(event?.outcome, "completed");
+          assert.deepInclude(event?.result as Record<string, unknown>, {
+            assistantText: "continued after tool",
+          });
+          assert.deepStrictEqual(
+            contexts[0]?.map((message) => message.role),
+            ["user", "assistant", "toolResult"],
+          );
+          assert.deepStrictEqual(
+            contexts[1]?.map((message) => message.role),
+            ["user", "assistant", "toolResult", "assistant", "user"],
+          );
+          assert.deepStrictEqual(
+            messages.map((message) => message.message_id),
+            [
+              "message_1",
+              "assistant:run_1:0",
+              "tool-result:run_1:call_1",
+              "assistant:run_1:1",
+              "message_after_tool_recovery",
+              "assistant:run_after_tool_recovery:0",
+            ],
+          );
+          assert.deepStrictEqual(JSON.parse(messages[1]?.parts_json ?? "null"), [
+            {
+              type: "toolCall",
+              id: "call_1",
+              name: "sample_tool",
+              arguments: { value: "ok" },
+            },
+          ]);
+          assert.strictEqual(marker?.status, "interrupted");
+          assert.deepInclude(JSON.parse(marker?.snapshot_json ?? "{}"), {
+            phase: "requeued_after_tool_result",
+            error:
+              "Agent run recovered completed tool results and will continue without re-executing tools.",
+          });
         }),
       ),
   );

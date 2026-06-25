@@ -1,4 +1,4 @@
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,6 +7,7 @@ import { PiAgentModel } from "./PiAgentModel.ts";
 
 export interface Interface {
   readonly streamFn: StreamFn;
+  readonly tools?: ReadonlyArray<AgentTool<any>> | undefined;
 }
 
 export class Service extends Context.Service<Service, Interface>()("@denora/server/PiRuntime") {}

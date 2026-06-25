@@ -1,0 +1,152 @@
+/**
+ * Shared helpers for persistence adapter implementations.
+ *
+ * These pure functions are consumed by the built-in SQLite adapter, the
+ * Postgres adapter (`@flue/postgres`), and any future community adapters
+ * via `@flue/runtime/adapter`.
+ *
+ * All functions operate on plain values — no database driver types.
+ */
+
+import * as v from 'valibot';
+import type { AgentSubmission } from './agent-execution-store.ts';
+import { DirectAgentPayloadSchema } from './runtime/schemas.ts';
+import { createSessionStorageKey } from './session-identity.ts';
+
+/**
+ * Agent-mode submissions (HTTP and dispatch) always target the
+ * default harness. Named harnesses exist for multi-harness workflows
+ * (for example, named internal scopes), but external submissions do
+ * not select a harness — they implicitly use `'default'`.
+ *
+ * Exported for adapter implementations that construct session storage keys.
+ */
+export const SUBMISSION_HARNESS_NAME = 'default';
+
+/**
+ * Agent-mode submissions always target the default session of the
+ * default harness; external submissions cannot select a session.
+ *
+ * Exported for adapter implementations that construct session storage keys.
+ */
+export const SUBMISSION_SESSION_NAME = 'default';
+
+// ─── Payload validation ─────────────────────────────────────────────────────
+
+/**
+ * Context needed for submission payload validation.
+ *
+ * Adapters extract these fields from their storage-specific row/document
+ * type before calling {@link isSubmissionPayload}.
+ */
+export interface SubmissionPayloadContext {
+	readonly kind: string;
+	readonly submissionId: string;
+	readonly sessionKey: string;
+	readonly acceptedAt: number;
+}
+
+/**
+ * Validate that a parsed JSON payload matches the expected submission shape.
+ *
+ * Used after `JSON.parse(payload)` to verify the deserialized object is a
+ * well-formed `AgentSubmissionInput` that is consistent with the stored
+ * submission metadata.
+ */
+export function isSubmissionPayload(
+	input: unknown,
+	ctx: SubmissionPayloadContext,
+): input is AgentSubmission['input'] {
+	if (!input || typeof input !== 'object') return false;
+	const value = input as Record<string, unknown>;
+	if (value.kind !== ctx.kind || value.submissionId !== ctx.submissionId) return false;
+	if (value.kind === 'dispatch') {
+		return (
+			typeof value.dispatchId === 'string' &&
+			value.dispatchId === value.submissionId &&
+			typeof value.agent === 'string' &&
+			typeof value.id === 'string' &&
+			createSessionStorageKey(
+				value.id as string,
+				SUBMISSION_HARNESS_NAME,
+				SUBMISSION_SESSION_NAME,
+			) === ctx.sessionKey &&
+			typeof value.acceptedAt === 'string' &&
+			Date.parse(value.acceptedAt as string) === ctx.acceptedAt &&
+			'input' in value &&
+			value.input !== undefined
+		);
+	}
+	return (
+		typeof value.agent === 'string' &&
+		typeof value.id === 'string' &&
+		createSessionStorageKey(
+			value.id as string,
+			SUBMISSION_HARNESS_NAME,
+			SUBMISSION_SESSION_NAME,
+		) === ctx.sessionKey &&
+		typeof value.acceptedAt === 'string' &&
+		Date.parse(value.acceptedAt as string) === ctx.acceptedAt &&
+		v.safeParse(DirectAgentPayloadSchema, value.payload).success
+	);
+}
+
+// ─── Timestamp parsing ──────────────────────────────────────────────────────
+
+/**
+ * Parse an ISO timestamp string into epoch milliseconds.
+ * Throws with a `[flue]` error if the value is not a finite number.
+ */
+export function parseAcceptedAt(value: string, label: string): number {
+	const acceptedAt = Date.parse(value);
+	if (!Number.isFinite(acceptedAt)) {
+		throw new Error(`[flue] Internal ${label} received an invalid acceptedAt timestamp.`);
+	}
+	return acceptedAt;
+}
+
+// ─── Session deletion deduplication ─────────────────────────────────────────
+
+/**
+ * Deduplicate concurrent `deleteSession` calls for the same session key.
+ *
+ * If a deletion is already in progress for the given key, returns the
+ * existing promise. Otherwise, calls `runDeletion` and tracks the result.
+ * The tracking entry is removed after the promise settles (success or failure).
+ */
+export function deduplicateSessionDeletion(
+	pending: Map<string, Promise<void>>,
+	sessionKey: string,
+	runDeletion: () => Promise<void>,
+): Promise<void> {
+	const existing = pending.get(sessionKey);
+	if (existing) return existing;
+	const deletion = runDeletion();
+	pending.set(sessionKey, deletion);
+	const clear = () => {
+		if (pending.get(sessionKey) === deletion) {
+			pending.delete(sessionKey);
+		}
+	};
+	void deletion.then(clear, clear);
+	return deletion;
+}
+
+// ─── Limit clamping ──────────────────────────────────────────────────────────
+
+/**
+ * Clamp a caller-supplied page/chunk limit to a safe range.
+ *
+ * Invalid, non-finite, and non-positive values fall back to `defaultLimit`;
+ * valid values are capped at `maxLimit`. Used by run listings
+ * (`DEFAULT_LIST_LIMIT`/`MAX_LIST_LIMIT`) and event stream reads
+ * (`DEFAULT_READ_LIMIT`/`MAX_READ_LIMIT`).
+ */
+export function clampLimit(
+	limit: number | undefined,
+	defaultLimit: number,
+	maxLimit: number,
+): number {
+	if (!limit || !Number.isFinite(limit) || limit <= 0) return defaultLimit;
+	return Math.min(limit, maxLimit);
+}

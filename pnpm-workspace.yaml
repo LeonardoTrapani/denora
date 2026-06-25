@@ -1,0 +1,25 @@
+packages: [packages/*, examples/*, apps/*]
+allowBuilds:
+  '@google/genai': false
+  '@mongodb-js/zstd': false
+  braintrust: false
+  core-js-pure: false
+  esbuild: false
+  msgpackr-extract: true
+  node-liblzma: false
+  protobufjs: false
+  # Required by Astro support in apps/www.
+  sharp: true
+  workerd: false
+minimumReleaseAge: 1440
+resolutionMode: highest
+minimumReleaseAgeExclude:
+  - '@ai-sdk/*'
+  - '@earendil-works/pi-ai'
+  - '@earendil-works/pi-agent-core'
+  - '@aws-sdk/*'
+  - '@smithy/*'
+  - ai
+  - protobufjs
+  - react
+  - react-dom

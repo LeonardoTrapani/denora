@@ -1,0 +1,13 @@
+{
+	"name": "assistant",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@cloudflare/sandbox": "*",
+		"@flue/runtime": "workspace:*",
+		"agents": "^0.14.2"
+	},
+	"devDependencies": {
+		"@flue/cli": "workspace:*"
+	}
+}

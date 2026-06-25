@@ -1,0 +1,42 @@
+{
+	"$schema": "https://turbo.build/schema.json",
+	"globalEnv": [
+		"ANTHROPIC_API_KEY",
+		"GITHUB_TOKEN",
+		"GITHUB_WEBHOOK_SECRET",
+		"ASTRO_REPO",
+		"ASTRO_BRANCH"
+	],
+	"globalPassThroughEnv": [
+		"NODE_EXTRA_CA_CERTS",
+		"SSL_CERT_FILE",
+		"REQUESTS_CA_BUNDLE",
+		"CARGO_HTTP_CAINFO"
+	],
+	"tasks": {
+		"dev": {
+			"persistent": true,
+			"cache": false
+		},
+		"build": {
+			"dependsOn": ["^build"]
+		},
+		"apps-www#build": {
+			"dependsOn": ["^build"],
+			"inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/blueprints/**"]
+		},
+		"//#check:lint": {},
+		"check:types": {
+			"dependsOn": ["build", "^build", "^check:types"],
+			"outputLogs": "errors-only"
+		},
+		"test": {
+			"dependsOn": ["build", "^build"],
+			"outputLogs": "new-only"
+		},
+		"//#format:lint": {},
+		"//#format:style": {
+			"dependsOn": ["format:lint"]
+		}
+	}
+}

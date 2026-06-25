@@ -21,6 +21,9 @@ import {
 import { SqlStorage } from "./SqlStorage.ts";
 import { handleConversationObjectRequest, internalErrorResponse } from "./StreamProtocol.ts";
 
+const AGENT_RUN_RECONCILE_EVENT_ID = "agent-run:reconcile";
+const AGENT_RUN_RECONCILE_RETRY_DELAY_MS = 30_000;
+
 export interface Shape {
   readonly abortConversation: (input?: {
     readonly reason?: string | undefined;
@@ -75,7 +78,8 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
             abortConversation: (input?: { readonly reason?: string | undefined }) =>
               Effect.gen(function* () {
                 const result = yield* coordinator.abortConversation(input);
-                if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
+                if (result.needsWake)
+                  yield* scheduleAgentRunReconcile(state, result.wakeDelayMs, "abort_conversation");
                 return result;
               }),
             setConversationLifecycle: (input: {
@@ -84,7 +88,12 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
             }) =>
               Effect.gen(function* () {
                 const result = yield* coordinator.setConversationLifecycle(input);
-                if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
+                if (result.needsWake)
+                  yield* scheduleAgentRunReconcile(
+                    state,
+                    result.wakeDelayMs,
+                    "conversation_lifecycle",
+                  );
                 return result;
               }),
             submitMessage: (input: CreateConversationSubmissionInput) =>
@@ -96,20 +105,22 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
                     input.submissionId,
                     coordinator,
                     pi,
-                    (delayMs) => scheduleRunAlarm(state, delayMs),
+                    (delayMs) => scheduleAgentRunReconcile(state, delayMs, "wait_for_result"),
                   );
                   return { ...created, result };
                 }
-                if (created.created || admission.admitted) yield* scheduleRunAlarm(state);
+                if (created.created || admission.admitted)
+                  yield* scheduleAgentRunReconcile(state, 0, "submission_admitted");
                 return created;
               }),
             alarm: () =>
               Effect.gen(function* () {
-                const result = yield* coordinator.reconcile({
-                  pi,
-                  scheduleWake: (delayMs) => scheduleRunAlarm(state, delayMs),
-                });
-                if (result.needsWake) yield* scheduleRunAlarm(state, result.wakeDelayMs);
+                const fired = yield* Cloudflare.processScheduledEvents.pipe(
+                  Effect.provideService(Cloudflare.DurableObjectState, state),
+                );
+                if (fired.some((event) => event.id === AGENT_RUN_RECONCILE_EVENT_ID)) {
+                  yield* reconcileAgentConversation(state, coordinator, pi);
+                }
               }),
             fetch: Effect.gen(function* () {
               const request = yield* HttpServerRequest.HttpServerRequest;
@@ -135,18 +146,54 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
   ),
 );
 
-const durableObjectStorageFailure =
+const alchemySchedulerFailure =
   (operation: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, EventStorageFailed, R> =>
     effect.pipe(Effect.mapError((cause) => new EventStorageFailed({ operation, cause })));
 
-const scheduleRunAlarm = (
+const scheduleAgentRunReconcile = (
   state: Cloudflare.DurableObjectState["Service"],
   delayMs = 0,
+  reason: AgentRunReconcileReason,
 ): Effect.Effect<void, EventStorageFailed> =>
-  state.storage
-    .setAlarm(Date.now() + delayMs)
-    .pipe(durableObjectStorageFailure("schedule agent conversation alarm"));
+  Cloudflare.scheduleEvent(AGENT_RUN_RECONCILE_EVENT_ID, new Date(Date.now() + delayMs), {
+    type: "agent-run/reconcile",
+    reason,
+  } satisfies AgentRunReconcileEventPayload).pipe(
+    Effect.provideService(Cloudflare.DurableObjectState, state),
+    alchemySchedulerFailure("schedule agent run reconcile event"),
+  );
+
+const cancelAgentRunReconcile = (
+  state: Cloudflare.DurableObjectState["Service"],
+): Effect.Effect<void, EventStorageFailed> =>
+  Cloudflare.cancelEvent(AGENT_RUN_RECONCILE_EVENT_ID).pipe(
+    Effect.provideService(Cloudflare.DurableObjectState, state),
+    alchemySchedulerFailure("cancel agent run reconcile event"),
+  );
+
+const reconcileAgentConversation = Effect.fn("AgentConversationObject.reconcileAgentConversation")(
+  function* (
+    state: Cloudflare.DurableObjectState["Service"],
+    coordinator: AgentConversationCoordinatorInterface,
+    pi: PiRuntime.Interface,
+  ): Effect.fn.Return<void, EventStreamError> {
+    yield* scheduleAgentRunReconcile(
+      state,
+      AGENT_RUN_RECONCILE_RETRY_DELAY_MS,
+      "alarm_reconcile_retry",
+    );
+    const result = yield* coordinator.reconcile({
+      pi,
+      scheduleWake: (delayMs) => scheduleAgentRunReconcile(state, delayMs, "coordinator_wake"),
+    });
+    if (result.needsWake) {
+      yield* scheduleAgentRunReconcile(state, result.wakeDelayMs, "coordinator_result");
+      return;
+    }
+    yield* cancelAgentRunReconcile(state);
+  },
+);
 
 const waitForSubmissionResult = Effect.fn("AgentConversationObject.waitForSubmissionResult")(
   function* (
@@ -175,5 +222,19 @@ const terminalResult = (event: unknown): unknown => {
   }
   return null;
 };
+
+type AgentRunReconcileReason =
+  | "abort_conversation"
+  | "alarm_reconcile_retry"
+  | "conversation_lifecycle"
+  | "coordinator_result"
+  | "coordinator_wake"
+  | "submission_admitted"
+  | "wait_for_result";
+
+interface AgentRunReconcileEventPayload {
+  readonly type: "agent-run/reconcile";
+  readonly reason: AgentRunReconcileReason;
+}
 
 export * as AgentConversationObjectModule from "./AgentConversationObject.ts";

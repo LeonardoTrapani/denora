@@ -214,10 +214,13 @@ const conversationEventsUrl = (conversationId: string) => {
   return new URL(`/conversations/${encodeURIComponent(conversationId)}/events`, `${baseUrl}/`);
 };
 
-const fetchWithCredentials: typeof globalThis.fetch = async (input, init) => {
-  const headers = await withAuthForwardingHeaders(init?.headers);
-  return fetch(input, { ...init, headers, credentials: "include" });
-};
+const fetchWithCredentials = Object.assign(
+  async (...[input, init]: Parameters<typeof globalThis.fetch>): Promise<Response> => {
+    const headers = await withAuthForwardingHeaders(init?.headers);
+    return fetch(input, { ...init, headers, credentials: "include" });
+  },
+  { preconnect: globalThis.fetch.preconnect },
+) satisfies typeof globalThis.fetch;
 
 const linkAbortSignal = (
   signal: AbortSignal | undefined,

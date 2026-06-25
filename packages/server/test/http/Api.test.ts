@@ -50,10 +50,11 @@ const waitForConversationEvent = (
   client: HttpClient.HttpClient,
   conversationId: string,
   agentName = "default",
+  path = `/agents/${agentName}/${conversationId}`,
 ) =>
   Effect.gen(function* () {
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      const response = yield* client.get(`/agents/${agentName}/${conversationId}`, {
+      const response = yield* client.get(path, {
         headers: { cookie: "denora_session=valid" },
       });
       const events = (yield* response.json) as ReadonlyArray<Record<string, unknown>>;
@@ -155,7 +156,11 @@ describe("Api http surface", () => {
           readonly offset: string;
         };
         assert.strictEqual(createdBody.conversationId, conversationId);
-        assert.strictEqual(createdBody.streamPath, `agents/default/${conversationId}`);
+        assert.strictEqual(createdBody.streamPath, `conversations/${conversationId}`);
+        assert.strictEqual(
+          new URL(createdBody.streamUrl).pathname,
+          `/conversations/${conversationId}/events`,
+        );
         assert.strictEqual(createdBody.offset, "-1");
         assert.strictEqual(created.headers.location, createdBody.streamUrl);
         assert.strictEqual(created.headers["stream-next-offset"], createdBody.offset);
@@ -163,6 +168,8 @@ describe("Api http surface", () => {
         const { response: replay, events } = yield* waitForConversationEvent(
           client,
           conversationId,
+          "default",
+          `/conversations/${conversationId}/events`,
         );
         assert.strictEqual(replay.status, 200);
         assert.strictEqual(events[0]?.type, "message_start");

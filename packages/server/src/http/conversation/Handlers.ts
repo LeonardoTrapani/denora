@@ -64,7 +64,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           messageId: submitted.messageId,
           submissionId: submitted.submissionId,
           runId: submitted.runId,
-          streamPath: submitted.streamPath,
+          streamPath: `conversations/${submitted.conversationId}`,
           streamUrl: streamUrl(request, submitted.conversationId),
           offset: submitted.offset,
         });
@@ -120,7 +120,7 @@ const streamUrl = (
   request: HttpServerRequest.HttpServerRequest,
   conversationId: string,
 ): string => {
-  const path = `/agents/default/${encodeURIComponent(conversationId)}`;
+  const path = `/conversations/${encodeURIComponent(conversationId)}/events`;
   const url = HttpServerRequest.toURL(request);
   if (Option.isNone(url)) return path;
   const next = new URL(url.value.toString());

@@ -92,6 +92,7 @@
       "dependencies": {
         "@denora/server": "workspace:*",
         "@denora/ui": "workspace:*",
+        "@durable-streams/client": "^0.2.6",
         "@tailwindcss/vite": "^4",
         "@tanstack/react-query": "^5.95.2",
         "@tanstack/react-router": "^1.170.15",
@@ -287,6 +288,8 @@
 
     "@drizzle-team/brocli": ["@drizzle-team/brocli@0.11.0", "", {}, "sha512-hD3pekGiPg0WPCCGAZmusBBJsDqGUR66Y452YgQsZOnkdQ7ViEPKuyP4huUGEZQefp8g34RRodXYmJ2TbCH+tg=="],
 
+    "@durable-streams/client": ["@durable-streams/client@0.2.6", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1", "fastq": "^1.19.1" }, "bin": { "intent": "bin/intent.js" } }, "sha512-uHKKbWpsKLhFMeGjG0PgM6LXE3oEIi7FHKlJZkmYGxcqd4Yjjd/QEvnQnDzteRP4Av1uJVM8qjTL7kfKsgeS/w=="],
+
     "@earendil-works/pi-agent-core": ["@earendil-works/pi-agent-core@0.79.10", "", { "dependencies": { "@earendil-works/pi-ai": "^0.79.10", "ignore": "7.0.5", "typebox": "1.1.38", "yaml": "2.9.0" } }, "sha512-XKxgdjhcPuyjrthCOFSgfzT3xZ1uBrJ1IMVDxci1to6hIN6BIg9J5iY8q0pGXK1DLgATLP23da+1UyZLwA360Q=="],
 
     "@earendil-works/pi-ai": ["@earendil-works/pi-ai@0.79.10", "", { "dependencies": { "@anthropic-ai/sdk": "0.91.1", "@aws-sdk/client-bedrock-runtime": "3.1048.0", "@google/genai": "1.52.0", "@mistralai/mistralai": "2.2.6", "@opentelemetry/api": "1.9.0", "@smithy/node-http-handler": "4.7.3", "http-proxy-agent": "7.0.2", "https-proxy-agent": "7.0.6", "openai": "6.26.0", "partial-json": "0.1.7", "typebox": "1.1.38" }, "bin": { "pi-ai": "dist/cli.js" } }, "sha512-9jR23tOl0BIUdQMn70Gr72xYBpM7Xgl9Lyv7gAnU1USfkNRuYG/f/edLl+n/Dp/RafDW3JI4DF7y/GhgkORuew=="],
@@ -458,6 +461,8 @@
     "@libsql/linux-x64-musl": ["@libsql/linux-x64-musl@0.5.29", "", { "os": "linux", "cpu": "x64" }, "sha512-gquqwA/39tH4pFl+J9n3SOMSymjX+6kZ3kWgY3b94nXFTwac9bnFNMffIomgvlFaC4ArVqMnOZD3nuJ3H3VO1w=="],
 
     "@libsql/win32-x64-msvc": ["@libsql/win32-x64-msvc@0.5.29", "", { "os": "win32", "cpu": "x64" }, "sha512-4/0CvEdhi6+KjMxMaVbFM2n2Z44escBRoEYpR+gZg64DdetzGnYm8mcNLcoySaDJZNaBd6wz5DNdgRmcI4hXcg=="],
+
+    "@microsoft/fetch-event-source": ["@microsoft/fetch-event-source@2.0.1", "", {}, "sha512-W6CLUJ2eBMw3Rec70qrsEW0jOm/3twwJv21mrmj2yORiaVmVYGS4sSS5yUwvQc1ZlDLYGPnClVWmUUMagKNsfA=="],
 
     "@mistralai/mistralai": ["@mistralai/mistralai@2.2.6", "", { "dependencies": { "@opentelemetry/semantic-conventions": "^1.40.0", "ws": "^8.18.0", "zod": "^3.25.0 || ^4.0.0", "zod-to-json-schema": "^3.25.0" }, "peerDependencies": { "@opentelemetry/api": "^1.9.0" }, "optionalPeers": ["@opentelemetry/api"] }, "sha512-W8pX7zHxjJvMIpw8JMxeJEleapXX0Q9NPszdNzqkM3MIEoIGPObdodujj+WHteXEvGfaP/AMwlNyRfEzSY6dQQ=="],
 

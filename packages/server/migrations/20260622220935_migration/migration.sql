@@ -2,7 +2,7 @@ CREATE TYPE "agent_run_status" AS ENUM('queued', 'running', 'completed', 'failed
 --> statement-breakpoint
 CREATE TYPE "conversation_message_role" AS ENUM('system', 'user', 'assistant', 'tool', 'event');
 --> statement-breakpoint
-CREATE TYPE "conversation_status" AS ENUM('active', 'archiving', 'archived', 'deleting', 'deleted');
+CREATE TYPE "conversation_status" AS ENUM('active', 'archived');
 --> statement-breakpoint
 CREATE TABLE "agent_runs" (
 	"id" text PRIMARY KEY,

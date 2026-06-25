@@ -10,6 +10,56 @@ import * as Database from "../helpers/Database.ts";
 const persistenceLayer = ConversationPersistence.layer.pipe(Layer.provideMerge(Database.dbLayer));
 
 describe("ConversationPersistence", () => {
+  it.effect("archives and deletes conversations through semantic lifecycle methods", () =>
+    Effect.gen(function* () {
+      const persistence = yield* ConversationPersistence.Service;
+      const conversationId = `conversation_${crypto.randomUUID()}`;
+
+      yield* persistence.createConversation({ conversationId, userId: "user_1" });
+      const archived = yield* persistence.archiveConversation({ conversationId, userId: "user_1" });
+      const archivedAgain = yield* persistence.archiveConversation({
+        conversationId,
+        userId: "user_1",
+      });
+      const deleted = yield* persistence.deleteConversation({ conversationId, userId: "user_1" });
+      const archiveAfterDelete = yield* persistence.archiveConversation({
+        conversationId,
+        userId: "user_1",
+      });
+      const deleteAgain = yield* persistence.deleteConversation({
+        conversationId,
+        userId: "user_1",
+      });
+
+      assert.strictEqual(archived.status, "archived");
+      assert.isString(archived.archivedAt);
+      assert.strictEqual(archivedAgain.status, "archived");
+      assert.strictEqual(archivedAgain.archivedAt, archived.archivedAt);
+      assert.strictEqual(deleted.status, "deleted");
+      assert.strictEqual(archiveAfterDelete.status, "deleted");
+      assert.strictEqual(deleteAgain.status, "deleted");
+    }).pipe(Effect.provide(persistenceLayer)),
+  );
+
+  it.effect("rejects new submissions after a conversation is archived", () =>
+    Effect.gen(function* () {
+      const persistence = yield* ConversationPersistence.Service;
+      const conversationId = `conversation_${crypto.randomUUID()}`;
+
+      yield* persistence.createConversation({ conversationId, userId: "user_1" });
+      const archived = yield* persistence.archiveConversation({ conversationId, userId: "user_1" });
+
+      const error = yield* persistence
+        .submitMessage({ conversationId, userId: "user_1", message: "hello" })
+        .pipe(Effect.flip);
+
+      assert.strictEqual(archived.status, "archived");
+      assert.strictEqual(error._tag, "ConversationNotActive");
+      if (error._tag !== "ConversationNotActive") return;
+      assert.strictEqual(error.status, "archived");
+    }).pipe(Effect.provide(persistenceLayer)),
+  );
+
   it.effect("rejects new submissions after a conversation starts deleting", () =>
     Effect.gen(function* () {
       const persistence = yield* ConversationPersistence.Service;

@@ -123,6 +123,14 @@ export interface Interface {
     readonly userId: string;
     readonly status: ConversationLifecycleState;
   }) => Effect.Effect<ConversationRecord, ConversationRequestFailed>;
+  readonly archiveConversation: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+  }) => Effect.Effect<ConversationRecord, ConversationRequestFailed>;
+  readonly deleteConversation: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+  }) => Effect.Effect<ConversationRecord, ConversationRequestFailed>;
   readonly streamRequest: (
     agentName: string,
     conversationId: string,
@@ -207,6 +215,34 @@ export const layer = (
                 .setConversationLifecycle({
                   conversationId: input.conversationId,
                   status: input.status,
+                })
+                .pipe(Effect.as(updated)),
+            ),
+            Effect.mapError(conversationRequestFailed),
+            Effect.catchCause(conversationRequestFailedFromCause),
+          ),
+        archiveConversation: (input) =>
+          persistence.archiveConversation(input).pipe(
+            Effect.flatMap((updated) =>
+              objects
+                .getByName(input.conversationId)
+                .setConversationLifecycle({
+                  conversationId: input.conversationId,
+                  status: updated.status,
+                })
+                .pipe(Effect.as(updated)),
+            ),
+            Effect.mapError(conversationRequestFailed),
+            Effect.catchCause(conversationRequestFailedFromCause),
+          ),
+        deleteConversation: (input) =>
+          persistence.deleteConversation(input).pipe(
+            Effect.flatMap((updated) =>
+              objects
+                .getByName(input.conversationId)
+                .setConversationLifecycle({
+                  conversationId: input.conversationId,
+                  status: updated.status,
                 })
                 .pipe(Effect.as(updated)),
             ),
@@ -304,6 +340,18 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
             conversation = createInMemoryConversation({
               userId: input.userId,
               conversationId: input.conversationId,
+            });
+          }
+          if (conversation.ownerUserId !== input.userId) {
+            return yield* new ConversationRequestFailed({
+              reason: "conversation_not_authorized",
+              message: "Conversation is not available for the authenticated user.",
+            });
+          }
+          if (conversation.status !== "active") {
+            return yield* new ConversationRequestFailed({
+              reason: "conversation_not_active",
+              message: `Conversation is ${conversation.status} and cannot accept new messages.`,
             });
           }
           const existingMessages = messages.get(input.conversationId) ?? [];
@@ -410,6 +458,16 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
           conversations.set(input.conversationId, updated);
           return updated;
         }),
+      archiveConversation: (input) =>
+        Effect.gen(function* () {
+          const existing = conversations.get(input.conversationId);
+          return yield* updateInMemoryLifecycle(
+            input,
+            archiveTargetStatus(existing?.status ?? "active"),
+            conversations,
+          );
+        }),
+      deleteConversation: (input) => updateInMemoryLifecycle(input, "deleted", conversations),
       streamRequest: (_agentName, _conversationId, _userId, request) =>
         Effect.gen(function* () {
           const webRequest = yield* HttpServerRequest.toWeb(request);
@@ -436,6 +494,45 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
     });
   }),
 );
+
+const updateInMemoryLifecycle = (
+  input: { readonly conversationId: string; readonly userId: string },
+  status: ConversationLifecycleState,
+  conversations: Map<string, ConversationRecord>,
+): Effect.Effect<ConversationRecord, ConversationRequestFailed> =>
+  Effect.gen(function* () {
+    const existing = conversations.get(input.conversationId);
+    if (existing === undefined || existing.ownerUserId !== input.userId) {
+      return yield* new ConversationRequestFailed({
+        reason: "conversation_not_authorized",
+        message: "Conversation is not available for the authenticated user.",
+      });
+    }
+    const timestamp = new Date().toISOString();
+    const updated = {
+      ...existing,
+      status,
+      updatedAt: timestamp,
+      archivedAt:
+        status === "archiving" || status === "archived"
+          ? (existing.archivedAt ?? timestamp)
+          : existing.archivedAt,
+    };
+    conversations.set(input.conversationId, updated);
+    return updated;
+  });
+
+const archiveTargetStatus = (status: ConversationLifecycleState): ConversationLifecycleState => {
+  switch (status) {
+    case "deleting":
+    case "deleted":
+      return status;
+    case "active":
+    case "archiving":
+    case "archived":
+      return "archived";
+  }
+};
 
 const conversationRequestFailed = (
   error: EventStreamError | ConversationPersistence.Error,

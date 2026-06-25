@@ -12,54 +12,114 @@ import * as Database from "../helpers/Database.ts";
 import { SqliteStorage } from "../helpers/SqliteStorage.ts";
 
 describe("Conversations", () => {
-  it.effect("propagates persisted inactive lifecycle to the conversation coordinator", () =>
-    Effect.gen(function* () {
-      const conversations = yield* Conversations.Service;
-      const coordinator = yield* AgentConversationCoordinator.Service;
-      const store = yield* EventStreamStoreModule.Service;
-      const conversationId = `conversation_${crypto.randomUUID()}`;
-      const input = {
-        agentName: "default",
-        conversationId,
-        input: { userId: "user_1", submittedMessage: { text: "queued before delete" } },
-        runId: "run_queued_before_delete",
-        submissionId: "submission_queued_before_delete",
-        triggerMessageId: "message_queued_before_delete",
-        userId: "user_1",
-      };
+  it.effect(
+    "archives a conversation through the public service and propagates to the coordinator",
+    () =>
+      Effect.gen(function* () {
+        const conversations = yield* Conversations.Service;
+        const coordinator = yield* AgentConversationCoordinator.Service;
+        const store = yield* EventStreamStoreModule.Service;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+        const input = {
+          agentName: "default",
+          conversationId,
+          input: { userId: "user_1", submittedMessage: { text: "queued before delete" } },
+          runId: "run_queued_before_delete",
+          submissionId: "submission_queued_before_delete",
+          triggerMessageId: "message_queued_before_delete",
+          userId: "user_1",
+        };
 
-      yield* conversations.createConversation({ conversationId, userId: "user_1" });
-      yield* coordinator.admitSubmission(input);
-      yield* AgentRunLifecycle.createConversationSubmission(store, input);
+        yield* conversations.createConversation({ conversationId, userId: "user_1" });
+        yield* coordinator.admitSubmission(input);
+        yield* AgentRunLifecycle.createConversationSubmission(store, input);
 
-      const updated = yield* conversations.setConversationLifecycle({
-        conversationId,
-        userId: "user_1",
-        status: "deleted",
-      });
-      const terminal = yield* coordinator.getSubmissionTerminal(input.submissionId);
-      const event = terminal?.event as {
-        readonly outcome?: unknown;
-        readonly error?: { readonly message?: string };
-      };
-      const rejected = yield* coordinator
-        .admitSubmission({
-          ...input,
-          runId: "run_after_delete",
-          submissionId: "submission_after_delete",
-        })
-        .pipe(Effect.flip);
+        const updated = yield* conversations.archiveConversation({
+          conversationId,
+          userId: "user_1",
+        });
+        const repeated = yield* conversations.archiveConversation({
+          conversationId,
+          userId: "user_1",
+        });
+        const terminal = yield* coordinator.getSubmissionTerminal(input.submissionId);
+        const event = terminal?.event as {
+          readonly outcome?: unknown;
+          readonly error?: { readonly message?: string };
+        };
+        const rejected = yield* coordinator
+          .admitSubmission({
+            ...input,
+            runId: "run_after_delete",
+            submissionId: "submission_after_delete",
+          })
+          .pipe(Effect.flip);
 
-      assert.strictEqual(updated.status, "deleted");
-      assert.strictEqual(event.outcome, "failed");
-      assert.strictEqual(
-        event.error?.message,
-        `Conversation ${conversationId} is deleted; agent submissions are not accepted.`,
-      );
-      assert.strictEqual(rejected._tag, "EventStorageFailed");
-      if (rejected._tag !== "EventStorageFailed") return;
-      assert.strictEqual(rejected.operation, "admit agent conversation submission");
-    }).pipe(Effect.provide(conversationsIntegrationLayer)),
+        assert.strictEqual(updated.status, "archived");
+        assert.strictEqual(repeated.status, "archived");
+        assert.strictEqual(event.outcome, "failed");
+        assert.strictEqual(
+          event.error?.message,
+          `Conversation ${conversationId} is archived; agent submissions are not accepted.`,
+        );
+        assert.strictEqual(rejected._tag, "EventStorageFailed");
+        if (rejected._tag !== "EventStorageFailed") return;
+        assert.strictEqual(rejected.operation, "admit agent conversation submission");
+      }).pipe(Effect.provide(conversationsIntegrationLayer)),
+  );
+
+  it.effect(
+    "deletes a conversation through the public service and propagates to the coordinator",
+    () =>
+      Effect.gen(function* () {
+        const conversations = yield* Conversations.Service;
+        const coordinator = yield* AgentConversationCoordinator.Service;
+        const store = yield* EventStreamStoreModule.Service;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+        const input = {
+          agentName: "default",
+          conversationId,
+          input: { userId: "user_1", submittedMessage: { text: "queued before delete" } },
+          runId: "run_queued_before_delete",
+          submissionId: "submission_queued_before_delete",
+          triggerMessageId: "message_queued_before_delete",
+          userId: "user_1",
+        };
+
+        yield* conversations.createConversation({ conversationId, userId: "user_1" });
+        yield* coordinator.admitSubmission(input);
+        yield* AgentRunLifecycle.createConversationSubmission(store, input);
+
+        const updated = yield* conversations.deleteConversation({
+          conversationId,
+          userId: "user_1",
+        });
+        const repeated = yield* conversations.deleteConversation({
+          conversationId,
+          userId: "user_1",
+        });
+        const terminal = yield* coordinator.getSubmissionTerminal(input.submissionId);
+        const event = terminal?.event as {
+          readonly outcome?: unknown;
+          readonly error?: { readonly message?: string };
+        };
+        const rejected = yield* coordinator
+          .admitSubmission({
+            ...input,
+            runId: "run_after_delete",
+            submissionId: "submission_after_delete",
+          })
+          .pipe(Effect.flip);
+
+        assert.strictEqual(updated.status, "deleted");
+        assert.strictEqual(repeated.status, "deleted");
+        assert.strictEqual(event.outcome, "failed");
+        assert.strictEqual(
+          event.error?.message,
+          `Conversation ${conversationId} is deleted; agent submissions are not accepted.`,
+        );
+        assert.strictEqual(rejected._tag, "EventStorageFailed");
+      }).pipe(Effect.provide(conversationsIntegrationLayer)),
   );
 });
 

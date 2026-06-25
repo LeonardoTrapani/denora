@@ -253,6 +253,94 @@ describe("Api http surface", () => {
       }).pipe(Effect.provide(appLayer())),
     );
 
+    it.effect("archives a conversation and rejects later submissions", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+
+        const created = yield* client.execute(
+          HttpClientRequest.post("/conversations").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ conversationId }),
+          ),
+        );
+        assert.strictEqual(created.status, 200);
+
+        const archived = yield* client.execute(
+          HttpClientRequest.post(`/conversations/${conversationId}/archive`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+          ),
+        );
+        const archivedAgain = yield* client.execute(
+          HttpClientRequest.post(`/conversations/${conversationId}/archive`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+          ),
+        );
+        const rejected = yield* client.execute(
+          HttpClientRequest.post(`/conversations/${conversationId}/messages`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ message: "must fail" }),
+          ),
+        );
+
+        assert.strictEqual(archived.status, 200);
+        assert.strictEqual(
+          ((yield* archived.json) as { readonly status?: string }).status,
+          "archived",
+        );
+        assert.strictEqual(archivedAgain.status, 200);
+        assert.strictEqual(
+          ((yield* archivedAgain.json) as { readonly status?: string }).status,
+          "archived",
+        );
+        assert.strictEqual(rejected.status, 500);
+      }).pipe(Effect.provide(appLayer())),
+    );
+
+    it.effect("deletes a conversation and rejects later submissions", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const conversationId = `conversation_${crypto.randomUUID()}`;
+
+        const created = yield* client.execute(
+          HttpClientRequest.post("/conversations").pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ conversationId }),
+          ),
+        );
+        assert.strictEqual(created.status, 200);
+
+        const deleted = yield* client.execute(
+          HttpClientRequest.post(`/conversations/${conversationId}/delete`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+          ),
+        );
+        const deletedAgain = yield* client.execute(
+          HttpClientRequest.post(`/conversations/${conversationId}/delete`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+          ),
+        );
+        const rejected = yield* client.execute(
+          HttpClientRequest.post(`/conversations/${conversationId}/messages`).pipe(
+            HttpClientRequest.setHeader("cookie", "denora_session=valid"),
+            HttpClientRequest.bodyJsonUnsafe({ message: "must fail" }),
+          ),
+        );
+
+        assert.strictEqual(deleted.status, 200);
+        assert.strictEqual(
+          ((yield* deleted.json) as { readonly status?: string }).status,
+          "deleted",
+        );
+        assert.strictEqual(deletedAgain.status, 200);
+        assert.strictEqual(
+          ((yield* deletedAgain.json) as { readonly status?: string }).status,
+          "deleted",
+        );
+        assert.strictEqual(rejected.status, 500);
+      }).pipe(Effect.provide(appLayer())),
+    );
+
     it.effect("omits stream location headers for attached-agent wait=result responses", () =>
       Effect.gen(function* () {
         const client = yield* HttpClient.HttpClient;

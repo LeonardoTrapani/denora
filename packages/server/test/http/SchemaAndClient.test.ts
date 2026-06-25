@@ -169,6 +169,8 @@ describe("client: makeDenoraClient (real round-trip)", () => {
       const client = yield* Client.makeDenoraClient(`http://127.0.0.1:${port}`);
       assert.isFunction(client.health);
       assert.isFunction(client.me);
+      assert.isFunction(client.archiveConversation);
+      assert.isFunction(client.deleteConversation);
     }).pipe(Effect.provide(serverLayer)),
   );
 

@@ -91,6 +91,28 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
         });
         return new AbortConversationResponse({ abortedSubmissions: result.abortedSubmissions });
       }),
+    )
+    .handle("archiveConversation", ({ params }) =>
+      Effect.gen(function* () {
+        const user = yield* AuthorizationApi.CurrentUser;
+        const conversations = yield* Conversations.Service;
+        const archived = yield* conversations.archiveConversation({
+          conversationId: params.conversationId,
+          userId: user.id,
+        });
+        return new Conversation(archived);
+      }),
+    )
+    .handle("deleteConversation", ({ params }) =>
+      Effect.gen(function* () {
+        const user = yield* AuthorizationApi.CurrentUser;
+        const conversations = yield* Conversations.Service;
+        const deleted = yield* conversations.deleteConversation({
+          conversationId: params.conversationId,
+          userId: user.id,
+        });
+        return new Conversation(deleted);
+      }),
     ),
 );
 

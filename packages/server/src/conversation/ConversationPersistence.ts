@@ -141,6 +141,14 @@ export interface Interface {
     readonly userId: string;
     readonly status: ConversationLifecycleState;
   }) => Effect.Effect<ConversationRecord, Error>;
+  readonly archiveConversation: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+  }) => Effect.Effect<ConversationRecord, Error>;
+  readonly deleteConversation: (input: {
+    readonly conversationId: string;
+    readonly userId: string;
+  }) => Effect.Effect<ConversationRecord, Error>;
   readonly finishRun: (input: FinishRunInput) => Effect.Effect<void, Error>;
   readonly markRunStarted: (runId: string) => Effect.Effect<void, Error>;
 }
@@ -520,6 +528,30 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       },
     );
 
+    const archiveConversation = Effect.fn("ConversationPersistence.archiveConversation")(
+      function* (input: {
+        readonly conversationId: string;
+        readonly userId: string;
+      }): Effect.fn.Return<ConversationRecord, Error> {
+        const existing = yield* findConversation(input.conversationId, input.userId);
+        if (existing === undefined)
+          return yield* new ConversationNotAuthorized({ conversationId: input.conversationId });
+        return yield* setConversationLifecycle({
+          ...input,
+          status: archiveTargetStatus(existing.status),
+        });
+      },
+    );
+
+    const deleteConversation = Effect.fn("ConversationPersistence.deleteConversation")(
+      function* (input: {
+        readonly conversationId: string;
+        readonly userId: string;
+      }): Effect.fn.Return<ConversationRecord, Error> {
+        return yield* setConversationLifecycle({ ...input, status: "deleted" });
+      },
+    );
+
     return Service.of({
       createConversation,
       listConversations,
@@ -528,11 +560,25 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       recordSubmissionStarted,
       authorizeConversation,
       setConversationLifecycle,
+      archiveConversation,
+      deleteConversation,
       markRunStarted,
       finishRun,
     });
   }),
 );
+
+const archiveTargetStatus = (status: ConversationLifecycleState): ConversationLifecycleState => {
+  switch (status) {
+    case "deleting":
+    case "deleted":
+      return status;
+    case "active":
+    case "archiving":
+    case "archived":
+      return "archived";
+  }
+};
 
 const serializeJson = (value: unknown): string | null => JSON.stringify(value) ?? null;
 

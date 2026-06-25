@@ -105,6 +105,20 @@ export class ConversationGroup extends HttpApiGroup.make("Conversation", { topLe
       error: ConversationRequestFailed,
     }),
   )
+  .add(
+    HttpApiEndpoint.post("archiveConversation", "/conversations/:conversationId/archive", {
+      params: ConversationParams,
+      success: Conversation,
+      error: ConversationRequestFailed,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("deleteConversation", "/conversations/:conversationId/delete", {
+      params: ConversationParams,
+      success: Conversation,
+      error: ConversationRequestFailed,
+    }),
+  )
   .middleware(AuthorizationApi.Service) {}
 
 export * as ConversationApi from "./Api.ts";

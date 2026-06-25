@@ -93,8 +93,8 @@ export const createRun = Effect.fn("AgentRunLifecycle.createRun")(function* (
     // Temporary Flue-shaped idempotency until Denora has a real Run registry.
     // Flue backs this with first-writer-wins RunStore records and route-time
     // workflow middleware checks. Here we only know that the stream exists, not
-    // which user/agent/thread owns it. Reference: ~/.local/share/opencode/repos/
-    // github.com/withastro/flue/packages/runtime/src/runtime/run-store.ts.
+    // which user/agent/thread owns it. Reference:
+    // vendor/flue/packages/runtime/src/runtime/run-store.ts.
     return { runId: input.runId, streamPath, offset: existing.nextOffset, created: false };
   }
 

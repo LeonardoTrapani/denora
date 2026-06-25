@@ -266,8 +266,8 @@ export const makeSqliteEventStreamStore = Effect.fn("EventStreamStore.makeSqlite
       // sequence, which is harmless for reads because `readEvents` uses
       // `seq > ?` and naturally skips missing numbers. Shared SQLite files
       // across Node processes need a transactional append implementation before
-      // being supported. Reference: ~/.local/share/opencode/repos/github.com/
-      // withastro/flue/packages/runtime/src/runtime/event-stream-store.ts.
+      // being supported. Reference:
+      // vendor/flue/packages/runtime/src/runtime/event-stream-store.ts.
       const updateCursor = yield* sql
         .exec<UpdateRow>(
           `UPDATE denora_event_streams

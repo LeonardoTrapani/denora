@@ -8,7 +8,7 @@ Bun + Turborepo monorepo for Denora, deployed and developed as a single Alchemy 
 - `alchemy.run.ts` defines the full-stack Alchemy stack.
 - `CONTEXT.md` captures the product direction.
 - `AGENTS.md` captures repository guidance for agents.
-- `opencode.json` configures the `effect-v4` reference repo.
+- `vendor/` contains read-only upstream reference subtrees (`effect-smol`, `alchemy-effect`, and `flue`).
 
 ## Commands
 

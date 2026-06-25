@@ -1,24 +1,12 @@
-import type { AssistantMessageEvent, Context as PiContext, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessageEvent, Context as PiContext } from "@earendil-works/pi-ai";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import { CloudflareAiGatewayModels } from "../../src/agent-loop/CloudflareAiGatewayModels.ts";
 import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
 import { FakeAiGateway } from "../helpers/FakeAiGateway.ts";
 
-const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fast";
-
-const testModel = {
-  id: MODEL_ID,
-  name: MODEL_ID,
-  api: "openai-completions",
-  provider: "cloudflare-workers-ai",
-  baseUrl: "",
-  reasoning: true,
-  input: ["text", "image"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 128_000,
-  maxTokens: 8192,
-} satisfies Model<"openai-completions">;
+const testModel = CloudflareAiGatewayModels.models["workers-ai/@cf/moonshotai/kimi-k2.6"].model;
 
 const emptyContext = { messages: [] } satisfies PiContext;
 

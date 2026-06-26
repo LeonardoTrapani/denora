@@ -20,7 +20,7 @@
     "destroy:dev": "alchemy destroy --stage dev --env-file .env.dev",
     "destroy:staging": "alchemy destroy --stage staging --env-file .env.staging",
     "destroy:prod": "alchemy destroy --stage prod --env-file .env.production",
-    "test": "turbo run test test-types",
+    "test": "turbo run test-types && turbo run test",
     "lint": "oxlint . --ignore-pattern 'vendor/**' --no-error-on-unmatched-pattern",
     "lint:fix": "oxlint --fix . --ignore-pattern 'vendor/**' --no-error-on-unmatched-pattern",
     "fmt": "oxfmt . '!vendor/**'",

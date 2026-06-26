@@ -148,7 +148,9 @@ export const conversationStreamPath = (conversationId: string): string =>
 
 const clampLimit = (limit: number | undefined): number => {
   if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_READ_LIMIT;
-  return Math.max(1, Math.min(Math.trunc(limit), MAX_READ_LIMIT));
+  const truncated = Math.trunc(limit);
+  if (truncated <= 0) return DEFAULT_READ_LIMIT;
+  return Math.min(truncated, MAX_READ_LIMIT);
 };
 
 const storageFailure =

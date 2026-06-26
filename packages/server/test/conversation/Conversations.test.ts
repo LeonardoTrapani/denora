@@ -6,6 +6,7 @@ import { AgentConversationSessionStore } from "../../src/agent-run/AgentConversa
 import { EventStreamStore as EventStreamStoreModule } from "../../src/agent-run/EventStreamStore.ts";
 import { AgentRunLifecycle } from "../../src/agent-run/Lifecycle.ts";
 import { SqlStorage } from "../../src/agent-run/SqlStorage.ts";
+import { StreamChunks } from "../../src/agent-run/StreamChunks.ts";
 import { ConversationPersistence } from "../../src/conversation/ConversationPersistence.ts";
 import { Conversations } from "../../src/conversation/Conversations.ts";
 import * as Database from "../helpers/Database.ts";
@@ -155,6 +156,7 @@ const conversationsIntegrationLayer = conversationsLayer.pipe(
   Layer.provideMerge(AgentConversationCoordinator.sqliteLayer),
   Layer.provideMerge(EventStreamStoreModule.sqliteLayer),
   Layer.provideMerge(AgentConversationSessionStore.sqliteLayer),
+  Layer.provideMerge(StreamChunks.sqliteLayer),
   Layer.provideMerge(ConversationPersistence.layer),
   Layer.provideMerge(Database.dbLayer),
   Layer.provideMerge(sqlStorageLayer),

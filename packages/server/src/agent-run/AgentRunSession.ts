@@ -5,7 +5,7 @@ import {
   type AgentTool,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { CloudflareAiGatewayModels } from "../agent-loop/CloudflareAiGatewayModels.ts";
@@ -14,6 +14,9 @@ import { redactRunEventImages, type RunEvent, toTurnMessage } from "./RunEventCo
 export type { RunEvent } from "./RunEventContract.ts";
 
 export type RunEventCallback = (event: RunEvent) => Effect.Effect<void, unknown>;
+export type AssistantStreamEventCallback = (
+  event: AssistantMessageEvent,
+) => Effect.Effect<void, unknown>;
 
 export type RunCheckpoint =
   | {
@@ -60,6 +63,7 @@ export interface ExecuteInput {
   readonly streamFn: StreamFn;
   readonly tools?: ReadonlyArray<AgentTool<any>> | undefined;
   readonly onAgentEvent: RunEventCallback;
+  readonly onAssistantStreamEvent?: AssistantStreamEventCallback | undefined;
   readonly onCheckpoint?: RunCheckpointCallback | undefined;
   readonly initialAssistantMessageIndex?: number | undefined;
   readonly signal?: AbortSignal | undefined;
@@ -91,6 +95,7 @@ export const execute = Effect.fn("AgentRunSession.execute")(function* (
 class AgentRunSession {
   private readonly agentLoop: Agent;
   private readonly eventCallback: RunEventCallback;
+  private readonly assistantStreamEventCallback: AssistantStreamEventCallback | undefined;
   private readonly checkpointCallback: RunCheckpointCallback | undefined;
   private readonly input: ExecuteInput;
   private activeTurnId: string | undefined;
@@ -105,6 +110,7 @@ class AgentRunSession {
   constructor(input: ExecuteInput) {
     this.input = input;
     this.eventCallback = input.onAgentEvent;
+    this.assistantStreamEventCallback = input.onAssistantStreamEvent;
     this.checkpointCallback = input.onCheckpoint;
     this.nextAssistantMessageIndex = input.initialAssistantMessageIndex ?? 0;
     this.agentLoop = new Agent({
@@ -178,6 +184,7 @@ class AgentRunSession {
       }
       case "message_update": {
         const aEvent = event.assistantMessageEvent;
+        await this.assistantStreamEvent(aEvent);
         if (aEvent.type === "text_delta") {
           await this.emit({ type: "text_delta", text: aEvent.delta });
         } else if (aEvent.type === "text_end") {
@@ -314,6 +321,12 @@ class AgentRunSession {
     return this.checkpointCallback === undefined
       ? Promise.resolve()
       : Effect.runPromise(this.checkpointCallback(checkpoint));
+  }
+
+  private assistantStreamEvent(event: AssistantMessageEvent): Promise<void> {
+    return this.assistantStreamEventCallback === undefined
+      ? Promise.resolve()
+      : Effect.runPromise(this.assistantStreamEventCallback(event));
   }
 
   private assistantMessageIndex(): number {

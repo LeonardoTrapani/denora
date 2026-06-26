@@ -8,7 +8,12 @@ import {
   parseOffset,
   runStreamPath,
 } from "./EventStreamStore.ts";
-import { AgentRunSession, type RunCheckpoint, type RunEvent } from "./AgentRunSession.ts";
+import {
+  AgentRunSession,
+  type AssistantStreamEventCallback,
+  type RunCheckpoint,
+  type RunEvent,
+} from "./AgentRunSession.ts";
 import {
   isBufferedRunEvent,
   isStreamExcludedRunEvent,
@@ -71,6 +76,7 @@ export interface ExecuteConversationSubmissionAttemptInput extends CreateConvers
   readonly onCheckpoint?:
     | ((checkpoint: RunCheckpoint) => Effect.Effect<void, EventStreamError>)
     | undefined;
+  readonly onAssistantStreamEvent?: AssistantStreamEventCallback | undefined;
   readonly initialAssistantMessageIndex?: number | undefined;
   readonly signal?: AbortSignal | undefined;
 }
@@ -369,6 +375,7 @@ export const executeConversationSubmissionAttempt = Effect.fn(
     tools: input.pi.tools,
     onAgentEvent: emitConversationEvent,
     onCheckpoint: input.onCheckpoint,
+    onAssistantStreamEvent: input.onAssistantStreamEvent,
     initialAssistantMessageIndex: input.initialAssistantMessageIndex,
     signal: input.signal,
   }).pipe(

@@ -1,79 +1,281 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { makeInMemoryEventStreamStore } from "../../src/agent-run/EventStreamStore.ts";
+import {
+  makeInMemoryEventStreamStore,
+  makeSqliteEventStreamStore,
+  type EventStreamStore,
+  type EventStorageFailed,
+} from "../../src/agent-run/EventStreamStore.ts";
+import { makeSqliteStorage } from "../helpers/SqliteStorage.ts";
+
+interface EventStreamStoreContractBackend {
+  readonly useStore: <A, E>(
+    run: (store: EventStreamStore) => Effect.Effect<A, E>,
+  ) => Effect.Effect<A, E | EventStorageFailed>;
+}
+
+const inMemoryBackend: EventStreamStoreContractBackend = {
+  useStore: (run) => run(makeInMemoryEventStreamStore()),
+};
+
+const sqliteBackend: EventStreamStoreContractBackend = {
+  useStore: (run) =>
+    Effect.acquireUseRelease(
+      Effect.gen(function* () {
+        const storage = makeSqliteStorage();
+        const store = yield* makeSqliteEventStreamStore(storage.sql);
+        return { storage, store };
+      }),
+      ({ store }) => run(store),
+      ({ storage }) => Effect.sync(() => storage.close()),
+    ),
+};
+
+const defineEventStreamStoreContractTests = (
+  label: string,
+  backend: EventStreamStoreContractBackend,
+): void => {
+  describe(label, () => {
+    it.effect("replays appended events with monotonic offsets", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          const first = yield* store.appendEvent("runs/test", { index: 0 });
+          const second = yield* store.appendEvent("runs/test", { index: 1 });
+
+          assert.strictEqual(first, "0000000000000000_0000000000000000");
+          assert.strictEqual(second, "0000000000000000_0000000000000001");
+          assert.deepStrictEqual(yield* store.readEvents("runs/test", { offset: "-1" }), {
+            events: [
+              { data: { index: 0 }, offset: first },
+              { data: { index: 1 }, offset: second },
+            ],
+            nextOffset: second,
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("returns null metadata and an empty up-to-date read for missing streams", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          assert.isNull(yield* store.getStreamMeta("runs/missing"));
+          assert.deepStrictEqual(yield* store.readEvents("runs/missing", { offset: "-1" }), {
+            events: [],
+            nextOffset: "-1",
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("rejects append operations when the stream does not exist", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          const appendError = yield* store
+            .appendEvent("runs/missing", { index: 0 })
+            .pipe(Effect.flip);
+          const onceError = yield* store
+            .appendEventOnce("runs/missing", "event-1", { index: 0 })
+            .pipe(Effect.flip);
+
+          assert.strictEqual(appendError._tag, "StreamNotFound");
+          assert.strictEqual(onceError._tag, "StreamNotFound");
+        }),
+      ),
+    );
+
+    it.effect("returns the tail cursor with no events when offset is now", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          yield* store.appendEvent("runs/test", { index: 0 });
+          const tail = yield* store.appendEvent("runs/test", { index: 1 });
+
+          assert.deepStrictEqual(yield* store.readEvents("runs/test", { offset: "now" }), {
+            events: [],
+            nextOffset: tail,
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("preserves existing events when createStream is called twice", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          const offset = yield* store.appendEvent("runs/test", { index: 0 });
+
+          yield* store.createStream("runs/test");
+
+          assert.deepStrictEqual(yield* store.getStreamMeta("runs/test"), {
+            nextOffset: offset,
+            closed: false,
+          });
+          assert.deepStrictEqual(yield* store.readEvents("runs/test", { offset: "-1" }), {
+            events: [{ data: { index: 0 }, offset }],
+            nextOffset: offset,
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("paginates streams and marks exact tail pages as up to date", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          for (let index = 0; index < 4; index += 1) {
+            yield* store.appendEvent("runs/test", { index });
+          }
+
+          const firstPage = yield* store.readEvents("runs/test", { offset: "-1", limit: 2 });
+          assert.deepStrictEqual(firstPage, {
+            events: [
+              { data: { index: 0 }, offset: "0000000000000000_0000000000000000" },
+              { data: { index: 1 }, offset: "0000000000000000_0000000000000001" },
+            ],
+            nextOffset: "0000000000000000_0000000000000001",
+            upToDate: false,
+            closed: false,
+          });
+
+          const exactTailPage = yield* store.readEvents("runs/test", {
+            offset: firstPage.nextOffset,
+            limit: 2,
+          });
+          assert.deepStrictEqual(exactTailPage, {
+            events: [
+              { data: { index: 2 }, offset: "0000000000000000_0000000000000002" },
+              { data: { index: 3 }, offset: "0000000000000000_0000000000000003" },
+            ],
+            nextOffset: "0000000000000000_0000000000000003",
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("uses the default read limit when a non-positive limit is requested", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          for (let index = 0; index < 3; index += 1) {
+            yield* store.appendEvent("runs/test", { index });
+          }
+
+          assert.deepStrictEqual(yield* store.readEvents("runs/test", { offset: "-1", limit: 0 }), {
+            events: [
+              { data: { index: 0 }, offset: "0000000000000000_0000000000000000" },
+              { data: { index: 1 }, offset: "0000000000000000_0000000000000001" },
+              { data: { index: 2 }, offset: "0000000000000000_0000000000000002" },
+            ],
+            nextOffset: "0000000000000000_0000000000000002",
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("records closed metadata and rejects appends after close", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          const offset = yield* store.appendEvent("runs/test", { index: 0 });
+          yield* store.closeStream("runs/test");
+
+          assert.deepStrictEqual(yield* store.getStreamMeta("runs/test"), {
+            nextOffset: offset,
+            closed: true,
+          });
+          assert.deepStrictEqual(yield* store.readEvents("runs/test", { offset }), {
+            events: [],
+            nextOffset: offset,
+            upToDate: true,
+            closed: true,
+          });
+          const appendError = yield* store.appendEvent("runs/test", { index: 1 }).pipe(Effect.flip);
+          assert.strictEqual(appendError._tag, "StreamClosed");
+        }),
+      ),
+    );
+
+    it.effect("returns the same offset for repeated appendEventOnce payloads", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          const first = yield* store.appendEventOnce("runs/test", "terminal-1", { index: 0 });
+          const retry = yield* store.appendEventOnce("runs/test", "terminal-1", { index: 0 });
+          const keyed = yield* store.readEventByKey("runs/test", "terminal-1");
+
+          assert.strictEqual(retry, first);
+          assert.deepStrictEqual(keyed, { offset: first, event: { index: 0 } });
+          assert.deepStrictEqual(yield* store.readEvents("runs/test"), {
+            events: [{ data: { index: 0 }, offset: first }],
+            nextOffset: first,
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("rejects conflicting appendEventOnce payloads without appending", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          const offset = yield* store.appendEventOnce("runs/test", "terminal-1", { index: 0 });
+          const conflict = yield* store
+            .appendEventOnce("runs/test", "terminal-1", { index: 1 })
+            .pipe(Effect.flip);
+
+          assert.strictEqual(conflict._tag, "EventStorageFailed");
+          if (conflict._tag === "EventStorageFailed") {
+            assert.include(String(conflict.cause), "conflicting payload");
+          }
+          assert.deepStrictEqual(yield* store.getStreamMeta("runs/test"), {
+            nextOffset: offset,
+            closed: false,
+          });
+          assert.deepStrictEqual(yield* store.readEvents("runs/test", { offset: "-1" }), {
+            events: [{ data: { index: 0 }, offset }],
+            nextOffset: offset,
+            upToDate: true,
+            closed: false,
+          });
+        }),
+      ),
+    );
+
+    it.effect("notifies subscribers on append and close", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          let notifications = 0;
+          const unsubscribe = yield* store.subscribe("runs/test", () => {
+            notifications += 1;
+          });
+
+          yield* store.appendEvent("runs/test", { index: 0 });
+          yield* store.closeStream("runs/test");
+          unsubscribe();
+
+          assert.strictEqual(notifications, 2);
+        }),
+      ),
+    );
+  });
+};
 
 describe("EventStreamStore", () => {
-  it.effect("appends monotonic offsets and reads after a cursor", () =>
-    Effect.gen(function* () {
-      const store = makeInMemoryEventStreamStore();
-      yield* store.createStream("runs/run_store");
-
-      const first = yield* store.appendEvent("runs/run_store", { type: "first" });
-      const second = yield* store.appendEvent("runs/run_store", { type: "second" });
-      assert.strictEqual(first, "0000000000000000_0000000000000000");
-      assert.strictEqual(second, "0000000000000000_0000000000000001");
-
-      const read = yield* store.readEvents("runs/run_store", { offset: first });
-      assert.deepStrictEqual(
-        read.events.map((event) => event.data),
-        [{ type: "second" }],
-      );
-      assert.strictEqual(read.nextOffset, second);
-      assert.isTrue(read.upToDate);
-    }),
-  );
-
-  it.effect("wakes subscribers on append and close", () =>
-    Effect.gen(function* () {
-      const store = makeInMemoryEventStreamStore();
-      yield* store.createStream("runs/run_subscribe");
-
-      let wakeups = 0;
-      const unsubscribe = yield* store.subscribe("runs/run_subscribe", () => {
-        wakeups += 1;
-      });
-      yield* store.appendEvent("runs/run_subscribe", { type: "event" });
-      yield* store.closeStream("runs/run_subscribe");
-      unsubscribe();
-
-      assert.strictEqual(wakeups, 2);
-    }),
-  );
-
-  it.effect("fails typed appends after close", () =>
-    Effect.gen(function* () {
-      const store = makeInMemoryEventStreamStore();
-      yield* store.createStream("runs/run_closed");
-      yield* store.closeStream("runs/run_closed");
-
-      const error = yield* store.appendEvent("runs/run_closed", { type: "late" }).pipe(Effect.flip);
-      assert.strictEqual(error._tag, "StreamClosed");
-    }),
-  );
-
-  it.effect("appends an event idempotently by key", () =>
-    Effect.gen(function* () {
-      const store = makeInMemoryEventStreamStore();
-      yield* store.createStream("runs/run_once");
-
-      const first = yield* store.appendEventOnce("runs/run_once", "terminal", {
-        type: "run_end",
-      });
-      const replay = yield* store.appendEventOnce("runs/run_once", "terminal", {
-        type: "run_end",
-      });
-      const conflict = yield* store
-        .appendEventOnce("runs/run_once", "terminal", { type: "other" })
-        .pipe(Effect.flip);
-      const read = yield* store.readEvents("runs/run_once");
-
-      assert.strictEqual(first, "0000000000000000_0000000000000000");
-      assert.strictEqual(replay, first);
-      assert.strictEqual(conflict._tag, "EventStorageFailed");
-      assert.deepStrictEqual(
-        read.events.map((event) => event.data),
-        [{ type: "run_end" }],
-      );
-    }),
-  );
+  defineEventStreamStoreContractTests("makeInMemoryEventStreamStore", inMemoryBackend);
+  defineEventStreamStoreContractTests("makeSqliteEventStreamStore", sqliteBackend);
 });

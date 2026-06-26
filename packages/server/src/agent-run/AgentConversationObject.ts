@@ -21,6 +21,7 @@ import {
   type CreateRunResult,
 } from "./Lifecycle.ts";
 import { SqlStorage } from "./SqlStorage.ts";
+import { StreamChunks } from "./StreamChunks.ts";
 import { handleAgentConversationObjectRequest, internalErrorResponse } from "./StreamProtocol.ts";
 
 const AGENT_RUN_RECONCILE_EVENT_ID = "agent-run:reconcile";
@@ -68,6 +69,7 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
         const persistenceLayer = AgentConversationCoordinator.sqliteLayer.pipe(
           Layer.provideMerge(EventStreamStore.sqliteLayer),
           Layer.provideMerge(AgentConversationSessionStore.sqliteLayer),
+          Layer.provideMerge(StreamChunks.sqliteLayer),
           Layer.provide(SqlStorage.layer(state.storage.sql)),
           Layer.orDie,
         );
@@ -116,6 +118,8 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
               Effect.gen(function* () {
                 const admission = yield* coordinator.admitSubmission(input);
                 const created = yield* AgentRunLifecycle.createConversationSubmission(store, input);
+                if (created.created || admission.admitted)
+                  yield* scheduleAgentRunReconcile(state, 0, "submission_admitted");
                 if (input.waitForResult) {
                   const result = yield* waitForSubmissionResult(
                     input.submissionId,
@@ -125,8 +129,6 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
                   );
                   return { ...created, result };
                 }
-                if (created.created || admission.admitted)
-                  yield* scheduleAgentRunReconcile(state, 0, "submission_admitted");
                 return created;
               }),
             alarm: () =>

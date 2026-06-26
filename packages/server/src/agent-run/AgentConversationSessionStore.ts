@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type * as Cloudflare from "alchemy/Cloudflare";
+import type { StreamChunks } from "./StreamChunks.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -106,6 +107,27 @@ export interface RecordToolResultCheckpointInput {
   readonly isError: boolean;
 }
 
+export interface JournaledToolRequest {
+  readonly toolCalls: ReadonlyArray<{
+    readonly type: "toolCall";
+    readonly id: string;
+    readonly name: string;
+  }>;
+  readonly argumentsByToolCallId?: Readonly<Record<string, unknown>> | undefined;
+}
+
+export interface RepairInterruptedToolResultsResult {
+  readonly repairedCount: number;
+}
+
+export interface RecordRecoveredInterruptedStreamInput {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly submissionId: string;
+  readonly streamKey: string;
+  readonly recovered: StreamChunks.ReconstructedInterruptedStream;
+}
+
 export interface CompletedAssistantRun {
   readonly assistantText: string;
 }
@@ -136,6 +158,15 @@ export interface Interface {
   readonly recordToolResultCheckpoint: (
     input: RecordToolResultCheckpointInput,
   ) => Effect.Effect<void, EventStorageFailed>;
+  readonly repairInterruptedToolResults: (input: {
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly submissionId: string;
+    readonly toolRequest: JournaledToolRequest;
+  }) => Effect.Effect<RepairInterruptedToolResultsResult, EventStorageFailed>;
+  readonly recordRecoveredInterruptedStream: (
+    input: RecordRecoveredInterruptedStreamInput,
+  ) => Effect.Effect<boolean, EventStorageFailed>;
   readonly finishRun: (input: FinishRunInput) => Effect.Effect<void, EventStorageFailed>;
   readonly reconstructCompletedRun: (input: {
     readonly conversationId: string;
@@ -396,6 +427,117 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     });
   });
 
+  const repairInterruptedToolResults = Effect.fn(
+    "AgentConversationSessionStore.repairInterruptedToolResults",
+  )(function* (input: {
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly submissionId: string;
+    readonly toolRequest: JournaledToolRequest;
+  }): Effect.fn.Return<RepairInterruptedToolResultsResult, EventStorageFailed> {
+    const cursor = yield* sql
+      .exec<MessageIdRow>(
+        `SELECT message_id
+           FROM denora_agent_conversation_session_messages
+          WHERE conversation_id = ?
+            AND run_id = ?
+            AND submission_id = ?
+            AND role = 'toolResult'
+            AND status IN ('completed', 'error')`,
+        input.conversationId,
+        input.runId,
+        input.submissionId,
+      )
+      .pipe(storageFailure("read completed interrupted tool results"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect completed interrupted tool results"));
+    const settledToolCallIds = new Set(
+      rows.flatMap((row) => toolCallIdFromToolResultMessageId(row.message_id, input.runId) ?? []),
+    );
+    let repairedCount = 0;
+    for (const toolCall of input.toolRequest.toolCalls) {
+      if (settledToolCallIds.has(toolCall.id)) continue;
+      yield* recordToolResultCheckpoint({
+        conversationId: input.conversationId,
+        runId: input.runId,
+        submissionId: input.submissionId,
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        result: interruptedToolResult(toolCall.name),
+        isError: true,
+      });
+      settledToolCallIds.add(toolCall.id);
+      repairedCount += 1;
+    }
+    yield* relinkOrderedToolResultBatch(sql, {
+      conversationId: input.conversationId,
+      runId: input.runId,
+      submissionId: input.submissionId,
+      toolCalls: input.toolRequest.toolCalls,
+    });
+    return { repairedCount };
+  });
+
+  const recordRecoveredInterruptedStream = Effect.fn(
+    "AgentConversationSessionStore.recordRecoveredInterruptedStream",
+  )(function* (
+    input: RecordRecoveredInterruptedStreamInput,
+  ): Effect.fn.Return<boolean, EventStorageFailed> {
+    const continuedMessageId = recoveredStreamContinuationMessageId(input.streamKey);
+    const existingContinuation = yield* readMessageById(
+      sql,
+      input.conversationId,
+      continuedMessageId,
+    );
+    if (existingContinuation !== null) return true;
+
+    const timestamp = DateTime.formatIso(yield* DateTime.now);
+    const existingPartial = yield* readLatestRecoverableAssistantMessage(sql, {
+      conversationId: input.conversationId,
+      runId: input.runId,
+      submissionId: input.submissionId,
+    });
+    const partialMessageId =
+      existingPartial?.messageId ?? recoveredStreamPartialMessageId(input.streamKey);
+    const partialParts = input.recovered.partial.content;
+
+    yield* upsertAssistantMessage(sql, {
+      messageId: partialMessageId,
+      conversationId: input.conversationId,
+      parentMessageId:
+        existingPartial?.parentMessageId ??
+        (yield* readLatestMessageId(sql, input.conversationId, {
+          exceptMessageId: partialMessageId,
+        })),
+      runId: input.runId,
+      submissionId: input.submissionId,
+      role: "assistant",
+      parts: partialParts,
+      plainText: plainTextFromParts(partialParts),
+      status: input.recovered.partial.stopReason === "error" ? "error" : "aborted",
+      createdAt: existingPartial?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+    });
+
+    const instruction = recoveredStreamContinuationInstruction(input.recovered);
+    yield* insertMessage(sql, {
+      messageId: continuedMessageId,
+      conversationId: input.conversationId,
+      parentMessageId: partialMessageId,
+      runId: input.runId,
+      submissionId: input.submissionId,
+      role: "user",
+      parts: textParts(instruction),
+      plainText: instruction,
+      status: "completed",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    return true;
+  });
+
   const reconstructCompletedRun = Effect.fn(
     "AgentConversationSessionStore.reconstructCompletedRun",
   )(function* (input: {
@@ -474,6 +616,8 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     recordAssistantMessageCompleted,
     recordToolCallCheckpoint,
     recordToolResultCheckpoint,
+    repairInterruptedToolResults,
+    recordRecoveredInterruptedStream,
     finishRun,
     inspectSubmissionProgress,
     reconstructCompletedRun,
@@ -519,6 +663,19 @@ const latestSubmissionMessageId = (
   messages: ReadonlyArray<MessageRecord>,
   submissionId: string,
 ): string | undefined => {
+  const parentMessageIds = new Set(
+    messages.flatMap((message) =>
+      message.parentMessageId === null ? [] : [message.parentMessageId],
+    ),
+  );
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.submissionId === submissionId && !parentMessageIds.has(message.messageId)) {
+      return message.messageId;
+    }
+  }
+
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.submissionId === submissionId) return message.messageId;
@@ -643,6 +800,40 @@ const readMessageById = (
     return yield* parseMessageRow(sql, row);
   });
 
+const readLatestRecoverableAssistantMessage = (
+  sql: Cloudflare.SqlStorage,
+  input: {
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly submissionId: string;
+  },
+): Effect.Effect<MessageRecord | null, EventStorageFailed> =>
+  Effect.gen(function* () {
+    const cursor = yield* sql
+      .exec<MessageRow>(
+        `SELECT message_id, conversation_id, parent_message_id, run_id, submission_id, role,
+                parts_json, plain_text, status, created_at, updated_at
+           FROM denora_agent_conversation_session_messages
+          WHERE conversation_id = ?
+            AND run_id = ?
+            AND submission_id = ?
+            AND role = 'assistant'
+            AND status IN ('started', 'partial')
+          ORDER BY sequence DESC
+          LIMIT 1`,
+        input.conversationId,
+        input.runId,
+        input.submissionId,
+      )
+      .pipe(storageFailure("read latest recoverable assistant message"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect latest recoverable assistant message"));
+    const row = rows[0];
+    if (row === undefined) return null;
+    return yield* parseMessageRow(sql, row);
+  });
+
 const readLatestMessageId = (
   sql: Cloudflare.SqlStorage,
   conversationId: string,
@@ -667,6 +858,86 @@ const readLatestMessageId = (
       .pipe(storageFailure("collect latest conversation session message"));
     return rows[0]?.message_id ?? null;
   });
+
+const readLatestMessageIdExcluding = Effect.fn(
+  "AgentConversationSessionStore.readLatestMessageIdExcluding",
+)(function* (
+  sql: Cloudflare.SqlStorage,
+  conversationId: string,
+  excludedMessageIds: ReadonlyArray<string>,
+): Effect.fn.Return<string | null, EventStorageFailed> {
+  if (excludedMessageIds.length === 0) return yield* readLatestMessageId(sql, conversationId);
+  const placeholders = excludedMessageIds.map(() => "?").join(", ");
+  const cursor = yield* sql
+    .exec<LatestMessageRow>(
+      `SELECT message_id
+         FROM denora_agent_conversation_session_messages
+        WHERE conversation_id = ?
+          AND message_id NOT IN (${placeholders})
+        ORDER BY sequence DESC
+        LIMIT 1`,
+      conversationId,
+      ...excludedMessageIds,
+    )
+    .pipe(storageFailure("read latest conversation session message excluding batch"));
+  const rows = yield* cursor
+    .toArray()
+    .pipe(storageFailure("collect latest conversation session message excluding batch"));
+  return rows[0]?.message_id ?? null;
+});
+
+const relinkOrderedToolResultBatch = Effect.fn(
+  "AgentConversationSessionStore.relinkOrderedToolResultBatch",
+)(function* (
+  sql: Cloudflare.SqlStorage,
+  input: {
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly submissionId: string;
+    readonly toolCalls: JournaledToolRequest["toolCalls"];
+  },
+): Effect.fn.Return<void, EventStorageFailed> {
+  if (input.toolCalls.length === 0) return;
+  const resultMessageIds = input.toolCalls.map((toolCall) =>
+    toolResultMessageId(input.runId, toolCall.id),
+  );
+  let parentMessageId = yield* readLatestMessageIdExcluding(
+    sql,
+    input.conversationId,
+    resultMessageIds,
+  );
+
+  for (const messageId of resultMessageIds) {
+    const cursor = yield* sql
+      .exec<MessageIdRow>(
+        `UPDATE denora_agent_conversation_session_messages
+            SET parent_message_id = ?
+          WHERE conversation_id = ?
+            AND message_id = ?
+            AND run_id = ?
+            AND submission_id = ?
+            AND role = 'toolResult'
+            AND status IN ('completed', 'error')
+          RETURNING message_id`,
+        parentMessageId,
+        input.conversationId,
+        messageId,
+        input.runId,
+        input.submissionId,
+      )
+      .pipe(storageFailure("relink interrupted tool result parent"));
+    const rows = yield* cursor
+      .toArray()
+      .pipe(storageFailure("collect relinked interrupted tool result"));
+    if (rows.length !== 1) {
+      return yield* new EventStorageFailed({
+        operation: "relink interrupted tool result parent",
+        cause: new Error(`Interrupted tool result ${messageId} is missing or unsettled.`),
+      });
+    }
+    parentMessageId = messageId;
+  }
+});
 
 const parseMessageRow = (
   sql: Cloudflare.SqlStorage,
@@ -940,10 +1211,19 @@ const toAgentMessage = (message: MessageRecord): ReadonlyArray<AgentMessage> => 
     {
       role: "assistant",
       content: message.parts,
-      stopReason: hasToolCallPart(message.parts) ? "toolUse" : "stop",
+      stopReason: assistantStopReason(message),
+      ...(message.status === "aborted" || message.status === "error"
+        ? { errorMessage: "Stream interrupted before completion." }
+        : {}),
       timestamp: Date.parse(message.createdAt),
     } as AgentMessage,
   ];
+};
+
+const assistantStopReason = (message: MessageRecord): "stop" | "toolUse" | "error" | "aborted" => {
+  if (message.status === "aborted") return "aborted";
+  if (message.status === "error") return "error";
+  return hasToolCallPart(message.parts) ? "toolUse" : "stop";
 };
 
 const nextAssistantMessageIndex = (
@@ -995,6 +1275,16 @@ const plainTextFromContent = (content: unknown): string => {
 };
 
 const textParts = (text: string): ReadonlyArray<unknown> => [{ type: "text", text }];
+
+const recoveredStreamPartialMessageId = (streamKey: string): string =>
+  `stream-recovery:${streamKey}:assistant-partial`;
+
+const recoveredStreamContinuationMessageId = (streamKey: string): string =>
+  `stream-recovery:${streamKey}:continuation`;
+
+const recoveredStreamContinuationInstruction = (
+  recovered: StreamChunks.ReconstructedInterruptedStream,
+): string => `${recovered.interrupted.content}\n\n${recovered.continued.content}`;
 
 const withCompletedTextPart = (
   parts: ReadonlyArray<unknown>,
@@ -1105,6 +1395,22 @@ export const toolCallMessageId = (runId: string, toolCallId: string): string =>
 
 export const toolResultMessageId = (runId: string, toolCallId: string): string =>
   `tool-result:${runId}:${toolCallId}`;
+
+const toolCallIdFromToolResultMessageId = (
+  messageId: string,
+  runId: string,
+): string | undefined => {
+  const prefix = `tool-result:${runId}:`;
+  return messageId.startsWith(prefix) ? messageId.slice(prefix.length) : undefined;
+};
+
+const interruptedToolResult = (toolName: string): Record<string, unknown> => {
+  const message = `Tool ${toolName} execution was interrupted before completion. The outcome is unknown.`;
+  return {
+    content: [{ type: "text", text: message }],
+    details: { type: "interrupted", message },
+  };
+};
 
 export interface SessionMessageRecord {
   readonly messageId: string;

@@ -25,6 +25,7 @@ import {
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
 import { DurableFiber } from "./DurableFiber.ts";
 import { SqlStorage } from "./SqlStorage.ts";
+import { StreamChunks } from "./StreamChunks.ts";
 
 const WAKE_DELAY_MS = 30_000;
 const RUNNING_STALE_MS = 15 * 60 * 1000;
@@ -33,16 +34,24 @@ const DEFAULT_SUBMISSION_TIMEOUT_MS = DEFAULT_MAX_ATTEMPTS * RUNNING_STALE_MS;
 
 const CREATE_TURN_JOURNALS_TABLE = `
 CREATE TABLE IF NOT EXISTS denora_agent_turn_journals (
-  submission_id TEXT PRIMARY KEY,
-  session_key   TEXT NOT NULL,
-  kind          TEXT NOT NULL,
-  attempt_id    TEXT NOT NULL,
-  run_id        TEXT NOT NULL,
-  phase         TEXT NOT NULL,
-  phase_order   INTEGER NOT NULL,
-  revision      INTEGER NOT NULL,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  submission_id      TEXT PRIMARY KEY,
+  session_key        TEXT NOT NULL,
+  kind               TEXT NOT NULL,
+  attempt_id         TEXT NOT NULL,
+  run_id             TEXT NOT NULL,
+  operation_id       TEXT,
+  turn_id            TEXT,
+  phase              TEXT NOT NULL,
+  phase_order        INTEGER NOT NULL,
+  revision           INTEGER NOT NULL,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  checkpoint_leaf_id TEXT,
+  tool_request_json  TEXT,
+  stream_key         TEXT,
+  stream_consumed_at INTEGER,
+  committed          INTEGER NOT NULL DEFAULT 0,
+  committed_leaf_id  TEXT
 )`;
 
 const CREATE_SUBMISSIONS_TABLE = `
@@ -168,14 +177,23 @@ export class Service extends Context.Service<Service, Interface>()(
 export const sqliteLayer: Layer.Layer<
   Service,
   EventStorageFailed,
-  SqlStorage.Service | EventStreamStoreService | AgentConversationSessionStore.Service
+  | SqlStorage.Service
+  | EventStreamStoreService
+  | AgentConversationSessionStore.Service
+  | StreamChunks.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sql = yield* SqlStorage.Service;
     const store = yield* EventStreamStoreService;
     const sessions = yield* AgentConversationSessionStore.Service;
-    const coordinator = yield* makeSqliteAgentConversationCoordinator(sql, store, sessions);
+    const streamChunks = yield* StreamChunks.Service;
+    const coordinator = yield* makeSqliteAgentConversationCoordinator(
+      sql,
+      store,
+      sessions,
+      streamChunks,
+    );
     return Service.of(coordinator);
   }),
 );
@@ -186,10 +204,66 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
   sql: Cloudflare.SqlStorage,
   store: EventStreamStore,
   sessionStore: AgentConversationSessionStore.Interface,
+  streamChunks: StreamChunks.StreamChunkStore,
 ): Effect.fn.Return<Interface, EventStorageFailed> {
   yield* ensureTables(sql);
   const durableFibers = yield* DurableFiber.makeSqlite(sql);
   const activeAttempts = new Map<string, AbortController>();
+
+  const persistAssistantStreamChunk = Effect.fn(
+    "AgentConversationCoordinator.persistAssistantStreamChunk",
+  )(function* (
+    writer: StreamChunks.StreamChunkWriter,
+    event: StreamChunks.AssistantStreamChunkEvent,
+    submission: Submission,
+  ): Effect.fn.Return<void> {
+    yield* writer.write(event).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("agent private stream chunk write failed", {
+          runId: submission.runId,
+          submissionId: submission.submissionId,
+          attemptId: submission.attemptId,
+          streamKey: writer.streamKey,
+          error,
+        }),
+      ),
+    );
+  });
+
+  const closeStreamWriter = (
+    writer: StreamChunks.StreamChunkWriter,
+    submission: Submission,
+  ): Effect.Effect<void> =>
+    writer.close().pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("agent private stream chunk close failed", {
+          runId: submission.runId,
+          submissionId: submission.submissionId,
+          attemptId: submission.attemptId,
+          streamKey: writer.streamKey,
+          error,
+        }),
+      ),
+    );
+
+  const deleteTerminalOutboxStreamChunks = Effect.fn(
+    "AgentConversationCoordinator.deleteTerminalOutboxStreamChunks",
+  )(function* (outbox: TerminalOutbox): Effect.fn.Return<void, EventStreamError> {
+    const journal = yield* readTurnJournal(outbox.submissionId);
+    const streamKey = journal?.streamKey;
+    if (streamKey === undefined) return;
+
+    yield* streamChunks.deleteStreamChunkSegments(streamKey).pipe(
+      Effect.mapError(
+        (cause) =>
+          new EventStorageFailed({
+            operation: "delete terminal outbox stream chunks",
+            cause,
+          }),
+      ),
+    );
+    yield* markStreamChunksConsumed(outbox.submissionId, streamKey);
+  });
 
   const admitSubmission = Effect.fn("AgentConversationCoordinator.admitSubmission")(function* (
     input: CreateConversationSubmissionInput,
@@ -524,10 +598,12 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           }
           const prepared = yield* prepareSubmissionForExecution(submission);
           yield* markSubmissionInputApplied(submission);
-          yield* recordTurnJournalPhase(submission, "input_applied");
-          yield* stashAttemptSnapshot(submission, fiber, { phase: "input_applied" });
-          yield* recordTurnJournalPhase(submission, "model_started");
-          yield* stashAttemptSnapshot(submission, fiber, { phase: "model_started" });
+          yield* recordTurnJournalPhase(submission, "before_provider");
+          yield* stashAttemptSnapshot(submission, fiber, { phase: "before_provider" });
+          const streamKey = streamChunkKey(submission);
+          const streamWriter = StreamChunks.makeStreamChunkWriter(streamChunks, streamKey);
+          yield* recordTurnJournalPhase(submission, "provider_started", { streamKey });
+          yield* stashAttemptSnapshot(submission, fiber, { phase: "provider_started", streamKey });
           const execution = yield* AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
             runId: submission.runId,
             agentName: submission.agentName,
@@ -539,6 +615,8 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
             initialAssistantMessageIndex: prepared.nextAssistantMessageIndex,
             beforeEmitEvent: (event) =>
               rejectInactiveSubmission(submission, `emit ${event.type} event`),
+            onAssistantStreamEvent: (event) =>
+              persistAssistantStreamChunk(streamWriter, event, submission),
             onCheckpoint: (checkpoint) => {
               const conversationId = submission.conversationId ?? "unknown";
               switch (checkpoint.type) {
@@ -551,9 +629,8 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
                       submissionId: submission.submissionId,
                       messageIndex: checkpoint.messageIndex,
                     });
-                    yield* recordTurnJournalPhase(submission, "assistant_started");
                     yield* stashAttemptSnapshot(submission, fiber, {
-                      phase: "assistant_started",
+                      phase: "provider_started",
                       messageIndex: checkpoint.messageIndex,
                     });
                   });
@@ -568,9 +645,8 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
                       contentIndex: checkpoint.contentIndex,
                       text: checkpoint.text,
                     });
-                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
                     yield* stashAttemptSnapshot(submission, fiber, {
-                      phase: "assistant_checkpointed",
+                      phase: "provider_started",
                       messageIndex: checkpoint.messageIndex,
                       contentIndex: checkpoint.contentIndex,
                     });
@@ -589,11 +665,24 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
                       parts: checkpoint.message.content,
                       plainText: assistantPlainText(checkpoint.message.content),
                     });
-                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
-                    yield* stashAttemptSnapshot(submission, fiber, {
-                      phase: "assistant_completed",
-                      messageIndex: checkpoint.messageIndex,
-                    });
+                    if (assistantMessageHasToolCall(checkpoint.message)) {
+                      yield* recordTurnJournalPhase(submission, "tool_request_recorded", {
+                        checkpointLeafId: assistantMessageCheckpointLeafId(checkpoint),
+                        toolRequest: toolRequestFromAssistantMessage(checkpoint.message),
+                      });
+                      yield* stashAttemptSnapshot(submission, fiber, {
+                        phase: "tool_request_recorded",
+                        messageIndex: checkpoint.messageIndex,
+                      });
+                    } else {
+                      yield* recordTurnJournalPhase(submission, "committed", {
+                        committedLeafId: assistantMessageCheckpointLeafId(checkpoint),
+                      });
+                      yield* stashAttemptSnapshot(submission, fiber, {
+                        phase: "committed",
+                        messageIndex: checkpoint.messageIndex,
+                      });
+                    }
                   });
                 case "tool_call_started":
                   return Effect.gen(function* () {
@@ -606,9 +695,12 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
                       name: checkpoint.toolName,
                       args: checkpoint.args,
                     });
-                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                    yield* recordTurnJournalPhase(submission, "tool_request_recorded", {
+                      checkpointLeafId: checkpoint.checkpointId,
+                      toolRequest: toolRequestFromCheckpoint(checkpoint),
+                    });
                     yield* stashAttemptSnapshot(submission, fiber, {
-                      phase: "tool_call_started",
+                      phase: "tool_request_recorded",
                       toolCallId: checkpoint.toolCallId,
                       toolName: checkpoint.toolName,
                     });
@@ -625,9 +717,11 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
                       result: checkpoint.result,
                       isError: checkpoint.isError,
                     });
-                    yield* recordTurnJournalPhase(submission, "assistant_checkpointed");
+                    yield* recordTurnJournalPhase(submission, "committed", {
+                      committedLeafId: checkpoint.checkpointId,
+                    });
                     yield* stashAttemptSnapshot(submission, fiber, {
-                      phase: "tool_result_completed",
+                      phase: "committed",
                       toolCallId: checkpoint.toolCallId,
                       toolName: checkpoint.toolName,
                       isError: checkpoint.isError,
@@ -637,6 +731,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
             },
             signal: controller.signal,
           }).pipe(
+            Effect.ensuring(closeStreamWriter(streamWriter, submission)),
             Effect.catch((error) =>
               Effect.gen(function* () {
                 yield* Effect.logError(
@@ -863,13 +958,14 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           outbox.offset ??
           (yield* store.appendEventOnce(streamPath, outbox.eventKey, event));
         yield* recordTerminalOffset(outbox, offset);
+        const idleKey = idleEventKey(outbox.submissionId);
+        const existingIdle = yield* readAppendedEvent(streamPath, idleKey);
+        if (existingIdle === null) {
+          const idleIndex = yield* nextStreamEventIndex(streamPath);
+          yield* store.appendEventOnce(streamPath, idleKey, idleEvent(outbox, idleIndex));
+        }
+        yield* deleteTerminalOutboxStreamChunks(outbox);
         yield* finalizeTerminal(outbox);
-        const idleIndex = yield* nextStreamEventIndex(streamPath);
-        yield* store.appendEventOnce(
-          streamPath,
-          idleEventKey(outbox.submissionId),
-          idleEvent(outbox, idleIndex),
-        );
       }
     },
   );
@@ -1057,38 +1153,173 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
         );
     });
 
+  const markStreamChunksConsumed = (
+    submissionId: string,
+    streamKey: string,
+  ): Effect.Effect<void, EventStorageFailed> =>
+    sql
+      .exec(
+        `UPDATE denora_agent_turn_journals
+         SET stream_consumed_at = COALESCE(stream_consumed_at, ?)
+         WHERE submission_id = ? AND stream_key = ?`,
+        Date.now(),
+        submissionId,
+        streamKey,
+      )
+      .pipe(storageFailure("mark stream chunks consumed"), Effect.asVoid);
+
   const recordTurnJournalPhase = (
     submission: Pick<Submission, "submissionId" | "sessionKey" | "kind" | "attemptId" | "runId">,
     phase: TurnJournalPhase,
-  ): Effect.Effect<void, EventStorageFailed> => {
-    const attemptId = submission.attemptId ?? "";
-    const phaseOrder = turnJournalPhaseOrder(phase);
-    const now = Date.now();
-    return sql
-      .exec(
-        `INSERT INTO denora_agent_turn_journals
-         (submission_id, session_key, kind, attempt_id, run_id, phase, phase_order, revision, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-         ON CONFLICT(submission_id) DO UPDATE SET
-           attempt_id = excluded.attempt_id,
-           run_id = excluded.run_id,
-           phase = excluded.phase,
-           phase_order = excluded.phase_order,
-           revision = denora_agent_turn_journals.revision + 1,
-           updated_at = excluded.updated_at
-         WHERE denora_agent_turn_journals.phase_order < excluded.phase_order`,
-        submission.submissionId,
-        submission.sessionKey,
-        submission.kind,
-        attemptId,
-        submission.runId,
-        phase,
-        phaseOrder,
-        now,
-        now,
-      )
-      .pipe(storageFailure("record turn journal phase"), Effect.asVoid);
-  };
+    options: {
+      readonly checkpointLeafId?: string | undefined;
+      readonly committedLeafId?: string | undefined;
+      readonly streamKey?: string | undefined;
+      readonly toolRequest?: unknown;
+    } = {},
+  ): Effect.Effect<void, EventStorageFailed> =>
+    Effect.gen(function* () {
+      const attemptId = submission.attemptId ?? "";
+      const phaseOrder = turnJournalPhaseOrder(phase);
+      const now = Date.now();
+      const toolRequest =
+        options.toolRequest === undefined
+          ? undefined
+          : yield* parseJournaledToolRequest(options.toolRequest, "parse tool request");
+      const mergedToolRequest =
+        toolRequest === undefined
+          ? undefined
+          : yield* mergeWithPersistedToolRequest(submission.submissionId, toolRequest);
+      const toolRequestJson =
+        mergedToolRequest === undefined
+          ? null
+          : yield* stringify(mergedToolRequest).pipe(
+              Effect.mapError(
+                (cause) => new EventStorageFailed({ operation: "serialize tool request", cause }),
+              ),
+            );
+      const committed = phase === "committed" ? 1 : 0;
+      yield* sql
+        .exec(
+          `INSERT INTO denora_agent_turn_journals
+           (submission_id, session_key, kind, attempt_id, run_id, operation_id, turn_id,
+            phase, phase_order, revision, created_at, updated_at, checkpoint_leaf_id,
+            tool_request_json, stream_key, stream_consumed_at, committed, committed_leaf_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, NULL, ?, ?)
+           ON CONFLICT(submission_id) DO UPDATE SET
+             attempt_id = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.attempt_id
+               WHEN denora_agent_turn_journals.phase_order < excluded.phase_order
+               THEN excluded.attempt_id
+               ELSE denora_agent_turn_journals.attempt_id
+             END,
+             run_id = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.run_id
+               WHEN denora_agent_turn_journals.phase_order < excluded.phase_order
+               THEN excluded.run_id
+               ELSE denora_agent_turn_journals.run_id
+             END,
+             operation_id = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.operation_id
+               WHEN denora_agent_turn_journals.phase_order < excluded.phase_order
+               THEN excluded.operation_id
+               ELSE COALESCE(denora_agent_turn_journals.operation_id, excluded.operation_id)
+             END,
+             turn_id = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.turn_id
+               WHEN denora_agent_turn_journals.phase_order < excluded.phase_order
+               THEN excluded.turn_id
+               ELSE COALESCE(denora_agent_turn_journals.turn_id, excluded.turn_id)
+             END,
+             phase = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.phase
+               WHEN denora_agent_turn_journals.phase_order < excluded.phase_order
+               THEN excluded.phase
+               ELSE denora_agent_turn_journals.phase
+             END,
+             phase_order = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.phase_order
+               ELSE MAX(denora_agent_turn_journals.phase_order, excluded.phase_order)
+             END,
+             revision = denora_agent_turn_journals.revision + 1,
+             updated_at = excluded.updated_at,
+             checkpoint_leaf_id = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.checkpoint_leaf_id
+               ELSE COALESCE(excluded.checkpoint_leaf_id, denora_agent_turn_journals.checkpoint_leaf_id)
+             END,
+             tool_request_json = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.tool_request_json
+               ELSE COALESCE(excluded.tool_request_json, denora_agent_turn_journals.tool_request_json)
+             END,
+             stream_key = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.stream_key
+               ELSE COALESCE(excluded.stream_key, denora_agent_turn_journals.stream_key)
+             END,
+             stream_consumed_at = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN NULL
+               ELSE denora_agent_turn_journals.stream_consumed_at
+             END,
+             committed = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.committed
+               WHEN excluded.committed = 1
+               THEN 1
+               ELSE denora_agent_turn_journals.committed
+             END,
+             committed_leaf_id = CASE
+               WHEN excluded.phase = 'before_provider'
+                AND denora_agent_turn_journals.attempt_id != excluded.attempt_id
+               THEN excluded.committed_leaf_id
+               ELSE COALESCE(excluded.committed_leaf_id, denora_agent_turn_journals.committed_leaf_id)
+             END
+           WHERE (excluded.phase = 'before_provider'
+                    AND denora_agent_turn_journals.attempt_id != excluded.attempt_id)
+              OR denora_agent_turn_journals.phase_order < excluded.phase_order
+              OR excluded.checkpoint_leaf_id IS NOT NULL
+              OR excluded.tool_request_json IS NOT NULL
+              OR excluded.stream_key IS NOT NULL
+              OR excluded.committed = 1
+              OR excluded.committed_leaf_id IS NOT NULL`,
+          submission.submissionId,
+          submission.sessionKey,
+          submission.kind,
+          attemptId,
+          submission.runId,
+          submission.runId,
+          submission.runId,
+          phase,
+          phaseOrder,
+          now,
+          now,
+          options.checkpointLeafId ?? null,
+          toolRequestJson,
+          options.streamKey ?? null,
+          committed,
+          options.committedLeafId ?? null,
+        )
+        .pipe(storageFailure("record turn journal phase"), Effect.asVoid);
+    });
 
   const startAttemptMarker = (
     submission: Submission,
@@ -1282,6 +1513,17 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       return { _tag: "ReserveCompletedAssistant", completed: progress.assistantCompleted };
     }
 
+    const interruptedToolRequest = yield* interruptedToolRequestFromJournal(journal);
+    if (interruptedToolRequest !== null) {
+      if (submission.attemptCount >= submission.maxAttempts) {
+        return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
+      }
+      if (isTimedOut(submission)) {
+        return { _tag: "FailTimedOut", message: timeoutErrorMessage(submission) };
+      }
+      return { _tag: "RepairInterruptedToolResults", toolRequest: interruptedToolRequest };
+    }
+
     if (progress.toolResultCompletedWithoutAssistant) {
       if (submission.attemptCount >= submission.maxAttempts) {
         return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
@@ -1293,13 +1535,22 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       return { _tag: "FailTimedOut", message: timeoutErrorMessage(submission) };
     }
 
+    const recoveredStream = yield* recoverableInterruptedStreamFromJournal(journal);
+    if (recoveredStream !== null) {
+      if (submission.attemptCount >= submission.maxAttempts) {
+        return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
+      }
+      return { _tag: "RecoverInterruptedAssistantStream", recoveredStream };
+    }
+
     const inputApplied =
       submission.inputAppliedAt !== undefined ||
       progress.inputApplied ||
-      (journal?.phaseOrder ?? 0) >= turnJournalPhaseOrder("input_applied");
+      (journal?.phaseOrder ?? 0) >= turnJournalPhaseOrder("before_provider");
     const assistantStarted =
       progress.assistantStarted ||
-      (journal?.phaseOrder ?? 0) >= turnJournalPhaseOrder("assistant_started");
+      journal?.phase === "tool_request_recorded" ||
+      journal?.phase === "committed";
     if (inputApplied && !assistantStarted && submission.abortRequestedAt === undefined) {
       if (submission.attemptCount >= submission.maxAttempts) {
         return { _tag: "FailRetryExhausted", message: retryExhaustedMessage(submission) };
@@ -1356,6 +1607,46 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           error: toolResultContinuationMessage,
         });
         return;
+      case "RepairInterruptedToolResults":
+        yield* sessionStore.repairInterruptedToolResults({
+          conversationId: submission.conversationId ?? "unknown",
+          runId: submission.runId,
+          submissionId: submission.submissionId,
+          toolRequest: decision.toolRequest,
+        });
+        yield* requeueInterruptedSubmission(submission, interruptedToolRepairMessage);
+        yield* settleAttemptMarker(submission, "interrupted", {
+          phase: "requeued_after_interrupted_tool_repair",
+          error: interruptedToolRepairMessage,
+        });
+        return;
+      case "RecoverInterruptedAssistantStream":
+        yield* sessionStore.recordRecoveredInterruptedStream({
+          conversationId: submission.conversationId ?? "unknown",
+          runId: submission.runId,
+          submissionId: submission.submissionId,
+          streamKey: decision.recoveredStream.streamKey,
+          recovered: decision.recoveredStream.recovered,
+        });
+        yield* markStreamChunksConsumed(
+          submission.submissionId,
+          decision.recoveredStream.streamKey,
+        );
+        yield* streamChunks.deleteStreamChunkSegments(decision.recoveredStream.streamKey).pipe(
+          Effect.mapError(
+            (cause) =>
+              new EventStorageFailed({
+                operation: "delete recovered interrupted stream chunks",
+                cause,
+              }),
+          ),
+        );
+        yield* requeueInterruptedSubmission(submission, interruptedStreamRecoveryMessage);
+        yield* settleAttemptMarker(submission, "interrupted", {
+          phase: "requeued_after_interrupted_stream_recovery",
+          error: interruptedStreamRecoveryMessage,
+        });
+        return;
       case "RetryAppliedInput":
         yield* requeueInterruptedSubmission(submission, decision.message);
         yield* settleAttemptMarker(submission, "interrupted", {
@@ -1398,7 +1689,8 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
   ): Effect.fn.Return<TurnJournal | null, EventStorageFailed> {
     const cursor = yield* sql
       .exec<TurnJournalRow>(
-        `SELECT submission_id, attempt_id, phase, phase_order, revision
+        `SELECT submission_id, attempt_id, phase, phase_order, revision, stream_key,
+                stream_consumed_at, tool_request_json, committed, committed_leaf_id
          FROM denora_agent_turn_journals
          WHERE submission_id = ?
          LIMIT 1`,
@@ -1414,7 +1706,76 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
       phase: row.phase,
       phaseOrder: row.phase_order,
       revision: row.revision,
+      streamKey: row.stream_key ?? undefined,
+      streamConsumedAt: row.stream_consumed_at ?? undefined,
+      toolRequestJson: row.tool_request_json ?? undefined,
+      committed: row.committed === 1,
+      committedLeafId: row.committed_leaf_id ?? undefined,
     };
+  });
+
+  const mergeWithPersistedToolRequest = Effect.fn(
+    "AgentConversationCoordinator.mergeWithPersistedToolRequest",
+  )(function* (
+    submissionId: string,
+    toolRequest: AgentConversationSessionStore.JournaledToolRequest,
+  ): Effect.fn.Return<AgentConversationSessionStore.JournaledToolRequest, EventStorageFailed> {
+    const existing = yield* readTurnJournal(submissionId);
+    if (existing?.toolRequestJson === undefined) return toolRequest;
+    const persisted = yield* parseJournaledToolRequestJson(
+      existing.toolRequestJson,
+      "parse persisted tool request",
+    );
+    return mergeJournaledToolRequests(persisted, toolRequest);
+  });
+
+  const interruptedToolRequestFromJournal = Effect.fn(
+    "AgentConversationCoordinator.interruptedToolRequestFromJournal",
+  )(function* (
+    journal: TurnJournal | null,
+  ): Effect.fn.Return<
+    AgentConversationSessionStore.JournaledToolRequest | null,
+    EventStorageFailed
+  > {
+    if (
+      journal?.phase !== "tool_request_recorded" ||
+      journal.committed ||
+      journal.toolRequestJson === undefined
+    ) {
+      return null;
+    }
+    return yield* parseJournaledToolRequestJson(
+      journal.toolRequestJson,
+      "parse interrupted tool request",
+    );
+  });
+
+  const recoverableInterruptedStreamFromJournal = Effect.fn(
+    "AgentConversationCoordinator.recoverableInterruptedStreamFromJournal",
+  )(function* (
+    journal: TurnJournal | null,
+  ): Effect.fn.Return<RecoverableInterruptedStream | null, EventStreamError> {
+    if (
+      journal?.phase !== "provider_started" ||
+      journal.committed ||
+      journal.streamKey === undefined ||
+      journal.streamConsumedAt !== undefined
+    ) {
+      return null;
+    }
+
+    const segments = yield* streamChunks.readStreamChunkSegments(journal.streamKey).pipe(
+      Effect.mapError(
+        (cause) =>
+          new EventStorageFailed({
+            operation: "read interrupted stream chunks",
+            cause,
+          }),
+      ),
+    );
+    const recovered = StreamChunks.reconstructInterruptedStream(segments, journal.streamKey);
+    if (recovered === null) return null;
+    return { streamKey: journal.streamKey, recovered };
   });
 
   const markAttemptMarkerInterrupted = (
@@ -1612,6 +1973,22 @@ const ensureTables = (sql: Cloudflare.SqlStorage): Effect.Effect<void, EventStor
         definition,
       });
     }
+    for (const [column, definition] of [
+      ["operation_id", "operation_id TEXT"],
+      ["turn_id", "turn_id TEXT"],
+      ["checkpoint_leaf_id", "checkpoint_leaf_id TEXT"],
+      ["tool_request_json", "tool_request_json TEXT"],
+      ["stream_key", "stream_key TEXT"],
+      ["stream_consumed_at", "stream_consumed_at INTEGER"],
+      ["committed", "committed INTEGER NOT NULL DEFAULT 0"],
+      ["committed_leaf_id", "committed_leaf_id TEXT"],
+    ] as const) {
+      yield* ensureColumn(sql, {
+        table: "denora_agent_turn_journals",
+        column,
+        definition,
+      });
+    }
   });
 
 const ensureColumn = (
@@ -1726,6 +2103,12 @@ const timeoutErrorMessage = (submission: Submission): string =>
 const toolResultContinuationMessage =
   "Agent run recovered completed tool results and will continue without re-executing tools.";
 
+const interruptedToolRepairMessage =
+  "Agent run repaired interrupted tool results and will continue without re-executing tools.";
+
+const interruptedStreamRecoveryMessage =
+  "Agent run recovered an interrupted assistant stream and will continue from that partial response.";
+
 const interruptedAfterInputMessage =
   "Agent run was interrupted after partial assistant progress and cannot be safely resumed yet. Please retry.";
 
@@ -1744,12 +2127,147 @@ const assistantPlainText = (parts: ReadonlyArray<unknown>): string =>
     )
     .join("");
 
+const assistantMessageHasToolCall = (message: { readonly content: ReadonlyArray<unknown> }) =>
+  message.content.some(
+    (part) =>
+      typeof part === "object" &&
+      part !== null &&
+      (part as { readonly type?: unknown }).type === "toolCall",
+  );
+
+const assistantMessageCheckpointLeafId = (checkpoint: {
+  readonly runId: string;
+  readonly messageIndex: number;
+}): string => `assistant:${checkpoint.runId}:${checkpoint.messageIndex}`;
+
+const toolRequestFromCheckpoint = (checkpoint: {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args: unknown;
+}): unknown => ({
+  toolCalls: [{ type: "toolCall", id: checkpoint.toolCallId, name: checkpoint.toolName }],
+  argumentsByToolCallId: { [checkpoint.toolCallId]: checkpoint.args },
+});
+
+const toolRequestFromAssistantMessage = (message: {
+  readonly content: ReadonlyArray<unknown>;
+}): unknown => {
+  const toolCalls: Array<{
+    readonly type: "toolCall";
+    readonly id: string;
+    readonly name: string;
+  }> = [];
+  const argumentsByToolCallId: Record<string, unknown> = {};
+  for (const part of message.content) {
+    if (typeof part !== "object" || part === null) continue;
+    const toolCall = part as {
+      readonly type?: unknown;
+      readonly id?: unknown;
+      readonly name?: unknown;
+      readonly arguments?: unknown;
+    };
+    if (
+      toolCall.type !== "toolCall" ||
+      typeof toolCall.id !== "string" ||
+      typeof toolCall.name !== "string"
+    ) {
+      continue;
+    }
+    toolCalls.push({ type: "toolCall", id: toolCall.id, name: toolCall.name });
+    if (toolCall.arguments !== undefined) argumentsByToolCallId[toolCall.id] = toolCall.arguments;
+  }
+  return {
+    toolCalls,
+    ...(Object.keys(argumentsByToolCallId).length === 0 ? {} : { argumentsByToolCallId }),
+  };
+};
+
+const parseJournaledToolRequestJson = (
+  value: string,
+  operation: string,
+): Effect.Effect<AgentConversationSessionStore.JournaledToolRequest, EventStorageFailed> =>
+  Effect.try({
+    try: () => JSON.parse(value) as unknown,
+    catch: (cause) => new EventStorageFailed({ operation, cause }),
+  }).pipe(Effect.flatMap((parsed) => parseJournaledToolRequest(parsed, operation)));
+
+const parseJournaledToolRequest = (
+  value: unknown,
+  operation: string,
+): Effect.Effect<AgentConversationSessionStore.JournaledToolRequest, EventStorageFailed> =>
+  Effect.try({
+    try: () => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Tool request must be an object.");
+      }
+      const record = value as {
+        readonly toolCalls?: unknown;
+        readonly argumentsByToolCallId?: unknown;
+      };
+      if (!Array.isArray(record.toolCalls)) throw new Error("Tool request is missing toolCalls.");
+      const toolCalls = record.toolCalls.map((toolCall) => {
+        if (typeof toolCall !== "object" || toolCall === null || Array.isArray(toolCall)) {
+          throw new Error("Tool call must be an object.");
+        }
+        const candidate = toolCall as {
+          readonly type?: unknown;
+          readonly id?: unknown;
+          readonly name?: unknown;
+        };
+        if (
+          candidate.type !== "toolCall" ||
+          typeof candidate.id !== "string" ||
+          typeof candidate.name !== "string"
+        ) {
+          throw new Error("Tool call is malformed.");
+        }
+        return { type: "toolCall" as const, id: candidate.id, name: candidate.name };
+      });
+      const argumentsByToolCallId =
+        typeof record.argumentsByToolCallId === "object" &&
+        record.argumentsByToolCallId !== null &&
+        !Array.isArray(record.argumentsByToolCallId)
+          ? { ...(record.argumentsByToolCallId as Record<string, unknown>) }
+          : undefined;
+      return {
+        toolCalls,
+        ...(argumentsByToolCallId === undefined ? {} : { argumentsByToolCallId }),
+      };
+    },
+    catch: (cause) => new EventStorageFailed({ operation, cause }),
+  });
+
+const mergeJournaledToolRequests = (
+  existing: AgentConversationSessionStore.JournaledToolRequest,
+  next: AgentConversationSessionStore.JournaledToolRequest,
+): AgentConversationSessionStore.JournaledToolRequest => {
+  const seen = new Set(existing.toolCalls.map((toolCall) => toolCall.id));
+  const toolCalls = existing.toolCalls.slice();
+  for (const toolCall of next.toolCalls) {
+    if (seen.has(toolCall.id)) continue;
+    seen.add(toolCall.id);
+    toolCalls.push(toolCall);
+  }
+  const argumentsByToolCallId: Record<string, unknown> = {};
+  if (existing.argumentsByToolCallId !== undefined)
+    Object.assign(argumentsByToolCallId, existing.argumentsByToolCallId);
+  if (next.argumentsByToolCallId !== undefined)
+    Object.assign(argumentsByToolCallId, next.argumentsByToolCallId);
+  return {
+    toolCalls,
+    ...(Object.keys(argumentsByToolCallId).length === 0 ? {} : { argumentsByToolCallId }),
+  };
+};
+
 const terminalEventKey = (submissionId: string): string =>
   `agent-conversation:${submissionId}:terminal`;
 
 const submissionAttemptIdempotencyKey = (
   submission: Pick<Submission, "submissionId" | "attemptId">,
 ): string => `agent-conversation:${submission.submissionId}:${submission.attemptId ?? "unknown"}`;
+
+const streamChunkKey = (submission: Pick<Submission, "submissionId" | "attemptId">): string =>
+  `agent-conversation:${submission.submissionId}:${submission.attemptId ?? "unknown"}:stream`;
 
 const durableFiberSubmissionId = (fiber: DurableFiber.RecoveryContext): string | undefined => {
   const metadataId = fiber.metadata.submissionId;
@@ -2001,6 +2519,11 @@ interface TurnJournalRow extends Record<string, Cloudflare.SqlStorageValue> {
   readonly phase: TurnJournalPhase;
   readonly phase_order: number;
   readonly revision: number;
+  readonly stream_key: string | null;
+  readonly stream_consumed_at: number | null;
+  readonly tool_request_json: string | null;
+  readonly committed: number;
+  readonly committed_leaf_id: string | null;
 }
 
 type SubmissionStatus = "queued" | "running" | "terminalizing" | "settled";
@@ -2008,22 +2531,22 @@ type SubmissionKind = "message" | "dispatch";
 type AttemptMarkerStatus = "running" | TerminalAttemptMarkerStatus;
 type TerminalAttemptMarkerStatus = "completed" | "failed" | "interrupted";
 type TurnJournalPhase =
-  | "input_applied"
-  | "model_started"
-  | "assistant_started"
-  | "assistant_checkpointed"
+  | "before_provider"
+  | "provider_started"
+  | "tool_request_recorded"
+  | "committed"
   | "terminal_reserved"
   | "settled";
 
 const turnJournalPhaseOrder = (phase: TurnJournalPhase): number => {
   switch (phase) {
-    case "input_applied":
+    case "before_provider":
       return 1;
-    case "model_started":
+    case "provider_started":
       return 2;
-    case "assistant_started":
+    case "tool_request_recorded":
       return 3;
-    case "assistant_checkpointed":
+    case "committed":
       return 4;
     case "terminal_reserved":
       return 5;
@@ -2090,6 +2613,16 @@ interface TurnJournal {
   readonly phase: TurnJournalPhase;
   readonly phaseOrder: number;
   readonly revision: number;
+  readonly streamKey?: string | undefined;
+  readonly streamConsumedAt?: number | undefined;
+  readonly toolRequestJson?: string | undefined;
+  readonly committed: boolean;
+  readonly committedLeafId?: string | undefined;
+}
+
+interface RecoverableInterruptedStream {
+  readonly streamKey: string;
+  readonly recovered: StreamChunks.ReconstructedInterruptedStream;
 }
 
 type InterruptedRecoveryDecision =
@@ -2099,6 +2632,14 @@ type InterruptedRecoveryDecision =
       readonly completed: AgentConversationSessionStore.CompletedAssistantRun;
     }
   | { readonly _tag: "ContinueAfterToolResult" }
+  | {
+      readonly _tag: "RepairInterruptedToolResults";
+      readonly toolRequest: AgentConversationSessionStore.JournaledToolRequest;
+    }
+  | {
+      readonly _tag: "RecoverInterruptedAssistantStream";
+      readonly recoveredStream: RecoverableInterruptedStream;
+    }
   | { readonly _tag: "RetryAppliedInput"; readonly message: string }
   | { readonly _tag: "RequeueBeforeInput"; readonly message: string }
   | { readonly _tag: "FailTimedOut"; readonly message: string }

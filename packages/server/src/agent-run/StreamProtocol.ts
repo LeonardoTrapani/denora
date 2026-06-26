@@ -94,6 +94,14 @@ export interface HandleStreamReadOptions {
   readonly sseIdleTimeoutMs?: number | undefined;
 }
 
+export const handleAgentConversationObjectRequest = Effect.fn(
+  "StreamProtocol.handleAgentConversationObjectRequest",
+)(function* (store: EventStreamStore, request: Request): Effect.fn.Return<Response> {
+  const url = new URL(request.url);
+  if (isRunObjectPath(url.pathname)) return yield* handleRunObjectRequest(store, request);
+  return yield* handleConversationObjectRequest(store, request);
+});
+
 export const handleRunObjectRequest = Effect.fn("StreamProtocol.handleRunObjectRequest")(function* (
   store: EventStreamStore,
   request: Request,
@@ -731,6 +739,8 @@ const errorBody = (
     ...(details === undefined ? {} : { details }),
   },
 });
+
+const isRunObjectPath = (pathname: string): boolean => /^\/runs\/[^/]+$/.test(pathname);
 
 const runIdFromPath = (pathname: string): string => {
   const match = /^\/runs\/([^/]+)$/.exec(pathname);

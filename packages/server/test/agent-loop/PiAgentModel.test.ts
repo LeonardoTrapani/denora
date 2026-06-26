@@ -389,6 +389,43 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
     }),
   );
 
+  it.effect("parses SSE events split across byte chunks", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(
+        FakeAiGateway.sse(
+          FakeAiGateway.raw('data: {"choices":[{"delta":{"content":"hel'),
+          FakeAiGateway.raw('lo"}}]}\n\n'),
+          finish(),
+        ),
+      );
+
+      const events = yield* streamWithFake(fake);
+
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "text_delta", contentIndex: 0, delta: "hello" }),
+      );
+      expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+    }),
+  );
+
+  it.effect("parses CRLF-delimited SSE events", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(
+        FakeAiGateway.sse(
+          FakeAiGateway.raw('data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\r\n'),
+          finish(),
+        ),
+      );
+
+      const events = yield* streamWithFake(fake);
+
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "text_delta", contentIndex: 0, delta: "hello" }),
+      );
+      expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+    }),
+  );
+
   it.effect("emits a terminal error for invalid SSE JSON", () =>
     Effect.gen(function* () {
       const fake = FakeAiGateway.make(FakeAiGateway.sse(FakeAiGateway.raw("data: not-json\n\n")));
@@ -422,6 +459,51 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
           error: expect.objectContaining({ stopReason: "error" }),
         }),
       ]);
+    }),
+  );
+
+  it.effect("emits a terminal error instead of hanging when the response body is locked", () =>
+    Effect.gen(function* () {
+      const response = new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+        headers: { "content-type": "text/event-stream" },
+      });
+      const body = response.body;
+      if (body === null) throw new Error("Expected test response body.");
+      const reader = body.getReader();
+      const fake = FakeAiGateway.make(FakeAiGateway.response(response));
+
+      yield* Effect.gen(function* () {
+        const service = yield* PiAgentModel.Service;
+        const stream = yield* service.stream({ model: testModel, context: emptyContext });
+        const events = yield* Effect.promise(async () => {
+          try {
+            const timeout = Symbol("timeout");
+            const result = await Promise.race([
+              collectEvents(stream),
+              new Promise<typeof timeout>((resolve) => setTimeout(() => resolve(timeout), 1_000)),
+            ]);
+            if (result === timeout) {
+              throw new Error("Timed out waiting for locked response body failure.");
+            }
+            return result;
+          } finally {
+            reader.releaseLock();
+            await body.cancel().catch(() => undefined);
+          }
+        });
+
+        expect(events).toEqual([
+          expect.objectContaining({ type: "start" }),
+          expect.objectContaining({
+            type: "error",
+            reason: "error",
+            error: expect.objectContaining({
+              stopReason: "error",
+              errorMessage: expect.stringMatching(/locked/i),
+            }),
+          }),
+        ]);
+      }).pipe(Effect.provide(FakeAiGateway.layer(fake)));
     }),
   );
 

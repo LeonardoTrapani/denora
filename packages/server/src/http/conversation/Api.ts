@@ -3,10 +3,11 @@ import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
+import { ConversationDomain } from "../../conversation/ConversationDomain.ts";
 import { ConversationRequestFailed } from "./Errors.ts";
 
 export const CreateConversationPayload = Schema.Struct({
-  conversationId: Schema.optional(Schema.String),
+  conversationId: Schema.optional(ConversationDomain.ConversationId),
   agentId: Schema.optional(Schema.NullOr(Schema.String)),
   title: Schema.optional(Schema.NullOr(Schema.String)),
   metadata: Schema.optional(Schema.Unknown),
@@ -14,8 +15,8 @@ export const CreateConversationPayload = Schema.Struct({
 export type CreateConversationPayload = typeof CreateConversationPayload.Type;
 
 export class Conversation extends Schema.Class<Conversation>("Conversation")({
-  id: Schema.String,
-  ownerUserId: Schema.String,
+  id: ConversationDomain.ConversationId,
+  ownerUserId: ConversationDomain.UserId,
   agentId: Schema.NullOr(Schema.String),
   status: Schema.Literals(["active", "archiving", "archived", "deleting", "deleted"]),
   title: Schema.NullOr(Schema.String),
@@ -26,9 +27,9 @@ export class Conversation extends Schema.Class<Conversation>("Conversation")({
 }) {}
 
 export class ConversationMessage extends Schema.Class<ConversationMessage>("ConversationMessage")({
-  id: Schema.String,
-  conversationId: Schema.String,
-  runId: Schema.NullOr(Schema.String),
+  id: ConversationDomain.MessageId,
+  conversationId: ConversationDomain.ConversationId,
+  runId: Schema.NullOr(ConversationDomain.RunId),
   role: Schema.Literals(["system", "user", "assistant", "tool", "event"]),
   content: Schema.Unknown,
   metadata: Schema.Unknown,
@@ -44,10 +45,10 @@ export type SubmitConversationMessagePayload = typeof SubmitConversationMessageP
 export class SubmitConversationMessageResponse extends Schema.Class<SubmitConversationMessageResponse>(
   "SubmitConversationMessageResponse",
 )({
-  conversationId: Schema.String,
-  messageId: Schema.String,
-  submissionId: Schema.String,
-  runId: Schema.String,
+  conversationId: ConversationDomain.ConversationId,
+  messageId: ConversationDomain.MessageId,
+  submissionId: ConversationDomain.SubmissionId,
+  runId: ConversationDomain.RunId,
   streamUrl: Schema.String,
   streamPath: Schema.String,
   offset: Schema.String,

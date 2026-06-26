@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
@@ -26,7 +27,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           title: payload.title,
           metadata: payload.metadata,
         });
-        return new Conversation(created);
+        return conversationResponse(created);
       }),
     )
     .handle("listConversations", () =>
@@ -34,7 +35,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
         const user = yield* AuthorizationApi.CurrentUser;
         const conversations = yield* Conversations.Service;
         const rows = yield* conversations.listConversations(user.id);
-        return rows.map((row) => new Conversation(row));
+        return rows.map((row) => conversationResponse(row));
       }),
     )
     .handle("listConversationMessages", ({ params }) =>
@@ -45,7 +46,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           conversationId: params.conversationId,
           userId: user.id,
         });
-        return rows.map((row) => new ConversationMessage(row));
+        return rows.map((row) => conversationMessageResponse(row));
       }),
     )
     .handle("submitConversationMessage", ({ params, payload }) =>
@@ -59,7 +60,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           message: payload.message,
           content: payload.content,
         });
-        const body = new SubmitConversationMessageResponse({
+        const body = submitConversationMessageResponse({
           conversationId: submitted.conversationId,
           messageId: submitted.messageId,
           submissionId: submitted.submissionId,
@@ -100,7 +101,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           conversationId: params.conversationId,
           userId: user.id,
         });
-        return new Conversation(archived);
+        return conversationResponse(archived);
       }),
     )
     .handle("deleteConversation", ({ params }) =>
@@ -111,9 +112,15 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           conversationId: params.conversationId,
           userId: user.id,
         });
-        return new Conversation(deleted);
+        return conversationResponse(deleted);
       }),
     ),
+);
+
+const conversationResponse = Schema.decodeUnknownSync(Conversation);
+const conversationMessageResponse = Schema.decodeUnknownSync(ConversationMessage);
+const submitConversationMessageResponse = Schema.decodeUnknownSync(
+  SubmitConversationMessageResponse,
 );
 
 const streamUrl = (

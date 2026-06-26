@@ -7,6 +7,7 @@ import {
   agentStreamPath,
 } from "../../src/agent-run/EventStreamStore.ts";
 import {
+  handleAgentConversationObjectRequest,
   handleConversationObjectRequest,
   handleRunObjectRequest,
   handleStreamHead,
@@ -124,6 +125,70 @@ describe("StreamProtocol", () => {
 
       assert.strictEqual(response.status, 200);
       assert.deepStrictEqual(yield* Effect.promise(() => response.json()), [event]);
+    }),
+  );
+
+  it.effect("routes durable object /runs/:runId requests to the run stream path", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      const runId = "run_object_forwarding";
+      const event = runEvent(runId, 0, {
+        type: "run_start",
+        workflowName: "denora.agent-run",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        input: null,
+      });
+      yield* store.createStream(`runs/${runId}`);
+      yield* store.appendEvent(`runs/${runId}`, event);
+
+      const response = yield* handleAgentConversationObjectRequest(
+        store,
+        new Request(`https://api.test/runs/${runId}?offset=-1`),
+      );
+
+      assert.strictEqual(response.status, 200);
+      assert.deepStrictEqual(yield* Effect.promise(() => response.json()), [event]);
+    }),
+  );
+
+  it.effect("preserves durable object attached-agent stream aliases", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      const conversationId = "conversation_object_forwarding";
+      const defaultEvent = {
+        v: 3,
+        type: "message_start",
+        instanceId: conversationId,
+        agentName: "default",
+        eventIndex: 0,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: "hello" }] },
+      };
+      const customEvent = {
+        ...defaultEvent,
+        agentName: "researcher",
+        eventIndex: 1,
+      };
+      yield* store.createStream(agentStreamPath("default", conversationId));
+      yield* store.appendEvent(agentStreamPath("default", conversationId), defaultEvent);
+      yield* store.createStream(agentStreamPath("researcher", conversationId));
+      yield* store.appendEvent(agentStreamPath("researcher", conversationId), customEvent);
+
+      const conversationResponse = yield* handleAgentConversationObjectRequest(
+        store,
+        new Request(`https://api.test/conversations/${conversationId}/events?offset=-1`),
+      );
+      const agentResponse = yield* handleAgentConversationObjectRequest(
+        store,
+        new Request(`https://api.test/agents/researcher/${conversationId}?offset=-1`),
+      );
+
+      assert.strictEqual(conversationResponse.status, 200);
+      assert.deepStrictEqual(yield* Effect.promise(() => conversationResponse.json()), [
+        defaultEvent,
+      ]);
+      assert.strictEqual(agentResponse.status, 200);
+      assert.deepStrictEqual(yield* Effect.promise(() => agentResponse.json()), [customEvent]);
     }),
   );
 

@@ -21,7 +21,9 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { CloudflareAiGatewayModels } from "./CloudflareAiGatewayModels.ts";
 
 type AiGatewayRunBinding = Effect.Success<Cloudflare.AiGatewayClient["gateway"]>["run"];
@@ -1952,24 +1954,46 @@ const readSseChunks = Effect.fn("PiAgentModel.readSseChunks")(function* (
   body: ReadableStream<Uint8Array>,
   onData: SseChunkHandler,
 ): Effect.fn.Return<void, ModelStreamFailed> {
-  return yield* Effect.acquireUseRelease(
-    Effect.try({
-      try: (): SseReaderState => ({
-        reader: body.getReader(),
-        decoder: new TextDecoder(),
-        buffer: "",
-        finished: false,
-      }),
-      catch: modelStreamFailure,
-    }),
-    (state) => readSseReader(state, onData),
-    (state) => releaseSseReader(state),
-  );
+  return yield* sseDataStream(body).pipe(Stream.runForEach(onData));
 });
+
+const sseDataStream = (
+  body: ReadableStream<Uint8Array>,
+): Stream.Stream<string, ModelStreamFailed> =>
+  Stream.callback<string, ModelStreamFailed>(
+    Effect.fn("PiAgentModel.sseDataStream")(function* (queue) {
+      yield* Effect.acquireRelease(
+        Effect.try({
+          try: (): SseReaderState => ({
+            reader: body.getReader(),
+            decoder: new TextDecoder(),
+            buffer: "",
+            finished: false,
+          }),
+          catch: modelStreamFailure,
+        }),
+        (state) => releaseSseReader(state),
+      ).pipe(
+        Effect.matchCauseEffect({
+          onFailure: (cause) => Effect.sync(() => Queue.failCauseUnsafe(queue, cause)),
+          onSuccess: (state) =>
+            readSseReader(state, (data) => {
+              Queue.offerUnsafe(queue, data);
+            }).pipe(
+              Effect.matchCauseEffect({
+                onFailure: (cause) => Effect.sync(() => Queue.failCauseUnsafe(queue, cause)),
+                onSuccess: () => Effect.sync(() => Queue.endUnsafe(queue)),
+              }),
+              Effect.forkScoped,
+            ),
+        }),
+      );
+    }),
+  );
 
 const readSseReader = Effect.fn("PiAgentModel.readSseReader")(function* (
   state: SseReaderState,
-  onData: SseChunkHandler,
+  emitData: (data: string) => void,
 ): Effect.fn.Return<void, ModelStreamFailed> {
   while (true) {
     const { done, value } = yield* Effect.tryPromise({
@@ -1979,7 +2003,7 @@ const readSseReader = Effect.fn("PiAgentModel.readSseReader")(function* (
     if (done) {
       state.finished = true;
       state.buffer += state.decoder.decode();
-      if (state.buffer.trim().length > 0) yield* readSseBlock(state.buffer, onData);
+      if (state.buffer.trim().length > 0) readSseBlock(state.buffer, emitData);
       return;
     }
     if (!(value instanceof Uint8Array)) {
@@ -1990,19 +2014,16 @@ const readSseReader = Effect.fn("PiAgentModel.readSseReader")(function* (
     while (boundary) {
       const block = state.buffer.slice(0, boundary.index);
       state.buffer = state.buffer.slice(boundary.index + boundary.width);
-      yield* readSseBlock(block, onData);
+      readSseBlock(block, emitData);
       boundary = findSseBoundary(state.buffer);
     }
   }
 });
 
-const readSseBlock = Effect.fn("PiAgentModel.readSseBlock")(function* (
-  block: string,
-  onData: SseChunkHandler,
-): Effect.fn.Return<void, ModelStreamFailed> {
+const readSseBlock = (block: string, emitData: (data: string) => void): void => {
   const data = parseSseData(block);
-  if (data !== undefined) yield* onData(data);
-});
+  if (data !== undefined) emitData(data);
+};
 
 const releaseSseReader = (state: SseReaderState): Effect.Effect<void> =>
   Effect.gen(function* () {

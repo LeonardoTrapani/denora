@@ -17,14 +17,17 @@ import {
   AgentRunLifecycle,
   type CreateConversationSubmissionInput,
   type CreateConversationSubmissionResult,
+  type CreateRunInput,
+  type CreateRunResult,
 } from "./Lifecycle.ts";
 import { SqlStorage } from "./SqlStorage.ts";
-import { handleConversationObjectRequest, internalErrorResponse } from "./StreamProtocol.ts";
+import { handleAgentConversationObjectRequest, internalErrorResponse } from "./StreamProtocol.ts";
 
 const AGENT_RUN_RECONCILE_EVENT_ID = "agent-run:reconcile";
 const AGENT_RUN_RECONCILE_RETRY_DELAY_MS = 30_000;
 
 export interface Shape {
+  readonly createRun: (input: CreateRunInput) => Effect.Effect<CreateRunResult, EventStreamError>;
   readonly abortConversation: (input?: {
     readonly reason?: string | undefined;
   }) => Effect.Effect<AbortConversationResult, EventStreamError>;
@@ -76,6 +79,18 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
           const coordinator = yield* AgentConversationCoordinator.Service;
 
           return {
+            createRun: (input: CreateRunInput) =>
+              AgentRunLifecycle.startRun(store, {
+                ...input,
+                scheduleExecution: (runId) =>
+                  AgentRunLifecycle.executeRun(store, { ...input, runId, pi }).pipe(
+                    Effect.catch((error) =>
+                      Effect.logError("standalone agent run execution failed", { runId, error }),
+                    ),
+                    Effect.forkDetach({ startImmediately: true }),
+                    Effect.asVoid,
+                  ),
+              }),
             abortConversation: (input?: { readonly reason?: string | undefined }) =>
               Effect.gen(function* () {
                 const result = yield* coordinator.abortConversation(input);
@@ -126,7 +141,7 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
             fetch: Effect.gen(function* () {
               const request = yield* HttpServerRequest.HttpServerRequest;
               const webRequest = yield* HttpServerRequest.toWeb(request);
-              const response = yield* handleConversationObjectRequest(store, webRequest).pipe(
+              const response = yield* handleAgentConversationObjectRequest(store, webRequest).pipe(
                 Effect.catchCause((cause) =>
                   Effect.gen(function* () {
                     const traceId = crypto.randomUUID();

@@ -2,12 +2,13 @@ import * as Schema from "effect/Schema";
 import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
+import { ConversationDomain } from "../../conversation/ConversationDomain.ts";
 import { CreateAgentRunFailed } from "./Errors.ts";
 
 export const CreateAgentRunPayload = Schema.Struct({
-  runId: Schema.optional(Schema.String),
-  conversationId: Schema.optional(Schema.String),
-  triggerMessageId: Schema.optional(Schema.String),
+  runId: Schema.optional(ConversationDomain.RunId),
+  conversationId: Schema.optional(ConversationDomain.ConversationId),
+  triggerMessageId: Schema.optional(ConversationDomain.MessageId),
   input: Schema.optional(Schema.Unknown),
 }).pipe(Schema.annotate({ identifier: "CreateAgentRunPayload" }));
 export type CreateAgentRunPayload = typeof CreateAgentRunPayload.Type;
@@ -15,7 +16,7 @@ export type CreateAgentRunPayload = typeof CreateAgentRunPayload.Type;
 export class CreateAgentRunResponse extends Schema.Class<CreateAgentRunResponse>(
   "CreateAgentRunResponse",
 )({
-  runId: Schema.String,
+  runId: ConversationDomain.RunId,
   streamUrl: Schema.String,
   streamPath: Schema.String,
   offset: Schema.String,

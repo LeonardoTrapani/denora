@@ -9,12 +9,17 @@ import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
+import { AgentRuns } from "../../src/agent-run/AgentRuns.ts";
 import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 import { Client } from "../../src/Client.ts";
+import { ConversationDomain } from "../../src/conversation/ConversationDomain.ts";
 import { Conversations } from "../../src/conversation/Conversations.ts";
 import {
+  Conversation,
+  ConversationMessage,
   CreateConversationPayload,
   SubmitConversationMessagePayload,
+  SubmitConversationMessageResponse,
 } from "../../src/http/conversation/Api.ts";
 import { Routes } from "../../src/http/Routes.ts";
 import { Health } from "../../src/http/system/Schema.ts";
@@ -116,6 +121,107 @@ describe("schema: conversation payloads", () => {
       },
     );
   });
+
+  it("accepts non-empty custom conversation ids in create payloads", () => {
+    const decoded = Schema.decodeUnknownSync(CreateConversationPayload)({
+      conversationId: "550e8400-e29b-41d4-a716-446655440000",
+    });
+    assert.strictEqual(decoded.conversationId, "550e8400-e29b-41d4-a716-446655440000");
+    assert.isTrue(
+      Option.isNone(
+        Schema.decodeUnknownOption(CreateConversationPayload)({
+          conversationId: "",
+        }),
+      ),
+    );
+  });
+
+  it("accepts legacy non-empty ids in conversation list responses and rejects empty ids", () => {
+    const listSchema = Schema.Array(Conversation);
+    const valid = {
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      ownerUserId: "legacy-user-id",
+      agentId: null,
+      status: "active",
+      title: "Legacy conversation",
+      metadata: {},
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+    };
+
+    const decoded = Schema.decodeUnknownSync(listSchema)([valid]);
+    assert.strictEqual(decoded[0]?.id, valid.id);
+    assert.isTrue(Option.isNone(Schema.decodeUnknownOption(listSchema)([{ ...valid, id: "" }])));
+  });
+
+  it("accepts legacy non-empty ids in message list responses and rejects empty ids", () => {
+    const listSchema = Schema.Array(ConversationMessage);
+    const valid = {
+      id: "legacy-message-id",
+      conversationId: "550e8400-e29b-41d4-a716-446655440000",
+      runId: "legacy-run-id",
+      role: "user",
+      content: "hello",
+      metadata: {},
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    const decoded = Schema.decodeUnknownSync(listSchema)([valid]);
+    assert.strictEqual(decoded[0]?.id, valid.id);
+    assert.strictEqual(decoded[0]?.conversationId, valid.conversationId);
+    assert.strictEqual(decoded[0]?.runId, valid.runId);
+    assert.isTrue(Option.isNone(Schema.decodeUnknownOption(listSchema)([{ ...valid, id: "" }])));
+    assert.isTrue(
+      Option.isNone(Schema.decodeUnknownOption(listSchema)([{ ...valid, conversationId: "" }])),
+    );
+    assert.isTrue(Option.isNone(Schema.decodeUnknownOption(listSchema)([{ ...valid, runId: "" }])));
+  });
+
+  it("rejects empty branded ids in submit message responses", () => {
+    const valid = {
+      conversationId: "conversation_123",
+      messageId: "message_123",
+      submissionId: "submission_123",
+      runId: "run_123",
+      streamUrl: "http://api.test/conversations/conversation_123/events",
+      streamPath: "/runs/run_123/events",
+      offset: "0",
+    };
+
+    assert.isTrue(
+      Option.isNone(
+        Schema.decodeUnknownOption(SubmitConversationMessageResponse)({
+          ...valid,
+          conversationId: "",
+        }),
+      ),
+    );
+    assert.isTrue(
+      Option.isNone(
+        Schema.decodeUnknownOption(SubmitConversationMessageResponse)({
+          ...valid,
+          messageId: "",
+        }),
+      ),
+    );
+    assert.isTrue(
+      Option.isNone(
+        Schema.decodeUnknownOption(SubmitConversationMessageResponse)({
+          ...valid,
+          submissionId: "",
+        }),
+      ),
+    );
+    assert.isTrue(
+      Option.isNone(
+        Schema.decodeUnknownOption(SubmitConversationMessageResponse)({
+          ...valid,
+          runId: "",
+        }),
+      ),
+    );
+  });
 });
 
 describe("schema: Unauthorized", () => {
@@ -148,6 +254,7 @@ const clientSafeInternalFiles = [
   /^http\/Api\.ts$/,
   /^http\/(?:account|agent-run|conversation|system)\/(?:Api|Errors|Schema)\.ts$/,
   /^auth\/(?:AuthorizationApi|User)\.ts$/,
+  /^conversation\/ConversationDomain\.ts$/,
 ];
 
 const serverOnlyExternalPrefixes = [
@@ -267,12 +374,13 @@ describe("client: makeDenoraUrlBuilder", () => {
   });
 });
 
+const piLayer = PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(FakeAiGateway.make())));
+
 const appLayer = TestServer.layer(Routes.layer).pipe(
   Layer.provide([
     AuthMock.layer(() => Option.some(makeDenoraUser())),
-    Conversations.inMemoryLayer.pipe(
-      Layer.provide(PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(FakeAiGateway.make())))),
-    ),
+    Conversations.inMemoryLayer.pipe(Layer.provide(piLayer)),
+    AgentRuns.inMemoryLayer.pipe(Layer.provide(piLayer)),
     ServerConfigMock.layer(),
   ]),
 );
@@ -304,6 +412,7 @@ describe("client: makeDenoraClient (real round-trip)", () => {
       assert.isFunction(client.me);
       assert.isFunction(client.archiveConversation);
       assert.isFunction(client.deleteConversation);
+      assert.isFunction(client.createAgentRun);
     }).pipe(Effect.provide(serverLayer)),
   );
 
@@ -323,6 +432,25 @@ describe("client: makeDenoraClient (real round-trip)", () => {
         conversations.map((conversation) => conversation.id),
         [created.id],
       );
+    }).pipe(Effect.provide(serverLayer)),
+  );
+
+  it.effect("creates agent runs with typed stream locations", () =>
+    Effect.gen(function* () {
+      const server = yield* HttpServer.HttpServer;
+      const port = server.address._tag === "TcpAddress" ? server.address.port : 0;
+      const client = yield* Client.makeDenoraClient(`http://127.0.0.1:${port}`);
+      const runId = ConversationDomain.makeRunId();
+
+      const created = yield* client.createAgentRun({
+        payload: { runId, input: { prompt: "hello" } },
+      });
+
+      assert.strictEqual(created.runId, runId);
+      assert.strictEqual(created.streamPath, `runs/${runId}`);
+      assert.strictEqual(new URL(created.streamUrl).pathname, `/runs/${runId}`);
+      assert.isString(created.offset);
+      assert.isTrue(created.offset.length > 0);
     }).pipe(Effect.provide(serverLayer)),
   );
 

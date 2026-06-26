@@ -4,23 +4,39 @@ import * as Schema from "effect/Schema";
 
 type UserAgentMessage = Extract<AgentMessage, { readonly role: "user" }>;
 
-export const ConversationId = Schema.String.check(Schema.isStartsWith("conversation_")).pipe(
-  Schema.brand("ConversationId"),
-);
+const NonEmptyId = Schema.String.check(Schema.isMinLength(1));
+
+export const ConversationId = NonEmptyId.pipe(Schema.brand("ConversationId"));
 export type ConversationId = typeof ConversationId.Type;
 
-export const MessageId = Schema.String.check(Schema.isStartsWith("message_")).pipe(
-  Schema.brand("MessageId"),
-);
+export const GeneratedConversationId = Schema.String.check(
+  Schema.isStartsWith("conversation_"),
+).pipe(Schema.brand("ConversationId"));
+export type GeneratedConversationId = typeof GeneratedConversationId.Type;
+
+export const MessageId = NonEmptyId.pipe(Schema.brand("MessageId"));
 export type MessageId = typeof MessageId.Type;
 
-export const SubmissionId = Schema.String.check(Schema.isStartsWith("submission_")).pipe(
-  Schema.brand("SubmissionId"),
+export const GeneratedMessageId = Schema.String.check(Schema.isStartsWith("message_")).pipe(
+  Schema.brand("MessageId"),
 );
+export type GeneratedMessageId = typeof GeneratedMessageId.Type;
+
+export const SubmissionId = NonEmptyId.pipe(Schema.brand("SubmissionId"));
 export type SubmissionId = typeof SubmissionId.Type;
 
-export const RunId = Schema.String.check(Schema.isStartsWith("run_")).pipe(Schema.brand("RunId"));
+export const GeneratedSubmissionId = Schema.String.check(Schema.isStartsWith("submission_")).pipe(
+  Schema.brand("SubmissionId"),
+);
+export type GeneratedSubmissionId = typeof GeneratedSubmissionId.Type;
+
+export const RunId = NonEmptyId.pipe(Schema.brand("RunId"));
 export type RunId = typeof RunId.Type;
+
+export const GeneratedRunId = Schema.String.check(Schema.isStartsWith("run_")).pipe(
+  Schema.brand("RunId"),
+);
+export type GeneratedRunId = typeof GeneratedRunId.Type;
 
 export const UserId = Schema.String.check(Schema.isMinLength(1)).pipe(Schema.brand("UserId"));
 export type UserId = typeof UserId.Type;
@@ -53,12 +69,12 @@ const StreamEventIndex = Schema.Struct({ eventIndex: Schema.Number });
 const StreamEventTimestamp = Schema.Struct({ timestamp: Schema.String });
 
 export const makeConversationId = (): ConversationId =>
-  Schema.decodeUnknownSync(ConversationId)(generatedId("conversation"));
+  Schema.decodeUnknownSync(GeneratedConversationId)(generatedId("conversation"));
 export const makeMessageId = (): MessageId =>
-  Schema.decodeUnknownSync(MessageId)(generatedId("message"));
+  Schema.decodeUnknownSync(GeneratedMessageId)(generatedId("message"));
 export const makeSubmissionId = (): SubmissionId =>
-  Schema.decodeUnknownSync(SubmissionId)(generatedId("submission"));
-export const makeRunId = (): RunId => Schema.decodeUnknownSync(RunId)(generatedId("run"));
+  Schema.decodeUnknownSync(GeneratedSubmissionId)(generatedId("submission"));
+export const makeRunId = (): RunId => Schema.decodeUnknownSync(GeneratedRunId)(generatedId("run"));
 
 export const promptFromContent = (content: unknown): string => {
   const text = Schema.decodeUnknownOption(Schema.String)(content);

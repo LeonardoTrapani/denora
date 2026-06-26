@@ -12,6 +12,8 @@ import {
   AgentConversationObjectLive,
   AiGateway,
 } from "../agent-run/AgentConversationObject.ts";
+import { AgentRunPersistence } from "../agent-run/AgentRunPersistence.ts";
+import { AgentRuns } from "../agent-run/AgentRuns.ts";
 import { AuthLive } from "../auth/Live.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { ConversationPersistence } from "../conversation/ConversationPersistence.ts";
@@ -146,6 +148,8 @@ export default Resource.make(
     return {
       fetch: Routes.layer.pipe(
         Layer.provide(Conversations.layer(conversationObjects)),
+        Layer.provide(AgentRuns.layer(conversationObjects)),
+        Layer.provide(AgentRunPersistence.layer),
         Layer.provide(ConversationPersistence.layer),
         Layer.provide(Db.layer(db)),
         Layer.provide(AuthLive.layerFromConfig),

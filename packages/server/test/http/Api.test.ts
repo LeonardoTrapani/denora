@@ -6,6 +6,8 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
+import { AgentRuns } from "../../src/agent-run/AgentRuns.ts";
+import { ConversationDomain } from "../../src/conversation/ConversationDomain.ts";
 import { Conversations } from "../../src/conversation/Conversations.ts";
 import { Api } from "../../src/http/Api.ts";
 import { Routes } from "../../src/http/Routes.ts";
@@ -22,20 +24,22 @@ import * as TestServer from "../helpers/TestServer.ts";
 const validUser = makeDenoraUser();
 const IMAGE_BYTES = "aGVsbG8taW1hZ2UtYnl0ZXM=";
 
-const appLayer = (fake = fakeGateway()) =>
-  TestServer.layer(Routes.layer).pipe(
+const appLayer = (fake = fakeGateway()) => {
+  const piLayer = PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fake)));
+
+  return TestServer.layer(Routes.layer).pipe(
     Layer.provide([
       AuthMock.layer((request) =>
         (request.headers.get("cookie") ?? "").includes("valid")
           ? Option.some(validUser)
           : Option.none(),
       ),
-      Conversations.inMemoryLayer.pipe(
-        Layer.provide(PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fake)))),
-      ),
+      Conversations.inMemoryLayer.pipe(Layer.provide(piLayer)),
+      AgentRuns.inMemoryLayer.pipe(Layer.provide(piLayer)),
       ServerConfigMock.layer(),
     ]),
   );
+};
 
 const fakeGateway = () =>
   FakeAiGateway.make(
@@ -121,6 +125,38 @@ describe("Api http surface", () => {
           createdAt: validUser.createdAt,
           updatedAt: validUser.updatedAt,
         });
+      }).pipe(Effect.provide(appLayer())),
+    );
+  });
+
+  describe("AgentRun", () => {
+    it.effect("creates agent runs via the generated typed client and serves the stream route", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpApiClient.make(Api.DenoraApi, {
+          transformClient: HttpClient.mapRequest((request) =>
+            HttpClientRequest.setHeader(request, "cookie", "denora_session=valid"),
+          ),
+        });
+        const runId = ConversationDomain.makeRunId();
+
+        const created = yield* client.createAgentRun({
+          payload: { runId, input: { prompt: "hello" } },
+        });
+
+        assert.strictEqual(created.runId, runId);
+        assert.strictEqual(created.streamPath, `runs/${runId}`);
+        assert.strictEqual(new URL(created.streamUrl).pathname, `/runs/${runId}`);
+        assert.isString(created.offset);
+        assert.isTrue(created.offset.length > 0);
+
+        const http = yield* HttpClient.HttpClient;
+        const stream = yield* http.get(new URL(created.streamUrl).pathname, {
+          headers: { cookie: "denora_session=valid" },
+        });
+        assert.strictEqual(stream.status, 200);
+        const events = (yield* stream.json) as ReadonlyArray<Record<string, unknown>>;
+        assert.strictEqual(events[0]?.type, "run_start");
+        assert.strictEqual(events[0]?.runId, runId);
       }).pipe(Effect.provide(appLayer())),
     );
   });

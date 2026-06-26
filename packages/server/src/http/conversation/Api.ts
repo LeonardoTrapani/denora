@@ -3,16 +3,15 @@ import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
-import { ConversationRequestFailed } from "../../conversation/Conversations.ts";
+import { ConversationRequestFailed } from "./Errors.ts";
 
-export class CreateConversationPayload extends Schema.Class<CreateConversationPayload>(
-  "CreateConversationPayload",
-)({
+export const CreateConversationPayload = Schema.Struct({
   conversationId: Schema.optional(Schema.String),
   agentId: Schema.optional(Schema.NullOr(Schema.String)),
   title: Schema.optional(Schema.NullOr(Schema.String)),
   metadata: Schema.optional(Schema.Unknown),
-}) {}
+}).pipe(Schema.annotate({ identifier: "CreateConversationPayload" }));
+export type CreateConversationPayload = typeof CreateConversationPayload.Type;
 
 export class Conversation extends Schema.Class<Conversation>("Conversation")({
   id: Schema.String,
@@ -36,12 +35,11 @@ export class ConversationMessage extends Schema.Class<ConversationMessage>("Conv
   createdAt: Schema.String,
 }) {}
 
-export class SubmitConversationMessagePayload extends Schema.Class<SubmitConversationMessagePayload>(
-  "SubmitConversationMessagePayload",
-)({
+export const SubmitConversationMessagePayload = Schema.Struct({
   message: Schema.optional(Schema.String),
   content: Schema.optional(Schema.Unknown),
-}) {}
+}).pipe(Schema.annotate({ identifier: "SubmitConversationMessagePayload" }));
+export type SubmitConversationMessagePayload = typeof SubmitConversationMessagePayload.Type;
 
 export class SubmitConversationMessageResponse extends Schema.Class<SubmitConversationMessageResponse>(
   "SubmitConversationMessageResponse",
@@ -55,11 +53,10 @@ export class SubmitConversationMessageResponse extends Schema.Class<SubmitConver
   offset: Schema.String,
 }) {}
 
-export class AbortConversationPayload extends Schema.Class<AbortConversationPayload>(
-  "AbortConversationPayload",
-)({
+export const AbortConversationPayload = Schema.Struct({
   reason: Schema.optional(Schema.String),
-}) {}
+}).pipe(Schema.annotate({ identifier: "AbortConversationPayload" }));
+export type AbortConversationPayload = typeof AbortConversationPayload.Type;
 
 export class AbortConversationResponse extends Schema.Class<AbortConversationResponse>(
   "AbortConversationResponse",

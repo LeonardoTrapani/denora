@@ -1,3 +1,6 @@
+import * as NodeFs from "node:fs";
+import * as NodePath from "node:path";
+import { fileURLToPath } from "node:url";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -9,8 +12,12 @@ import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
 import { DenoraUser, Unauthorized } from "../../src/auth/User.ts";
 import { Client } from "../../src/Client.ts";
 import { Conversations } from "../../src/conversation/Conversations.ts";
-import { Health } from "../../src/http/system/Schema.ts";
+import {
+  CreateConversationPayload,
+  SubmitConversationMessagePayload,
+} from "../../src/http/conversation/Api.ts";
 import { Routes } from "../../src/http/Routes.ts";
+import { Health } from "../../src/http/system/Schema.ts";
 import * as AuthMock from "../helpers/AuthMock.ts";
 import { FakeAiGateway } from "../helpers/FakeAiGateway.ts";
 import { makeDenoraUser } from "../helpers/fixtures.ts";
@@ -90,6 +97,27 @@ describe("schema: DenoraUser", () => {
   );
 });
 
+describe("schema: conversation payloads", () => {
+  it("accept plain objects for API request payloads", () => {
+    assert.deepStrictEqual(
+      Schema.decodeUnknownSync(CreateConversationPayload)({
+        title: "New conversation",
+      }),
+      {
+        title: "New conversation",
+      },
+    );
+    assert.deepStrictEqual(
+      Schema.decodeUnknownSync(SubmitConversationMessagePayload)({
+        message: "hello",
+      }),
+      {
+        message: "hello",
+      },
+    );
+  });
+});
+
 describe("schema: Unauthorized", () => {
   it("constructs with _tag and message", () => {
     const err = new Unauthorized({ message: "Missing or invalid session" });
@@ -106,6 +134,111 @@ describe("schema: Unauthorized", () => {
     const decoded = Schema.decodeSync(Unauthorized)(encoded);
     assert.strictEqual(decoded._tag, "Unauthorized");
     assert.strictEqual(decoded.message, "nope");
+  });
+});
+
+// =============================================================================
+// CLIENT-SAFE IMPORT GRAPH
+// =============================================================================
+
+const serverSrcDir = fileURLToPath(new URL("../../src/", import.meta.url));
+
+const clientSafeInternalFiles = [
+  /^Client(?:Api)?\.ts$/,
+  /^http\/Api\.ts$/,
+  /^http\/(?:account|agent-run|conversation|system)\/(?:Api|Errors|Schema)\.ts$/,
+  /^auth\/(?:AuthorizationApi|User)\.ts$/,
+];
+
+const serverOnlyExternalPrefixes = [
+  "alchemy",
+  "@aws-sdk/",
+  "@distilled.cloud/",
+  "@earendil-works/",
+  "@effect/sql-pg",
+  "@workos-inc/",
+  "drizzle-orm",
+  "pg",
+];
+
+const serverOnlyInternalFiles = [
+  /^agent-loop\//,
+  /^agent-run\/(?!Errors\.ts$)/,
+  /^conversation\/(?!ConversationDomain\.ts$)/,
+  /^http\/Routes\.ts$/,
+  /^http\/.*\/Handlers\.ts$/,
+  /^observability\//,
+  /^persistence\//,
+  /^server\//,
+];
+
+const runtimeImportSpecs = (source: string): ReadonlyArray<string> => {
+  const specs: string[] = [];
+  const patterns = [
+    /^\s*import\s+(?!type\b)[\s\S]*?\sfrom\s*["']([^"']+)["']/gm,
+    /^\s*import\s*["']([^"']+)["']/gm,
+    /^\s*export\s+(?!type\b)(?:\*|\{[\s\S]*?\})\s*(?:as\s+\w+\s*)?from\s*["']([^"']+)["']/gm,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const spec = match[1];
+      if (spec !== undefined) specs.push(spec);
+    }
+  }
+
+  return specs;
+};
+
+const resolveInternalImport = (fromFile: string, spec: string): string | undefined => {
+  if (!spec.startsWith(".")) return undefined;
+  const fromDir = NodePath.dirname(NodePath.join(serverSrcDir, fromFile));
+  const resolved = NodePath.resolve(fromDir, spec);
+  const candidates = [resolved, `${resolved}.ts`, NodePath.join(resolved, "index.ts")];
+  const found = candidates.find((candidate) => NodeFs.existsSync(candidate));
+  return found === undefined ? undefined : NodePath.relative(serverSrcDir, found);
+};
+
+const collectRuntimeGraph = (entry: string) => {
+  const seen = new Set<string>();
+  const externals = new Set<string>();
+  const stack = [entry];
+
+  while (stack.length > 0) {
+    const file = stack.pop();
+    if (file === undefined || seen.has(file)) continue;
+    seen.add(file);
+
+    const source = NodeFs.readFileSync(NodePath.join(serverSrcDir, file), "utf8");
+    for (const spec of runtimeImportSpecs(source)) {
+      const internal = resolveInternalImport(file, spec);
+      if (internal === undefined) {
+        if (!spec.startsWith(".")) externals.add(spec);
+      } else if (!seen.has(internal)) {
+        stack.push(internal);
+      }
+    }
+  }
+
+  return { files: [...seen].sort(), externals: [...externals].sort() };
+};
+
+describe("client import graph", () => {
+  it("keeps @denora/server/client-api browser-safe", () => {
+    const graph = collectRuntimeGraph("ClientApi.ts");
+    const nonClientSafeFiles = graph.files.filter(
+      (file) => !clientSafeInternalFiles.some((pattern) => pattern.test(file)),
+    );
+    const serverOnlyFiles = graph.files.filter((file) =>
+      serverOnlyInternalFiles.some((pattern) => pattern.test(file)),
+    );
+    const serverOnlyExternals = graph.externals.filter((spec) =>
+      serverOnlyExternalPrefixes.some((prefix) => spec === prefix || spec.startsWith(prefix)),
+    );
+
+    assert.deepStrictEqual(nonClientSafeFiles, []);
+    assert.deepStrictEqual(serverOnlyFiles, []);
+    assert.deepStrictEqual(serverOnlyExternals, []);
   });
 });
 
@@ -171,6 +304,25 @@ describe("client: makeDenoraClient (real round-trip)", () => {
       assert.isFunction(client.me);
       assert.isFunction(client.archiveConversation);
       assert.isFunction(client.deleteConversation);
+    }).pipe(Effect.provide(serverLayer)),
+  );
+
+  it.effect("creates and lists conversations with plain request payloads", () =>
+    Effect.gen(function* () {
+      const server = yield* HttpServer.HttpServer;
+      const port = server.address._tag === "TcpAddress" ? server.address.port : 0;
+      const client = yield* Client.makeDenoraClient(`http://127.0.0.1:${port}`);
+
+      const created = yield* client.createConversation({
+        payload: { title: "New conversation" },
+      });
+      assert.strictEqual(created.title, "New conversation");
+
+      const conversations = yield* client.listConversations();
+      assert.deepStrictEqual(
+        conversations.map((conversation) => conversation.id),
+        [created.id],
+      );
     }).pipe(Effect.provide(serverLayer)),
   );
 

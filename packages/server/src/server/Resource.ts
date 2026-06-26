@@ -115,7 +115,6 @@ const corsLayer = Layer.unwrap(
     return HttpRouter.cors({
       allowedOrigins: config.auth.webOrigins,
       allowedMethods: ["GET", "HEAD", "POST", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token", "If-None-Match"],
       exposedHeaders: [
         "ETag",
         "Location",

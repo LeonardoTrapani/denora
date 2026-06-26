@@ -156,7 +156,7 @@ describe("Api http surface", () => {
           readonly offset: string;
         };
         assert.strictEqual(createdBody.conversationId, conversationId);
-        assert.strictEqual(createdBody.streamPath, `conversations/${conversationId}`);
+        assert.strictEqual(createdBody.streamPath, `agents/default/${conversationId}`);
         assert.strictEqual(
           new URL(createdBody.streamUrl).pathname,
           `/conversations/${conversationId}/events`,

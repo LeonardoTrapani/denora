@@ -20,7 +20,7 @@ export function useConversationChat(
 ): UseConversationChatResult {
   const session = useMemo(
     () => new ConversationChatSession(options),
-    [options.conversationId, options.history, options.live],
+    [options.conversationId, options.history, options.live, options.resetKey],
   );
   useEffect(() => {
     session.start();

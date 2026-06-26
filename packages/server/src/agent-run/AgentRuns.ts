@@ -2,7 +2,6 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Schema from "effect/Schema";
 import type { HttpServerError } from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
@@ -12,6 +11,7 @@ import {
   AgentRunPersistence,
   type Error as AgentRunPersistenceError,
 } from "./AgentRunPersistence.ts";
+import { CreateAgentRunFailed } from "../http/agent-run/Errors.ts";
 import { type EventStreamError, makeInMemoryEventStreamStore } from "./EventStreamStore.ts";
 import { AgentRunLifecycle, type CreateRunInput, type CreateRunResult } from "./Lifecycle.ts";
 import {
@@ -22,22 +22,7 @@ import {
   internalErrorResponse,
 } from "./StreamProtocol.ts";
 
-export class CreateAgentRunFailed extends Schema.TaggedErrorClass<CreateAgentRunFailed>()(
-  "CreateAgentRunFailed",
-  {
-    reason: Schema.Literals([
-      "invalid_stream_offset",
-      "stream_not_found",
-      "stream_closed",
-      "event_serialization_failed",
-      "event_storage_failed",
-      "persistence_failed",
-      "run_not_authorized",
-    ]),
-    message: Schema.String,
-  },
-  { httpApiStatus: 500 },
-) {}
+export { CreateAgentRunFailed } from "../http/agent-run/Errors.ts";
 
 export interface CreateAgentRunInput {
   readonly runId?: string | undefined;
@@ -291,7 +276,7 @@ const createAgentRunFailedFromCause = (
     const traceId = crypto.randomUUID();
     yield* Effect.logError("agent run create failed", { traceId, cause });
     return yield* new CreateAgentRunFailed({
-      reason: "event_storage_failed",
+      reason: "persistence_failed",
       message: "Agent run could not be started.",
     });
   });

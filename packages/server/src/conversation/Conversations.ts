@@ -2,7 +2,6 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Schema from "effect/Schema";
 import type { HttpServerError } from "effect/unstable/http/HttpServerError";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
@@ -30,24 +29,9 @@ import {
   type ConversationRecord,
 } from "./ConversationPersistence.ts";
 import { ConversationDomain } from "./ConversationDomain.ts";
+import { ConversationRequestFailed } from "../http/conversation/Errors.ts";
 
-export class ConversationRequestFailed extends Schema.TaggedErrorClass<ConversationRequestFailed>()(
-  "ConversationRequestFailed",
-  {
-    reason: Schema.Literals([
-      "invalid_stream_offset",
-      "stream_not_found",
-      "stream_closed",
-      "event_serialization_failed",
-      "event_storage_failed",
-      "persistence_failed",
-      "conversation_not_authorized",
-      "conversation_not_active",
-    ]),
-    message: Schema.String,
-  },
-  { httpApiStatus: 500 },
-) {}
+export { ConversationRequestFailed } from "../http/conversation/Errors.ts";
 
 export interface SubmitMessageInput {
   readonly conversationId: string;
@@ -266,7 +250,18 @@ export const layer = (
                   return HttpServerResponse.fromWeb(internalErrorResponse(traceId));
                 });
               },
-              onSuccess: () => objects.getByName(conversationId).fetch(request),
+              onSuccess: (conversation) => {
+                const streamAgentName = conversation.agentId ?? _agentName;
+                return rewriteAttachedAgentStreamRequest(
+                  request,
+                  streamAgentName,
+                  conversationId,
+                ).pipe(
+                  Effect.flatMap((streamRequest) =>
+                    objects.getByName(conversationId).fetch(streamRequest),
+                  ),
+                );
+              },
             }),
             Effect.catchCause((cause) =>
               Effect.gen(function* () {
@@ -495,6 +490,19 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
   }),
 );
 
+const rewriteAttachedAgentStreamRequest = (
+  request: HttpServerRequest.HttpServerRequest,
+  agentName: string,
+  conversationId: string,
+) =>
+  HttpServerRequest.toWeb(request).pipe(
+    Effect.map((webRequest) => {
+      const next = new URL(webRequest.url);
+      next.pathname = `/agents/${encodeURIComponent(agentName)}/${encodeURIComponent(conversationId)}`;
+      return HttpServerRequest.fromWeb(new Request(next.toString(), webRequest));
+    }),
+  );
+
 const updateInMemoryLifecycle = (
   input: { readonly conversationId: string; readonly userId: string },
   status: ConversationLifecycleState,
@@ -604,7 +612,7 @@ const conversationRequestFailedFromCause = (
       error: Cause.squash(cause),
     });
     return yield* new ConversationRequestFailed({
-      reason: "event_storage_failed",
+      reason: "persistence_failed",
       message: "Conversation request could not be completed.",
     });
   });

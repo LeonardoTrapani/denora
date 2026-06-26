@@ -64,7 +64,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           messageId: submitted.messageId,
           submissionId: submitted.submissionId,
           runId: submitted.runId,
-          streamPath: `conversations/${submitted.conversationId}`,
+          streamPath: submitted.streamPath,
           streamUrl: streamUrl(request, submitted.conversationId),
           offset: submitted.offset,
         });

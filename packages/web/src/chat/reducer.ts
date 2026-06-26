@@ -19,9 +19,20 @@ export interface ChatState extends ChatSnapshot {
   readonly reasoningPartIndexes: Readonly<Record<string, Readonly<Record<number, number>>>>;
 }
 
+export interface PersistedConversationMessage {
+  readonly id: string;
+  readonly role: "system" | "user" | "assistant" | "tool" | "event";
+  readonly content: unknown;
+  readonly metadata?: unknown;
+}
+
 export type ChatReducerEvent =
   | DenoraConversationEvent
   | { readonly type: "local_conversation_created"; readonly conversationId: string }
+  | {
+      readonly type: "local_history_loaded";
+      readonly messages: ReadonlyArray<PersistedConversationMessage>;
+    }
   | { readonly type: "local_send_submitted"; readonly localId: string; readonly message: string }
   | {
       readonly type: "local_send_admitted";
@@ -35,6 +46,7 @@ export type ChatReducerEvent =
       readonly error?: Error | undefined;
     }
   | { readonly type: "local_history_ready" }
+  | { readonly type: "local_stream_missing" }
   | { readonly type: "local_stream_failed"; readonly error: Error };
 
 export const emptyChatState: ChatState = {
@@ -67,6 +79,12 @@ function reduceChatEventOnce(state: ChatState, event: ChatReducerEvent): ChatSta
   switch (event.type) {
     case "local_conversation_created":
       return { ...state, conversationId: event.conversationId };
+    case "local_history_loaded":
+      return {
+        ...state,
+        messages: event.messages.flatMap(persistedMessageToChatMessage),
+        error: undefined,
+      };
     case "local_send_submitted":
       return {
         ...state,
@@ -117,6 +135,10 @@ function reduceChatEventOnce(state: ChatState, event: ChatReducerEvent): ChatSta
           state.status === "error" ? "error" : state.pendingSends.length > 0 ? "submitted" : "idle",
         error: state.status === "error" ? state.error : undefined,
       };
+    case "local_stream_missing":
+      return state.pendingSends.length === 0
+        ? { ...state, messages: [], status: "idle", historyReady: true, error: undefined }
+        : { ...state, status: "submitted", historyReady: true, error: undefined };
     case "local_stream_failed":
       return { ...state, status: "error", error: event.error };
     case "message_start":
@@ -434,6 +456,21 @@ function reduceIdle(state: ChatState, event: DenoraConversationEvent): ChatState
   };
 }
 
+function persistedMessageToChatMessage(message: PersistedConversationMessage): ChatMessage[] {
+  if (message.role !== "system" && message.role !== "user" && message.role !== "assistant") {
+    return [];
+  }
+
+  return [
+    {
+      id: message.id,
+      role: message.role,
+      metadata: objectRecord(message.metadata),
+      parts: partsFromContent(message.content, true),
+    },
+  ];
+}
+
 function toMessage(
   value: unknown,
 ): (Pick<ChatMessage, "role"> & { readonly content: unknown }) | undefined {
@@ -450,15 +487,31 @@ function snapshotMessage(
   done: boolean,
   previous?: ChatMessage | undefined,
 ): ChatMessage {
+  return {
+    id,
+    role: message.role,
+    metadata: previous?.metadata,
+    parts: partsFromContent(message.content, done, previous),
+  };
+}
+
+function partsFromContent(
+  rawContent: unknown,
+  done: boolean,
+  previous?: ChatMessage | undefined,
+): ChatMessagePart[] {
   const parts: ChatMessagePart[] = [];
   const previousFiles = previous?.parts.filter((part) => part.type === "file") ?? [];
   let previousFileIndex = 0;
+  const textObject = objectRecord(rawContent);
   const content =
-    typeof message.content === "string"
-      ? [{ type: "text", text: message.content }]
-      : Array.isArray(message.content)
-        ? message.content
-        : [];
+    typeof rawContent === "string"
+      ? [{ type: "text", text: rawContent }]
+      : Array.isArray(rawContent)
+        ? rawContent
+        : typeof textObject?.text === "string"
+          ? [{ type: "text", text: textObject.text }]
+          : [];
 
   for (const block of content) {
     const record = objectRecord(block);
@@ -504,7 +557,22 @@ function snapshotMessage(
       );
     }
   }
-  return { id, role: message.role, metadata: previous?.metadata, parts };
+
+  if (parts.length === 0) {
+    parts.push({ type: "text", text: fallbackText(rawContent), state: "done" });
+  }
+
+  return parts;
+}
+
+function fallbackText(content: unknown): string {
+  if (content === undefined || content === null) return "";
+  if (typeof content === "string") return content;
+  try {
+    return JSON.stringify(content, null, 2) ?? String(content);
+  } catch {
+    return String(content);
+  }
 }
 
 function reasoningIndexes(message: {

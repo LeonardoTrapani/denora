@@ -135,7 +135,7 @@ export interface Interface {
   readonly authorizeConversation: (input: {
     readonly conversationId: string;
     readonly userId: string;
-  }) => Effect.Effect<void, Error>;
+  }) => Effect.Effect<ConversationRecord, Error>;
   readonly setConversationLifecycle: (input: {
     readonly conversationId: string;
     readonly userId: string;
@@ -185,10 +185,11 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
       function* (input: {
         readonly conversationId: string;
         readonly userId: string;
-      }): Effect.fn.Return<void, Error> {
+      }): Effect.fn.Return<ConversationRecord, Error> {
         const found = yield* findConversation(input.conversationId, input.userId);
         if (found === undefined)
           return yield* new ConversationNotAuthorized({ conversationId: input.conversationId });
+        return found;
       },
     );
 

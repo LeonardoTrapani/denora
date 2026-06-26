@@ -4,8 +4,10 @@ import {
   EventStorageFailed,
   type EventStreamStore,
   makeInMemoryEventStreamStore,
+  agentStreamPath,
 } from "../../src/agent-run/EventStreamStore.ts";
 import {
+  handleConversationObjectRequest,
   handleRunObjectRequest,
   handleStreamHead,
   handleStreamRead,
@@ -95,6 +97,33 @@ describe("StreamProtocol", () => {
       assert.strictEqual(response.status, 200);
       assert.strictEqual(response.headers.get("Stream-Next-Offset"), offset);
       assert.deepStrictEqual(yield* Effect.promise(() => response.json()), [start]);
+    }),
+  );
+
+  it.effect("serves the default attached-agent stream through the conversation events alias", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      const conversationId = "conversation_protocol_alias";
+      const streamPath = agentStreamPath("default", conversationId);
+      const event = {
+        v: 3,
+        type: "message_start",
+        instanceId: conversationId,
+        agentName: "default",
+        eventIndex: 0,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: "hello" }] },
+      };
+      yield* store.createStream(streamPath);
+      yield* store.appendEvent(streamPath, event);
+
+      const response = yield* handleConversationObjectRequest(
+        store,
+        new Request(`https://api.test/conversations/${conversationId}/events?offset=-1`),
+      );
+
+      assert.strictEqual(response.status, 200);
+      assert.deepStrictEqual(yield* Effect.promise(() => response.json()), [event]);
     }),
   );
 

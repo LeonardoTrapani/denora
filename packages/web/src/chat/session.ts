@@ -1,10 +1,11 @@
-import type { LiveMode } from "@durable-streams/client";
+import { FetchError, type LiveMode } from "@durable-streams/client";
 
 import { apiEffect, runApi } from "../lib/api.ts";
 import { createConversationEventStream, type ConversationEventStream } from "./stream.ts";
 import {
   type ChatReducerEvent,
   type ChatState,
+  type PersistedConversationMessage,
   emptyChatState,
   reduceChatEvent,
 } from "./reducer.ts";
@@ -16,6 +17,7 @@ export interface ConversationChatSessionOptions {
   readonly conversationId?: string | undefined;
   readonly history?: ChatHistory | undefined;
   readonly live?: LiveMode | undefined;
+  readonly resetKey?: unknown;
 }
 
 export class ConversationChatSession {
@@ -27,6 +29,7 @@ export class ConversationChatSession {
   private active = false;
   private generation = 0;
   private reconnectOffset: string | undefined;
+  private admittedOffset: string | undefined;
   private reconnectAttempt = 0;
   private localId = 0;
   private hydrationState: ChatState;
@@ -86,7 +89,8 @@ export class ConversationChatSession {
         localId,
         submissionId: receipt.submissionId,
       });
-      this.reconnectOffset = this.reconnectOffset ?? receipt.offset;
+      this.admittedOffset = receipt.offset;
+      this.reconnectOffset = receipt.offset;
       if (this.active && this.stream === undefined) {
         queueMicrotask(() => void this.connect(this.generation));
       }
@@ -138,9 +142,43 @@ export class ConversationChatSession {
     } catch (error) {
       if (!this.isCurrent(generation) || this.stream !== stream) return;
       this.reconnectOffset = stream.offset !== "-1" ? stream.offset : this.reconnectOffset;
+      if (isStatus(error, 404)) {
+        this.stream = undefined;
+        await this.hydrateFromPersistedMessages(conversationId, generation);
+        queueMicrotask(() => void this.connect(generation));
+        return;
+      }
       await this.retry(toError(error), generation, "hydrate");
     } finally {
       if (this.stream === stream) this.stream = undefined;
+    }
+  }
+
+  private async hydrateFromPersistedMessages(
+    conversationId: string,
+    generation: number,
+  ): Promise<void> {
+    try {
+      const messages = await runApi(
+        apiEffect((client) =>
+          client.listConversationMessages({
+            params: { conversationId },
+          }),
+        ),
+        { span: "chat.list-messages" },
+      );
+      if (!this.isCurrent(generation)) return;
+      this.hydrationState = reduceChatEvent(
+        { ...emptyChatState, conversationId },
+        {
+          type: "local_history_loaded",
+          messages: messages as ReadonlyArray<PersistedConversationMessage>,
+        },
+      );
+      this.commitHydration();
+    } catch (error) {
+      if (!this.isCurrent(generation)) return;
+      await this.retry(toError(error), generation, "hydrate");
     }
   }
 
@@ -181,6 +219,15 @@ export class ConversationChatSession {
     } catch (error) {
       if (!this.isCurrent(generation) || this.stream !== stream) return;
       if (delivered) this.reconnectOffset = stream.offset;
+      if (!delivered && isStatus(error, 404)) {
+        if (this.admittedOffset !== undefined) {
+          this.reconnectOffset = this.admittedOffset;
+          await this.retry(toError(error), generation, "connect");
+        } else {
+          this.dispatch({ type: "local_stream_missing" });
+        }
+        return;
+      }
       await this.retry(toError(error), generation, "connect");
     } finally {
       if (this.stream === stream) this.stream = undefined;
@@ -251,6 +298,16 @@ function publicSnapshot(state: ChatState): ChatSnapshot {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function isStatus(error: unknown, status: number): boolean {
+  return (
+    (error instanceof FetchError && error.status === status) ||
+    (typeof error === "object" &&
+      error !== null &&
+      "status" in error &&
+      (error as { readonly status?: unknown }).status === status)
+  );
 }
 
 export * as ChatSession from "./session.ts";

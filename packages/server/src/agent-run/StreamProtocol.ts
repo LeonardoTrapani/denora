@@ -144,7 +144,7 @@ const streamPathFromAttachedPath = (pathname: string): string => {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "agents" && parts.length >= 3)
     return agentStreamPath(parts[1] ?? "", parts[2] ?? "");
-  return `conversations/${conversationIdFromPath(pathname)}`;
+  return agentStreamPath("default", conversationIdFromPath(pathname));
 };
 
 export const handleStreamHead = Effect.fn("StreamProtocol.handleStreamHead")(function* (

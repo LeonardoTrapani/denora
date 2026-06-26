@@ -7,7 +7,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { getAuthClient } from "../../auth-client.ts";
 import type { ChatMessagePart } from "../../chat/types.ts";
 import { useConversationChat } from "../../chat/use-conversation-chat.ts";
-import { apiEffect, runApi } from "../../lib/api.ts";
+import { apiQueryOptions } from "../../lib/api.ts";
 
 export const Route = createFileRoute("/_authenticated/app")({
   component: AppHome,
@@ -18,16 +18,20 @@ function AppHome() {
   const user = auth.user;
   const queryClient = useQueryClient();
   const [selectedConversationId, setSelectedConversationId] = useState<string | undefined>();
-  const chat = useConversationChat({ conversationId: selectedConversationId, history: 100 });
-  const [input, setInput] = useState("");
-  const conversationsQuery = useQuery({
-    queryKey: ["conversations"],
-    queryFn: () =>
-      runApi(
-        apiEffect((client) => client.listConversations()),
-        { span: "chat.list" },
-      ),
+  const [newConversationKey, setNewConversationKey] = useState(0);
+  const chat = useConversationChat({
+    conversationId: selectedConversationId,
+    history: 100,
+    resetKey: newConversationKey,
   });
+  const [input, setInput] = useState("");
+  const conversationsQuery = useQuery(
+    apiQueryOptions({
+      queryKey: ["conversations"],
+      queryFn: ({ client }) => client.listConversations(),
+      span: "chat.list",
+    }),
+  );
   const signOutMutation = useMutation({
     mutationFn: async () => {
       getAuthClient().signOut();
@@ -46,10 +50,9 @@ function AppHome() {
   };
 
   useEffect(() => {
-    if (chat.conversationId === undefined || chat.conversationId === selectedConversationId) return;
-    setSelectedConversationId(chat.conversationId);
+    if (chat.conversationId === undefined) return;
     void queryClient.invalidateQueries({ queryKey: ["conversations"] });
-  }, [chat.conversationId, queryClient, selectedConversationId]);
+  }, [chat.conversationId, queryClient]);
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col px-4 py-6">
@@ -77,7 +80,10 @@ function AppHome() {
               size="sm"
               type="button"
               variant="outline"
-              onClick={() => setSelectedConversationId(undefined)}
+              onClick={() => {
+                setSelectedConversationId(undefined);
+                setNewConversationKey((key) => key + 1);
+              }}
             >
               New
             </Button>
@@ -91,7 +97,11 @@ function AppHome() {
                 key={conversation.id}
                 className="w-full justify-start text-left"
                 type="button"
-                variant={conversation.id === selectedConversationId ? "default" : "outline"}
+                variant={
+                  conversation.id === (selectedConversationId ?? chat.conversationId)
+                    ? "default"
+                    : "outline"
+                }
                 onClick={() => setSelectedConversationId(conversation.id)}
               >
                 <span className="truncate">{conversation.title ?? conversation.id}</span>

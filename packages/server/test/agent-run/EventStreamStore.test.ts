@@ -255,6 +255,43 @@ const defineEventStreamStoreContractTests = (
       ),
     );
 
+    it.effect("allocates distinct offsets and events for concurrent appendEventOnce calls", () =>
+      backend.useStore((store) =>
+        Effect.gen(function* () {
+          yield* store.createStream("runs/test");
+          const offsets = yield* Effect.all(
+            [
+              store.appendEventOnce("runs/test", "event-1", { index: 0 }),
+              store.appendEventOnce("runs/test", "event-2", { index: 1 }),
+            ],
+            { concurrency: "unbounded" },
+          );
+
+          assert.strictEqual(new Set(offsets).size, 2);
+          const read = yield* store.readEvents("runs/test", { offset: "-1" });
+          assert.strictEqual(read.events.length, 2);
+          assert.deepStrictEqual(
+            [...read.events].sort(
+              (left, right) =>
+                (left.data as { index: number }).index - (right.data as { index: number }).index,
+            ),
+            [
+              { data: { index: 0 }, offset: offsets[0] },
+              { data: { index: 1 }, offset: offsets[1] },
+            ],
+          );
+          assert.deepStrictEqual(yield* store.readEventByKey("runs/test", "event-1"), {
+            offset: offsets[0],
+            event: { index: 0 },
+          });
+          assert.deepStrictEqual(yield* store.readEventByKey("runs/test", "event-2"), {
+            offset: offsets[1],
+            event: { index: 1 },
+          });
+        }),
+      ),
+    );
+
     it.effect("notifies subscribers on append and close", () =>
       backend.useStore((store) =>
         Effect.gen(function* () {

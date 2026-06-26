@@ -1181,6 +1181,60 @@ describe("AgentConversationSessionStore", () => {
     ),
   );
 
+  it.effect("appends and records the terminal event offset before settling normal success", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, store, coordinator } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "terminal normal success" });
+        const contexts: Array<ReadonlyArray<AgentMessage>> = [];
+        const originalAppendEventOnce = store.appendEventOnce;
+        let statusBeforeTerminalAppend: string | undefined;
+        let statusAfterTerminalAppend: string | undefined;
+        let terminalAppendOffset: string | undefined;
+
+        (store as { appendEventOnce: EventStreamStore["appendEventOnce"] }).appendEventOnce = (
+          path,
+          key,
+          event,
+        ) =>
+          Effect.gen(function* () {
+            if (key === `agent-conversation:${input.submissionId}:terminal`) {
+              statusBeforeTerminalAppend = yield* readSubmissionStatus(sql, input.submissionId);
+              terminalAppendOffset = yield* originalAppendEventOnce(path, key, event);
+              statusAfterTerminalAppend = yield* readSubmissionStatus(sql, input.submissionId);
+              return terminalAppendOffset;
+            }
+            return yield* originalAppendEventOnce(path, key, event);
+          });
+
+        yield* admitAndCreate(store, coordinator, input);
+        yield* coordinator.reconcile({
+          pi: makePi(["terminal offset reply"], contexts),
+          scheduleWake: () => Effect.void,
+        });
+
+        const streamPath = agentStreamPath(input.agentName, input.conversationId);
+        const replay = yield* store.readEvents(streamPath, { offset: "-1" });
+        const terminalEvent = replay.events.find(
+          (event) =>
+            (event.data as { readonly type?: unknown; readonly submissionId?: unknown }).type ===
+              "submission_settled" &&
+            (event.data as { readonly submissionId?: unknown }).submissionId === input.submissionId,
+        );
+
+        assert.strictEqual(statusBeforeTerminalAppend, "terminalizing");
+        assert.strictEqual(statusAfterTerminalAppend, "terminalizing");
+        assert.strictEqual(yield* readSubmissionStatus(sql, input.submissionId), "settled");
+        assert.isString(terminalAppendOffset);
+        assert.strictEqual(
+          yield* readTerminalEventOffset(sql, input.submissionId),
+          terminalAppendOffset,
+        );
+        assert.strictEqual(terminalEvent?.offset, terminalAppendOffset);
+      }),
+    ),
+  );
+
   it.effect("durable fibers stash snapshots, reject duplicate starts, and clean up run rows", () =>
     withHarness(
       Effect.gen(function* () {
@@ -1434,6 +1488,7 @@ describe("AgentConversationSessionStore", () => {
         yield* AgentRunLifecycle.createConversationSubmission(store, input);
         yield* sessions.recordSubmissionStarted(recordStartedInput(input));
         yield* markStaleApplied(sql, input.submissionId);
+        assert.strictEqual(yield* readTurnJournal(sql, input.submissionId), null);
 
         const contexts: Array<ReadonlyArray<AgentMessage>> = [];
         yield* coordinator.reconcile({
@@ -1695,6 +1750,45 @@ describe("AgentConversationSessionStore", () => {
     ),
   );
 
+  it.effect("completed assistant final wins over retry budget exhaustion", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, store, sessions, coordinator } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "completed despite exhausted budget" });
+        const contexts: Array<ReadonlyArray<AgentMessage>> = [];
+
+        yield* admitAndCreate(store, coordinator, input);
+        yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+        yield* sessions.finishRun({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          isError: false,
+          result: { assistantText: "completed before crash" },
+        });
+        yield* markStaleApplied(sql, input.submissionId, {
+          attemptCount: 3,
+          maxAttempts: 3,
+        });
+
+        yield* coordinator.reconcile({
+          pi: makePi(["should not run"], contexts),
+          scheduleWake: () => Effect.void,
+        });
+
+        const terminal = yield* coordinator.getSubmissionTerminal(input.submissionId);
+        const event = terminal?.event as Record<string, unknown> | undefined;
+        const state = yield* readSubmissionState(sql, input.submissionId);
+        assert.strictEqual(contexts.length, 0);
+        assert.strictEqual(state.status, "settled");
+        assert.strictEqual(state.last_error, null);
+        assert.strictEqual(event?.outcome, "completed");
+        assert.deepStrictEqual(event?.result, { assistantText: "completed before crash" });
+        assert.strictEqual(yield* countMessages(sql, "assistant"), 1);
+      }),
+    ),
+  );
+
   it.effect("detects stale running work from an expired advisory lease", () =>
     withHarness(
       Effect.gen(function* () {
@@ -1759,6 +1853,51 @@ describe("AgentConversationSessionStore", () => {
         assert.strictEqual(state.last_error, "Agent run timed out after 1 of 3 attempts.");
         assert.strictEqual(event.outcome, "failed");
         assert.strictEqual(event.error?.message, state.last_error);
+      }),
+    ),
+  );
+
+  it.effect("completed assistant final wins over an expired timeout", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, store, sessions, coordinator } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "completed despite timeout" });
+        const contexts: Array<ReadonlyArray<AgentMessage>> = [];
+
+        yield* admitAndCreate(store, coordinator, input);
+        yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+        yield* sessions.finishRun({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          isError: false,
+          result: { assistantText: "completed before timeout reconciliation" },
+        });
+        yield* markRunningApplied(sql, input.submissionId, {
+          attemptCount: 1,
+          maxAttempts: 3,
+          startedAt: Date.now(),
+          inputAppliedAt: Date.now(),
+          leaseExpiresAt: Date.now() - 1,
+          timeoutAt: Date.now() - 1,
+        });
+
+        yield* coordinator.reconcile({
+          pi: makePi(["should not run"], contexts),
+          scheduleWake: () => Effect.void,
+        });
+
+        const terminal = yield* coordinator.getSubmissionTerminal(input.submissionId);
+        const event = terminal?.event as Record<string, unknown> | undefined;
+        const state = yield* readSubmissionState(sql, input.submissionId);
+        assert.strictEqual(contexts.length, 0);
+        assert.strictEqual(state.status, "settled");
+        assert.strictEqual(state.last_error, null);
+        assert.strictEqual(event?.outcome, "completed");
+        assert.deepStrictEqual(event?.result, {
+          assistantText: "completed before timeout reconciliation",
+        });
+        assert.strictEqual(yield* countMessages(sql, "assistant"), 1);
       }),
     ),
   );
@@ -2060,6 +2199,170 @@ describe("AgentConversationSessionStore", () => {
       ),
   );
 
+  it.effect("repairs all requested interrupted tool results synthetically when none exist", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "repair all interrupted tools" });
+        const interruptedText =
+          "Tool sample_tool execution was interrupted before completion. The outcome is unknown.";
+        const toolRequest: AgentConversationSessionStore.JournaledToolRequest = {
+          toolCalls: [
+            { type: "toolCall" as const, id: "call_1", name: "sample_tool" },
+            { type: "toolCall" as const, id: "call_2", name: "sample_tool" },
+          ],
+          argumentsByToolCallId: {
+            call_1: { value: "one" },
+            call_2: { value: "two" },
+          },
+        };
+
+        yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+        yield* sessions.recordAssistantMessageCompleted({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          messageIndex: 0,
+          parts: [
+            {
+              type: "toolCall",
+              id: "call_1",
+              name: "sample_tool",
+              arguments: { value: "one" },
+            },
+            {
+              type: "toolCall",
+              id: "call_2",
+              name: "sample_tool",
+              arguments: { value: "two" },
+            },
+          ],
+          plainText: "",
+        });
+        for (const toolCall of toolRequest.toolCalls) {
+          yield* sessions.recordToolCallCheckpoint({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            toolCallId: toolCall.id,
+            name: toolCall.name,
+            args: toolRequest.argumentsByToolCallId?.[toolCall.id],
+          });
+        }
+
+        const result = yield* sessions.repairInterruptedToolResults({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          toolRequest,
+        });
+        const activePath = yield* sessions.readActivePath({
+          conversationId: input.conversationId,
+          leafMessageId: `tool-result:${input.runId}:call_2`,
+        });
+        const toolResults = activePath.filter((message) => message.role === "toolResult");
+
+        assert.strictEqual(result.repairedCount, 2);
+        assert.deepStrictEqual(
+          toolResults.map((message) => [message.messageId, message.status, message.plainText]),
+          [
+            [`tool-result:${input.runId}:call_1`, "error", interruptedText],
+            [`tool-result:${input.runId}:call_2`, "error", interruptedText],
+          ],
+        );
+        assert.strictEqual(yield* countMessages(sql, "toolResult"), 2);
+      }),
+    ),
+  );
+
+  it.effect("does not create synthetic tool results when all requested results already exist", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "repair no-op tools" });
+        const toolRequest: AgentConversationSessionStore.JournaledToolRequest = {
+          toolCalls: [
+            { type: "toolCall" as const, id: "call_1", name: "sample_tool" },
+            { type: "toolCall" as const, id: "call_2", name: "sample_tool" },
+          ],
+          argumentsByToolCallId: {
+            call_1: { value: "one" },
+            call_2: { value: "two" },
+          },
+        };
+
+        yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+        yield* sessions.recordAssistantMessageCompleted({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          messageIndex: 0,
+          parts: [
+            {
+              type: "toolCall",
+              id: "call_1",
+              name: "sample_tool",
+              arguments: { value: "one" },
+            },
+            {
+              type: "toolCall",
+              id: "call_2",
+              name: "sample_tool",
+              arguments: { value: "two" },
+            },
+          ],
+          plainText: "",
+        });
+        for (const toolCall of toolRequest.toolCalls) {
+          yield* sessions.recordToolCallCheckpoint({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            toolCallId: toolCall.id,
+            name: toolCall.name,
+            args: toolRequest.argumentsByToolCallId?.[toolCall.id],
+          });
+          yield* sessions.recordToolResultCheckpoint({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            toolCallId: toolCall.id,
+            name: toolCall.name,
+            result: {
+              content: [{ type: "text", text: `result:${toolCall.id}` }],
+              details: toolRequest.argumentsByToolCallId?.[toolCall.id],
+            },
+            isError: false,
+          });
+        }
+        const before = yield* readSessionMessages(sql);
+
+        const result = yield* sessions.repairInterruptedToolResults({
+          conversationId: input.conversationId,
+          runId: input.runId,
+          submissionId: input.submissionId,
+          toolRequest,
+        });
+        const after = yield* readSessionMessages(sql);
+        const toolResults = after.filter((message) => message.role === "toolResult");
+
+        assert.strictEqual(result.repairedCount, 0);
+        assert.deepStrictEqual(
+          after.map((message) => message.message_id),
+          before.map((message) => message.message_id),
+        );
+        assert.deepStrictEqual(
+          toolResults.map((message) => [message.status, message.plain_text]),
+          [
+            ["completed", "result:call_1"],
+            ["completed", "result:call_2"],
+          ],
+        );
+        assert.strictEqual(yield* countMessages(sql, "toolResult"), 2);
+      }),
+    ),
+  );
+
   it.effect("repairs an interrupted partial tool batch before retrying", () =>
     withHarness(
       Effect.gen(function* () {
@@ -2168,6 +2471,236 @@ describe("AgentConversationSessionStore", () => {
         assert.strictEqual(yield* countMessages(sql, "toolResult"), 2);
       }),
     ),
+  );
+
+  it.effect(
+    "partial tool batch repair wins over trailing aborted assistant partial and prevents tool reruns",
+    () =>
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, store, sessions, coordinator } = yield* AgentConversationHarness;
+          const input = submissionInput({ text: "recover tools before trailing partial" });
+          const contexts: Array<ReadonlyArray<AgentMessage>> = [];
+          const toolRuns: Record<string, number> = {};
+          const interruptedText =
+            "Tool sample_tool execution was interrupted before completion. The outcome is unknown.";
+          const toolRequest: AgentConversationSessionStore.JournaledToolRequest = {
+            toolCalls: [
+              { type: "toolCall" as const, id: "call_done", name: "sample_tool" },
+              { type: "toolCall" as const, id: "call_missing", name: "sample_tool" },
+            ],
+            argumentsByToolCallId: {
+              call_done: { value: "done" },
+              call_missing: { value: "missing" },
+            },
+          };
+          const tool: AgentTool<any> = {
+            name: "sample_tool",
+            label: "Sample Tool",
+            description: "Should not rerun during repaired recovery.",
+            parameters: Type.Object({ value: Type.String() }),
+            async execute(toolCallId) {
+              toolRuns[toolCallId] = (toolRuns[toolCallId] ?? 0) + 1;
+              return {
+                content: [{ type: "text", text: `rerun:${toolCallId}` }],
+                details: { toolCallId },
+              };
+            },
+          };
+          const pi: PiRuntimeInterface = {
+            tools: [tool],
+            streamFn: ((model, context) => {
+              contexts.push(context.messages.slice() as ReadonlyArray<AgentMessage>);
+              const hasToolResults = context.messages.some(
+                (message) => message.role === "toolResult",
+              );
+              const message: AssistantMessage = hasToolResults
+                ? {
+                    role: "assistant",
+                    content: [{ type: "text", text: "after repaired trailing partial" }],
+                    api: model.api,
+                    provider: model.provider,
+                    model: model.id,
+                    usage: emptyUsage,
+                    stopReason: "stop",
+                    timestamp: Date.now(),
+                  }
+                : {
+                    role: "assistant",
+                    content: [
+                      {
+                        type: "toolCall",
+                        id: "call_done",
+                        name: "sample_tool",
+                        arguments: { value: "done" },
+                      },
+                      {
+                        type: "toolCall",
+                        id: "call_missing",
+                        name: "sample_tool",
+                        arguments: { value: "missing" },
+                      },
+                    ],
+                    api: model.api,
+                    provider: model.provider,
+                    model: model.id,
+                    usage: emptyUsage,
+                    stopReason: "toolUse",
+                    timestamp: Date.now(),
+                  };
+
+              queueMicrotask(() => {
+                streamAssistantMessage(
+                  message,
+                  hasToolResults ? "after repaired trailing partial" : undefined,
+                );
+              });
+
+              const stream = createAssistantMessageEventStream();
+              function streamAssistantMessage(finalMessage: AssistantMessage, text?: string) {
+                stream.push({ type: "start", partial: { ...finalMessage, content: [] } });
+                if (text !== undefined) {
+                  stream.push({ type: "text_start", contentIndex: 0, partial: finalMessage });
+                  stream.push({
+                    type: "text_delta",
+                    contentIndex: 0,
+                    delta: text,
+                    partial: finalMessage,
+                  });
+                  stream.push({
+                    type: "text_end",
+                    contentIndex: 0,
+                    content: text,
+                    partial: finalMessage,
+                  });
+                } else {
+                  finalMessage.content.forEach((toolCall, contentIndex) => {
+                    if (toolCall.type !== "toolCall")
+                      throw new Error("Expected tool call content.");
+                    stream.push({ type: "toolcall_start", contentIndex, partial: finalMessage });
+                    stream.push({
+                      type: "toolcall_end",
+                      contentIndex,
+                      toolCall,
+                      partial: finalMessage,
+                    });
+                  });
+                }
+                stream.push({
+                  type: "done",
+                  reason: text === undefined ? "toolUse" : "stop",
+                  message: finalMessage,
+                });
+                stream.end();
+              }
+
+              return stream;
+            }) satisfies StreamFn,
+          };
+
+          yield* admitAndCreate(store, coordinator, input);
+          yield* sessions.recordSubmissionStarted(recordStartedInput(input));
+          yield* sessions.recordAssistantMessageCompleted({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            messageIndex: 0,
+            parts: [
+              {
+                type: "toolCall",
+                id: "call_done",
+                name: "sample_tool",
+                arguments: { value: "done" },
+              },
+              {
+                type: "toolCall",
+                id: "call_missing",
+                name: "sample_tool",
+                arguments: { value: "missing" },
+              },
+            ],
+            plainText: "",
+          });
+          for (const toolCall of toolRequest.toolCalls) {
+            yield* sessions.recordToolCallCheckpoint({
+              conversationId: input.conversationId,
+              runId: input.runId,
+              submissionId: input.submissionId,
+              toolCallId: toolCall.id,
+              name: toolCall.name,
+              args: toolRequest.argumentsByToolCallId?.[toolCall.id],
+            });
+          }
+          yield* sessions.recordToolResultCheckpoint({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            toolCallId: "call_done",
+            name: "sample_tool",
+            result: {
+              content: [{ type: "text", text: "completed result" }],
+              details: { value: "done" },
+            },
+            isError: false,
+          });
+          yield* sessions.recordAssistantMessageStarted({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            messageIndex: 1,
+          });
+          yield* sessions.recordAssistantTextPartCompleted({
+            conversationId: input.conversationId,
+            runId: input.runId,
+            submissionId: input.submissionId,
+            messageIndex: 1,
+            contentIndex: 0,
+            text: "trailing aborted partial",
+          });
+          yield* sql
+            .exec(
+              `UPDATE denora_agent_conversation_session_messages
+               SET status = 'aborted'
+               WHERE message_id = ?`,
+              `assistant:${input.runId}:1`,
+            )
+            .pipe(Effect.asVoid);
+          yield* markRunningAppliedWithAttemptMarker(sql, input.submissionId, input.runId);
+          yield* recordToolRequestJournal(sql, input, toolRequest);
+
+          yield* coordinator.reconcile({ pi, scheduleWake: () => Effect.void });
+
+          const recoveredContext = contexts[0] ?? [];
+          const toolResults = recoveredContext.filter(
+            (message): message is Extract<AgentMessage, { role: "toolResult" }> =>
+              message.role === "toolResult",
+          );
+          const trailingPartial = (yield* readSessionMessages(sql)).find(
+            (message) => message.message_id === `assistant:${input.runId}:1`,
+          );
+
+          assert.strictEqual(yield* readSubmissionStatus(sql, input.submissionId), "settled");
+          assert.deepStrictEqual(toolRuns, {});
+          assert.deepStrictEqual(
+            recoveredContext.map((message) => message.role),
+            ["user", "assistant", "toolResult", "toolResult"],
+          );
+          assert.deepStrictEqual(
+            toolResults.map((message) => [
+              message.toolCallId,
+              agentMessageText(message),
+              message.isError,
+            ]),
+            [
+              ["call_done", "completed result", false],
+              ["call_missing", interruptedText, true],
+            ],
+          );
+          assert.strictEqual(trailingPartial?.status, "completed");
+          assert.strictEqual(trailingPartial?.plain_text, "after repaired trailing partial");
+          assert.strictEqual(contexts.length, 1);
+        }),
+      ),
   );
 
   it.effect("repairs a non-prefix interrupted partial tool batch in requested order", () =>

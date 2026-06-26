@@ -859,30 +859,41 @@ const readLatestMessageId = (
     return rows[0]?.message_id ?? null;
   });
 
-const readLatestMessageIdExcluding = Effect.fn(
-  "AgentConversationSessionStore.readLatestMessageIdExcluding",
+const readLatestToolResultRepairParentMessageId = Effect.fn(
+  "AgentConversationSessionStore.readLatestToolResultRepairParentMessageId",
 )(function* (
   sql: Cloudflare.SqlStorage,
-  conversationId: string,
-  excludedMessageIds: ReadonlyArray<string>,
+  input: {
+    readonly conversationId: string;
+    readonly runId: string;
+    readonly submissionId: string;
+  },
+  resultMessageIds: ReadonlyArray<string>,
 ): Effect.fn.Return<string | null, EventStorageFailed> {
-  if (excludedMessageIds.length === 0) return yield* readLatestMessageId(sql, conversationId);
-  const placeholders = excludedMessageIds.map(() => "?").join(", ");
+  const placeholders = resultMessageIds.map(() => "?").join(", ");
   const cursor = yield* sql
     .exec<LatestMessageRow>(
       `SELECT message_id
          FROM denora_agent_conversation_session_messages
         WHERE conversation_id = ?
           AND message_id NOT IN (${placeholders})
+          AND NOT (
+            run_id = ?
+            AND submission_id = ?
+            AND role = 'assistant'
+            AND status IN ('started', 'partial', 'aborted', 'error')
+          )
         ORDER BY sequence DESC
         LIMIT 1`,
-      conversationId,
-      ...excludedMessageIds,
+      input.conversationId,
+      ...resultMessageIds,
+      input.runId,
+      input.submissionId,
     )
-    .pipe(storageFailure("read latest conversation session message excluding batch"));
+    .pipe(storageFailure("read latest tool repair parent message"));
   const rows = yield* cursor
     .toArray()
-    .pipe(storageFailure("collect latest conversation session message excluding batch"));
+    .pipe(storageFailure("collect latest tool repair parent message"));
   return rows[0]?.message_id ?? null;
 });
 
@@ -901,9 +912,9 @@ const relinkOrderedToolResultBatch = Effect.fn(
   const resultMessageIds = input.toolCalls.map((toolCall) =>
     toolResultMessageId(input.runId, toolCall.id),
   );
-  let parentMessageId = yield* readLatestMessageIdExcluding(
+  let parentMessageId = yield* readLatestToolResultRepairParentMessageId(
     sql,
-    input.conversationId,
+    input,
     resultMessageIds,
   );
 

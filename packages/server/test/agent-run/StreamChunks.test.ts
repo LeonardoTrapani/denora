@@ -206,7 +206,110 @@ describe("StreamChunkWriter", () => {
     ),
   );
 
-  it.effect("marks the writer failed after duplicate append without overwriting", () =>
+  it.effect("stores cumulative partial deltas with linear serialized growth", () =>
+    Effect.gen(function* () {
+      const stored: Array<{ readonly segmentIndex: number; readonly body: string }> = [];
+      const store: Pick<StreamChunkStore, "appendStreamChunkSegment"> = {
+        appendStreamChunkSegment: (_streamKey, segmentIndex, body) =>
+          Effect.sync(() => {
+            stored.push({ segmentIndex, body });
+            return true;
+          }),
+      };
+      const writer = makeStreamChunkWriter(store, "writer-linear");
+      let cumulative = "";
+      for (let index = 0; index < 500; index += 1) {
+        const delta = `token-${String(index)} `;
+        cumulative += delta;
+        yield* writer.write({
+          type: "text_delta",
+          contentIndex: 0,
+          delta,
+          partial: fakePartial([{ type: "text", text: cumulative }]),
+        });
+      }
+      yield* writer.flush();
+
+      const totalBytes = stored.reduce(
+        (total, item) => total + new TextEncoder().encode(item.body).byteLength,
+        0,
+      );
+      assert.isBelow(totalBytes, 100_000);
+      const recovered = reconstructInterruptedStream(stored, "writer-linear");
+      assert.deepStrictEqual(recovered?.partial.content, [{ type: "text", text: cumulative }]);
+    }),
+  );
+
+  it.effect("rejects writer-level oversized UTF-8 segments before writing to storage", () =>
+    Effect.gen(function* () {
+      let callCount = 0;
+      const store: Pick<StreamChunkStore, "appendStreamChunkSegment"> = {
+        appendStreamChunkSegment: () =>
+          Effect.sync(() => {
+            callCount += 1;
+            return true;
+          }),
+      };
+      const writer = makeStreamChunkWriter(store, "writer-oversized");
+      const content = '🙂"\\\n'.repeat(250_000);
+      yield* writer.write({
+        type: "text_delta",
+        contentIndex: 0,
+        delta: content,
+        partial: fakePartial([{ type: "text", text: content }]),
+      });
+      const error = yield* writer.flush().pipe(Effect.flip);
+
+      assert.strictEqual(error._tag, "StreamChunkSegmentTooLarge");
+      if (error._tag === "StreamChunkSegmentTooLarge") {
+        const tooLarge = error as {
+          readonly maximumBytes: number;
+          readonly serializedBytes: number;
+        };
+        assert.strictEqual(tooLarge.maximumBytes, MAX_STREAM_CHUNK_SEGMENT_BYTES);
+        assert.isAbove(tooLarge.serializedBytes, MAX_STREAM_CHUNK_SEGMENT_BYTES);
+      }
+      assert.strictEqual(callCount, 0);
+      assert.isTrue(writer.isFailed());
+    }),
+  );
+
+  it.effect(
+    "keeps compact tool-call streams ineligible for recovery without persisting arguments",
+    () =>
+      Effect.gen(function* () {
+        const stored: Array<{ readonly segmentIndex: number; readonly body: string }> = [];
+        const store: Pick<StreamChunkStore, "appendStreamChunkSegment"> = {
+          appendStreamChunkSegment: (_streamKey, segmentIndex, body) =>
+            Effect.sync(() => {
+              stored.push({ segmentIndex, body });
+              return true;
+            }),
+        };
+        const writer = makeStreamChunkWriter(store, "writer-toolcall");
+        const argumentsText = '{"prompt":"do not persist this marker"}';
+        yield* writer.write({
+          type: "toolcall_delta",
+          contentIndex: 0,
+          delta: argumentsText,
+          partial: fakePartial(),
+        });
+        yield* writer.flush();
+
+        assert.strictEqual(stored.length, 1);
+        assert.notInclude(stored[0]?.body ?? "", "do not persist this marker");
+        const events = JSON.parse(stored[0]?.body ?? "[]") as ReadonlyArray<
+          Record<string, unknown>
+        >;
+        assert.deepStrictEqual(
+          events.map((event) => event.type),
+          ["toolcall"],
+        );
+        assert.isNull(reconstructInterruptedStream(stored, "writer-toolcall"));
+      }),
+  );
+
+  it.effect("marks the writer failed after duplicate append and stops future writes", () =>
     withSqliteStreamChunkStore((store) =>
       Effect.gen(function* () {
         assert.isTrue(yield* store.appendStreamChunkSegment("writer-duplicate", 0, "original"));
@@ -215,15 +318,42 @@ describe("StreamChunkWriter", () => {
         yield* writer.flush();
 
         assert.isTrue(writer.isFailed());
+        yield* writer.write(textDelta(0, "ignored"));
+        yield* writer.flush();
         assert.deepStrictEqual(yield* store.readStreamChunkSegments("writer-duplicate"), [
           { segmentIndex: 0, body: "original" },
         ]);
       }),
     ),
   );
+
+  it.effect("close flushes buffered events then ignores later writes", () =>
+    withSqliteStreamChunkStore((store) =>
+      Effect.gen(function* () {
+        const writer = makeStreamChunkWriter(store, "writer-close");
+        yield* writer.write(textDelta(0, "final"));
+        yield* writer.close();
+
+        const closedSegments = yield* store.readStreamChunkSegments("writer-close");
+        assert.strictEqual(closedSegments.length, 1);
+        yield* writer.write(textDelta(0, "ignored"));
+        yield* writer.flush();
+
+        assert.deepStrictEqual(
+          yield* store.readStreamChunkSegments("writer-close"),
+          closedSegments,
+        );
+      }),
+    ),
+  );
 });
 
 describe("reconstructInterruptedStream", () => {
+  it("returns null for empty segment lists and empty segment bodies", () => {
+    assert.isNull(reconstructInterruptedStream([], "stream-empty"));
+    assert.isNull(reconstructInterruptedStream([segment(0, [])], "stream-empty-body"));
+  });
+
   it("reconstructs text deltas into an aborted assistant partial", () => {
     const result = reconstructInterruptedStream(
       [segment(0, [textDelta(0, "Hello "), textDelta(0, "world")])],
@@ -270,6 +400,38 @@ describe("reconstructInterruptedStream", () => {
     );
 
     assert.isNull(result);
+  });
+
+  it("returns null when no useful partial content can be reconstructed", () => {
+    assert.isNull(
+      reconstructInterruptedStream(
+        [segment(0, [{ type: "text_start", contentIndex: 0, partial: fakePartial() }])],
+        "stream-a",
+      ),
+    );
+    assert.isNull(reconstructInterruptedStream([segment(0, [textDelta(0, "")])], "stream-a"));
+  });
+
+  it("reconstructs multiple valid segments in order", () => {
+    const result = reconstructInterruptedStream(
+      [segment(0, [textDelta(0, "First ")]), segment(1, [textDelta(0, "second")])],
+      "stream-a",
+    );
+
+    assert.isNotNull(result);
+    if (result === null) throw new Error("Expected reconstructed stream.");
+    assert.deepStrictEqual(result.partial.content, [{ type: "text", text: "First second" }]);
+  });
+
+  it("filters out empty content blocks", () => {
+    const result = reconstructInterruptedStream(
+      [segment(0, [textDelta(0, ""), textDelta(1, "real content")])],
+      "stream-a",
+    );
+
+    assert.isNotNull(result);
+    if (result === null) throw new Error("Expected reconstructed stream.");
+    assert.deepStrictEqual(result.partial.content, [{ type: "text", text: "real content" }]);
   });
 
   it("ignores malformed segments and reconstructs remaining valid segments", () => {

@@ -1,5 +1,5 @@
 import type { LiveMode } from "@durable-streams/client";
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import type { PersistedConversationMessage } from "./reducer.ts";
 import {
@@ -21,6 +21,18 @@ export interface UseConversationChatOptions {
 
 export interface UseConversationChatResult extends ChatSnapshot {
   readonly sendMessage: (message: string) => Promise<SendMessageResult>;
+}
+
+export interface UseLayoutConversationChatOptions extends Omit<
+  UseConversationChatOptions,
+  "conversationId"
+> {
+  readonly routeConversationId?: string | undefined;
+  readonly onConversationReady?: ((conversationId: string) => void | Promise<void>) | undefined;
+}
+
+export interface UseLayoutConversationChatResult extends UseConversationChatResult {
+  readonly reset: (conversationId?: string | undefined) => void;
 }
 
 interface CachedSession {
@@ -71,6 +83,79 @@ export function useConversationChat(
   return {
     ...snapshot,
     sendMessage: session.sendMessage.bind(session),
+  };
+}
+
+export function useLayoutConversationChat(
+  options: UseLayoutConversationChatOptions = {},
+): UseLayoutConversationChatResult {
+  const { routeConversationId, history, live, initialMessages, client, onConversationReady } =
+    options;
+  const activeSessionRef = useRef<Session | undefined>(undefined);
+  const routeConversationIdForSessionRef = useRef<string | undefined>(routeConversationId);
+
+  const makeSession = useCallback(
+    (conversationId: string | undefined) =>
+      new Session({
+        conversationId,
+        history,
+        live,
+        initialMessages,
+        client,
+        onConversationCreated: (createdConversationId, createdSession) => {
+          if (activeSessionRef.current !== createdSession) return;
+          void onConversationReady?.(createdConversationId);
+        },
+      }),
+    [client, history, initialMessages, live, onConversationReady],
+  );
+
+  const [session, setSession] = useState(() => makeSession(routeConversationId));
+
+  const replaceSession = useCallback(
+    (conversationId: string | undefined) => {
+      const next = makeSession(conversationId);
+      routeConversationIdForSessionRef.current = conversationId;
+      activeSessionRef.current = next;
+      setSession(next);
+    },
+    [makeSession],
+  );
+
+  useEffect(() => {
+    activeSessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    session.start();
+    return () => session.dispose();
+  }, [session]);
+
+  const snapshot = useSyncExternalStore(
+    session.subscribe ?? emptySubscribe,
+    session.getSnapshot ?? (() => emptyChatSnapshot),
+    () => emptyChatSnapshot,
+  );
+
+  useEffect(() => {
+    if (routeConversationId === snapshot.conversationId) {
+      routeConversationIdForSessionRef.current = routeConversationId;
+      return;
+    }
+
+    const isDraftSessionBecomingDurable =
+      routeConversationId === undefined &&
+      routeConversationIdForSessionRef.current === undefined &&
+      snapshot.conversationId !== undefined;
+    if (isDraftSessionBecomingDurable) return;
+
+    replaceSession(routeConversationId);
+  }, [replaceSession, routeConversationId, snapshot.conversationId]);
+
+  return {
+    ...snapshot,
+    sendMessage: session.sendMessage.bind(session),
+    reset: replaceSession,
   };
 }
 

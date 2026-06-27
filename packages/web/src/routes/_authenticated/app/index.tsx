@@ -1,23 +1,10 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-
-import { ConversationView } from "../../../chat/ConversationView.tsx";
+import { createFileRoute } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/_authenticated/app/")({
   component: NewConversationRoute,
+  pendingMs: Infinity,
 });
 
 function NewConversationRoute() {
-  const navigate = useNavigate();
-
-  return (
-    <ConversationView.View
-      onConversationReady={(conversationId) =>
-        navigate({
-          to: "/app/conversations/$conversationId",
-          params: { conversationId },
-          replace: true,
-        })
-      }
-    />
-  );
+  return null;
 }

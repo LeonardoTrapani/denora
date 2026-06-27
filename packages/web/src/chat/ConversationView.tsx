@@ -31,41 +31,26 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { loadConversationsAtom } from "./atoms.ts";
 import { LoadingStates } from "./LoadingStates.tsx";
-import type { PersistedConversationMessage } from "./reducer.ts";
 import type { ChatMessage, ChatMessagePart, ChatStatus } from "./types.ts";
-import { useConversationChat } from "./useConversationChat.ts";
+import type { UseConversationChatResult } from "./useConversationChat.ts";
 
 export interface Props {
-  readonly conversationId?: string | undefined;
+  readonly chat: UseConversationChatResult;
   readonly title?: string | null | undefined;
-  readonly initialMessages?: ReadonlyArray<PersistedConversationMessage> | undefined;
-  readonly onConversationReady?: ((conversationId: string) => void | Promise<void>) | undefined;
 }
 
-export function View({ conversationId, title, initialMessages, onConversationReady }: Props) {
-  const chat = useConversationChat({ conversationId, history: 100, initialMessages });
+export function View({ chat, title }: Props) {
   const [composerText, setComposerText] = useState("");
   const [sendPending, setSendPending] = useState(false);
   const [sendError, setSendError] = useState<Error | undefined>(undefined);
   const refreshConversations = useAtomSet(loadConversationsAtom, { mode: "promise" });
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
-  const routedConversationIdRef = useRef<string | undefined>(undefined);
-
   const canSend = composerText.trim().length > 0 && !sendPending;
   const showHistorySkeleton = !chat.historyReady && chat.messages.length === 0;
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ block: "end" });
   }, [chat.messages, chat.status]);
-
-  useEffect(() => {
-    if (conversationId !== undefined || chat.conversationId === undefined || !onConversationReady) {
-      return;
-    }
-    if (routedConversationIdRef.current === chat.conversationId) return;
-    routedConversationIdRef.current = chat.conversationId;
-    void onConversationReady(chat.conversationId);
-  }, [chat.conversationId, conversationId, onConversationReady]);
 
   const send = (event: FormEvent) => {
     event.preventDefault();

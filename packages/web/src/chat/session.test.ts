@@ -395,6 +395,31 @@ describe("Session", () => {
     releaseConversationChatSession("__test-draft__", draft);
   });
 
+  it("detaches the draft alias as soon as the durable route retains it", async () => {
+    const createConversation = vi.fn().mockResolvedValue({ id: "conversation-new" });
+    const submitMessage = vi.fn().mockResolvedValue({
+      conversationId: "conversation-new",
+      submissionId: "submission-new",
+      offset: "offset-admitted",
+    });
+    const draft = retainConversationChatSession("__denora:draft-conversation__", {
+      client: client({ createConversation, submitMessage }),
+    });
+    draft.start();
+    await draft.sendMessage("hello");
+    const durable = retainConversationChatSession("conversation-new");
+    const nextDraft = retainConversationChatSession("__denora:draft-conversation__", {
+      client: client({}),
+    });
+
+    expect(durable).toBe(draft);
+    expect(nextDraft).not.toBe(draft);
+    expect(nextDraft.getSnapshot().conversationId).toBeUndefined();
+
+    releaseConversationChatSession("conversation-new", durable);
+    releaseConversationChatSession("__denora:draft-conversation__", nextDraft);
+  });
+
   it("drops the draft alias after a new conversation route retains the durable session", async () => {
     vi.useFakeTimers();
     const createConversation = vi.fn().mockResolvedValue({ id: "conversation-new" });

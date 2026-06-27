@@ -165,12 +165,18 @@ export function retainConversationChatSession(
 ): Session {
   const existing = sessions.get(key);
   if (existing !== undefined) {
-    if (existing.releaseTimer !== undefined) {
-      clearTimeout(existing.releaseTimer);
-      existing.releaseTimer = undefined;
+    if (key === DRAFT_SESSION_KEY && existing.session.getSnapshot().conversationId !== undefined) {
+      sessions.delete(key);
+      releaseUnreferencedAliases(existing.session);
+    } else {
+      if (existing.releaseTimer !== undefined) {
+        clearTimeout(existing.releaseTimer);
+        existing.releaseTimer = undefined;
+      }
+      existing.refs += 1;
+      if (key !== DRAFT_SESSION_KEY) detachDraftAlias(existing.session);
+      return existing.session;
     }
-    existing.refs += 1;
-    return existing.session;
   }
 
   const session = new Session({
@@ -180,6 +186,7 @@ export function retainConversationChatSession(
     },
   });
   sessions.set(key, { session, refs: 1, releaseTimer: undefined });
+  if (key !== DRAFT_SESSION_KEY) detachDraftAlias(session);
   return session;
 }
 
@@ -204,6 +211,13 @@ export function clearConversationChatSessionCache(): void {
   const unique = new Set([...sessions.values()].map((entry) => entry.session));
   sessions.clear();
   for (const session of unique) session.dispose();
+}
+
+function detachDraftAlias(session: Session): void {
+  const draft = sessions.get(DRAFT_SESSION_KEY);
+  if (draft?.session !== session) return;
+  if (draft.releaseTimer !== undefined) clearTimeout(draft.releaseTimer);
+  sessions.delete(DRAFT_SESSION_KEY);
 }
 
 function releaseUnreferencedAliases(session: Session): void {

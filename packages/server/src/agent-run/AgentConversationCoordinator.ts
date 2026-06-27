@@ -597,6 +597,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
             return;
           }
           const prepared = yield* prepareSubmissionForExecution(submission);
+          yield* appendAppliedUserMessage(submission, prepared);
           yield* markSubmissionInputApplied(submission);
           yield* recordTurnJournalPhase(submission, "before_provider");
           yield* stashAttemptSnapshot(submission, fiber, { phase: "before_provider" });
@@ -1808,10 +1809,7 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
     "AgentConversationCoordinator.prepareSubmissionForExecution",
   )(function* (
     submission: Submission,
-  ): Effect.fn.Return<
-    { readonly input: unknown; readonly nextAssistantMessageIndex: number },
-    EventStreamError
-  > {
+  ): Effect.fn.Return<AgentConversationSessionStore.RecordedSubmissionStarted, EventStreamError> {
     const conversationId = submission.conversationId;
     const messageId = submission.messageId;
     if (conversationId === undefined || messageId === undefined) {
@@ -1841,6 +1839,31 @@ export const makeSqliteAgentConversationCoordinator = Effect.fn(
           (cause) => new EventStorageFailed({ operation: "record conversation submission", cause }),
         ),
       );
+  });
+
+  const appendAppliedUserMessage = Effect.fn(
+    "AgentConversationCoordinator.appendAppliedUserMessage",
+  )(function* (
+    submission: Submission,
+    prepared: Pick<
+      AgentConversationSessionStore.RecordedSubmissionStarted,
+      "userMessage" | "userTurnId"
+    >,
+  ): Effect.fn.Return<void, EventStreamError> {
+    const conversationId = submission.conversationId;
+    if (conversationId === undefined) {
+      return yield* new EventStorageFailed({
+        operation: "append applied conversation user message",
+        cause: new Error("Conversation submission is missing its conversation id."),
+      });
+    }
+    yield* AgentRunLifecycle.appendConversationUserMessageApplied(store, {
+      agentName: submission.agentName,
+      conversationId,
+      submissionId: submission.submissionId,
+      userTurnId: prepared.userTurnId,
+      message: prepared.userMessage,
+    });
   });
 
   const rejectInactiveConversation = Effect.fn(
@@ -2051,6 +2074,7 @@ const makeInterruptedResult = Effect.fn("AgentConversationCoordinator.makeInterr
       v: 3,
       type: "submission_settled",
       instanceId: submission.conversationId ?? "unknown",
+      conversationId: submission.conversationId,
       agentName: submission.agentName,
       submissionId: submission.submissionId,
       timestamp,
@@ -2073,6 +2097,7 @@ const makeCompletedResult = Effect.fn("AgentConversationCoordinator.makeComplete
       v: 3,
       type: "submission_settled",
       instanceId: submission.conversationId ?? "unknown",
+      conversationId: submission.conversationId,
       agentName: submission.agentName,
       submissionId: submission.submissionId,
       timestamp,
@@ -2400,6 +2425,7 @@ const idleEvent = (outbox: TerminalOutbox, eventIndex = idleEventIndex(outbox.ev
   v: 3,
   type: "idle",
   instanceId: outbox.conversationId,
+  conversationId: outbox.conversationId,
   agentName: outbox.agentName,
   submissionId: outbox.submissionId,
   eventIndex,

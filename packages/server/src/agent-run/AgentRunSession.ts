@@ -259,6 +259,7 @@ class AgentRunSession {
           type: "tool_start",
           toolName: event.toolName,
           toolCallId: event.toolCallId,
+          args: event.args,
         });
         break;
       case "tool_execution_update":

@@ -147,7 +147,12 @@ describe("createConversationEventStream", () => {
       fetch: async () =>
         dsJsonResponse([
           conversationEvent({ type: "agent_start", eventIndex: 1 }),
-          conversationEvent({ type: "turn_start", eventIndex: 2 }),
+          conversationEvent({
+            type: "turn_start",
+            eventIndex: 2,
+            turnId: "turn-1",
+            purpose: "agent",
+          }),
           conversationEvent({ type: "idle", eventIndex: 3 }),
         ]),
     });
@@ -162,7 +167,15 @@ describe("createConversationEventStream", () => {
 
     expect(results).toEqual([
       { value: conversationEvent({ type: "agent_start", eventIndex: 1 }), done: false },
-      { value: conversationEvent({ type: "turn_start", eventIndex: 2 }), done: false },
+      {
+        value: conversationEvent({
+          type: "turn_start",
+          eventIndex: 2,
+          turnId: "turn-1",
+          purpose: "agent",
+        }),
+        done: false,
+      },
       { value: conversationEvent({ type: "idle", eventIndex: 3 }), done: false },
       { value: undefined, done: true },
     ]);
@@ -196,7 +209,12 @@ describe("createConversationEventStream", () => {
           return dsJsonResponse(
             [
               conversationEvent({ type: "agent_start", eventIndex: 1 }),
-              conversationEvent({ type: "turn_start", eventIndex: 2 }),
+              conversationEvent({
+                type: "turn_start",
+                eventIndex: 2,
+                turnId: "turn-1",
+                purpose: "agent",
+              }),
             ],
             { nextOffset: "0000000000000000_0000000000000002" },
           );

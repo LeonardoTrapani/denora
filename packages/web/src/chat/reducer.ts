@@ -1,4 +1,5 @@
 import type { ConversationMessage } from "@denora/server/http/Api";
+import type { LlmMessage } from "@denora/server/stream-events";
 
 import type {
   ChatMessage,
@@ -37,13 +38,9 @@ export type ChatReducerEvent =
       readonly submissionId: string;
     }
   | { readonly type: "local_send_failed"; readonly localId: string; readonly error: Error }
-  | {
-      readonly type: "local_status";
-      readonly status: Extract<ChatStatus, "hydrating" | "connecting">;
-      readonly error?: Error | undefined;
-    }
+  | { readonly type: "local_connecting"; readonly error?: Error | undefined }
   | { readonly type: "local_history_ready" }
-  | { readonly type: "local_stream_missing" }
+  | { readonly type: "local_stream_not_found" }
   | { readonly type: "local_stream_failed"; readonly error: Error };
 
 export const emptyChatState: ChatState = {
@@ -120,10 +117,10 @@ function reduceChatEventOnce(state: ChatState, event: ChatReducerEvent): ChatSta
         error: event.error,
         pendingSends: state.pendingSends.filter((send) => send.localId !== event.localId),
       };
-    case "local_status":
+    case "local_connecting":
       return state.status === "error"
         ? state
-        : { ...state, status: event.status, error: event.error };
+        : { ...state, status: "connecting", error: event.error };
     case "local_history_ready":
       return {
         ...state,
@@ -132,7 +129,7 @@ function reduceChatEventOnce(state: ChatState, event: ChatReducerEvent): ChatSta
           state.status === "error" ? "error" : state.pendingSends.length > 0 ? "submitted" : "idle",
         error: state.status === "error" ? state.error : undefined,
       };
-    case "local_stream_missing":
+    case "local_stream_not_found":
       return state.pendingSends.length === 0
         ? { ...state, messages: [], status: "idle", historyReady: true, error: undefined }
         : { ...state, status: "submitted", historyReady: true, error: undefined };
@@ -168,19 +165,18 @@ function reduceMessageBoundary(
   state: ChatState,
   event: Extract<DenoraConversationEvent, { readonly type: "message_start" | "message_end" }>,
 ): ChatState {
-  const message = toMessage(event.message);
-  if (message === undefined) return state;
-  const durableId = messageId(event, message.role);
+  if (event.message.role === "toolResult") return state;
+  const durableId = messageId(event, event.message.role);
   const existing = state.messages.find((item) => item.id === durableId);
   const pending =
-    message.role === "user" && event.submissionId !== undefined
+    event.message.role === "user" && event.submissionId !== undefined
       ? state.pendingSends.find((send) => send.submissionId === event.submissionId)
       : undefined;
   const optimistic =
     pending === undefined ? undefined : state.messages.find((item) => item.id === pending.localId);
   const nextMessage = snapshotMessage(
     durableId,
-    message,
+    event.message,
     event.type === "message_end",
     optimistic ?? existing,
   );
@@ -188,7 +184,7 @@ function reduceMessageBoundary(
     ? replaceOptimisticMessage(state.messages, pending.localId, durableId, nextMessage)
     : replaceById(state.messages, durableId, nextMessage);
   const assistantForPending =
-    message.role === "assistant" &&
+    event.message.role === "assistant" &&
     event.submissionId !== undefined &&
     state.pendingSends.some((send) => send.submissionId === event.submissionId);
   return {
@@ -197,12 +193,12 @@ function reduceMessageBoundary(
     messages,
     status: assistantForPending ? "streaming" : state.status,
     activeSubmissionIds:
-      message.role === "assistant" && event.submissionId !== undefined
+      event.message.role === "assistant" && event.submissionId !== undefined
         ? addUnique(state.activeSubmissionIds, event.submissionId)
         : state.activeSubmissionIds,
     reasoningPartIndexes:
-      message.role === "assistant"
-        ? { ...state.reasoningPartIndexes, [durableId]: reasoningIndexes(message) }
+      event.message.role === "assistant"
+        ? { ...state.reasoningPartIndexes, [durableId]: reasoningIndexes(event.message) }
         : state.reasoningPartIndexes,
   };
 }
@@ -222,7 +218,7 @@ function reduceTextDelta(
   } else {
     parts.push({ type: "text", text: event.text, state: "streaming" });
   }
-  return replaceMessageAt({ ...state, status: "streaming" }, index, { ...current, parts });
+  return replaceMessageAt(state, index, { ...current, parts });
 }
 
 function reduceThinkingStart(
@@ -239,7 +235,7 @@ function reduceThinkingStart(
       : state.reasoningPartIndexes[current.id]?.[event.contentIndex];
   if (known !== undefined && current.parts[known]?.type === "reasoning") return state;
   const partIndex = current.parts.length;
-  const next = replaceMessageAt({ ...state, status: "streaming" }, index, {
+  const next = replaceMessageAt(state, index, {
     ...current,
     parts: [...current.parts, { type: "reasoning", text: "", state: "streaming" }],
   });
@@ -273,7 +269,7 @@ function reduceThinkingDelta(
   if (part?.type !== "reasoning" || part.state === "done") return state;
   const parts = [...current.parts];
   parts[reasoning] = { ...part, text: part.text + event.delta, state: "streaming" };
-  return replaceMessageAt({ ...state, status: "streaming" }, index, { ...current, parts });
+  return replaceMessageAt(state, index, { ...current, parts });
 }
 
 function reduceThinkingEnd(
@@ -302,15 +298,17 @@ function reduceToolStart(
 ): ChatState {
   let messages = state.messages;
   let index = findToolMessage(messages, event.toolCallId);
-  if (index < 0) index = findEventAssistant(messages, event);
-  if (index < 0) {
-    const id = event.turnId === undefined ? `tool:${event.toolCallId}` : `turn:${event.turnId}`;
-    messages = [...messages, { id, role: "assistant", parts: [] }];
-    index = messages.length - 1;
+  if (index < 0 && event.turnId !== undefined) {
+    const id = `turn:${event.turnId}`;
+    index = messages.findIndex((message) => message.id === id);
+    if (index < 0) {
+      messages = [...messages, { id, role: "assistant", metadata: undefined, parts: [] }];
+      index = messages.length - 1;
+    }
   }
+  if (index < 0) return state;
   const current = messages[index];
   if (current === undefined) return state;
-  const input = event.input ?? event.args;
   const exists = current.parts.some(
     (part) => part.type === "dynamic-tool" && part.toolCallId === event.toolCallId,
   );
@@ -321,7 +319,7 @@ function reduceToolStart(
               type: "dynamic-tool",
               toolName: event.toolName,
               toolCallId: part.toolCallId,
-              input: input ?? part.input,
+              input: part.input,
               state: "input-available",
             }
           : part,
@@ -333,10 +331,10 @@ function reduceToolStart(
           toolName: event.toolName,
           toolCallId: event.toolCallId,
           state: "input-available",
-          input,
+          input: undefined,
         },
       ];
-  return replaceMessageAt({ ...state, messages, status: "streaming" }, index, {
+  return replaceMessageAt({ ...state, messages }, index, {
     ...current,
     parts,
   });
@@ -346,18 +344,9 @@ function reduceToolResult(
   state: ChatState,
   event: Extract<DenoraConversationEvent, { readonly type: "tool" }>,
 ): ChatState {
-  let next = state;
-  let index = findToolMessage(next.messages, event.toolCallId);
-  if (index < 0) {
-    next = reduceToolStart(next, {
-      ...event,
-      type: "tool_start",
-      input: undefined,
-    });
-    index = findToolMessage(next.messages, event.toolCallId);
-  }
+  const index = findToolMessage(state.messages, event.toolCallId);
   if (index < 0) return state;
-  const current = next.messages[index];
+  const current = state.messages[index];
   if (current === undefined) return state;
   const parts = current.parts.map((part) => {
     if (part.type !== "dynamic-tool" || part.toolCallId !== event.toolCallId) return part;
@@ -379,7 +368,7 @@ function reduceToolResult(
           output: event.result,
         };
   });
-  return replaceMessageAt(next, index, { ...current, parts });
+  return replaceMessageAt(state, index, { ...current, parts });
 }
 
 function reduceTurn(
@@ -412,24 +401,15 @@ function reduceSubmissionSettled(
   state: ChatState,
   event: Extract<DenoraConversationEvent, { readonly type: "submission_settled" }>,
 ): ChatState {
-  const pendingSends = state.pendingSends.filter(
-    (send) => send.submissionId !== event.submissionId,
-  );
-  if (event.outcome === "failed" || event.outcome === "cancelled") {
-    return {
-      ...state,
-      status: "error",
-      error: new Error(errorMessage(event.error) ?? `Submission ${event.outcome}`),
-      pendingSends,
-      settledSubmissionIds: addUnique(state.settledSubmissionIds, event.submissionId),
-    };
-  }
-  return {
-    ...state,
-    pendingSends,
-    status: pendingSends.length > 0 ? "submitted" : state.status,
-    settledSubmissionIds: addUnique(state.settledSubmissionIds, event.submissionId),
-  };
+  return event.outcome === "failed" &&
+    state.pendingSends.some((send) => send.submissionId === event.submissionId)
+    ? {
+        ...state,
+        status: "error",
+        error: new Error(event.error?.message ?? "Agent submission failed"),
+        pendingSends: state.pendingSends.filter((send) => send.submissionId !== event.submissionId),
+      }
+    : state;
 }
 
 function reduceIdle(state: ChatState, event: DenoraConversationEvent): ChatState {
@@ -468,19 +448,11 @@ function persistedMessageToChatMessage(message: PersistedConversationMessage): C
   ];
 }
 
-function toMessage(
-  value: unknown,
-): (Pick<ChatMessage, "role"> & { readonly content: unknown }) | undefined {
-  if (value === null || typeof value !== "object") return undefined;
-  const record = value as { readonly role?: unknown; readonly content?: unknown };
-  if (record.role !== "user" && record.role !== "assistant" && record.role !== "system")
-    return undefined;
-  return { role: record.role, content: record.content };
-}
+type RenderableLlmMessage = Exclude<LlmMessage, { readonly role: "toolResult" }>;
 
 function snapshotMessage(
   id: string,
-  message: Pick<ChatMessage, "role"> & { readonly content: unknown },
+  message: RenderableLlmMessage,
   done: boolean,
   previous?: ChatMessage | undefined,
 ): ChatMessage {
@@ -488,8 +460,56 @@ function snapshotMessage(
     id,
     role: message.role,
     metadata: previous?.metadata,
-    parts: partsFromContent(message.content, done, previous),
+    parts: partsFromLlmContent(message.content, done, previous),
   };
+}
+
+function partsFromLlmContent(
+  content: RenderableLlmMessage["content"],
+  done: boolean,
+  previous?: ChatMessage | undefined,
+): ChatMessagePart[] {
+  const parts: ChatMessagePart[] = [];
+  const previousFiles = previous?.parts.filter((part) => part.type === "file") ?? [];
+  let previousFileIndex = 0;
+  const blocks = typeof content === "string" ? [{ type: "text" as const, text: content }] : content;
+
+  for (const block of blocks) {
+    if (block.type === "text") {
+      parts.push({ type: "text", text: block.text, state: done ? "done" : "streaming" });
+    } else if (block.type === "thinking") {
+      parts.push({ type: "reasoning", text: block.thinking, state: done ? "done" : "streaming" });
+    } else if (block.type === "toolCall") {
+      const prior = previous?.parts.find(
+        (part): part is Extract<ChatMessagePart, { readonly type: "dynamic-tool" }> =>
+          part.type === "dynamic-tool" && part.toolCallId === block.id,
+      );
+      parts.push(
+        prior === undefined
+          ? {
+              type: "dynamic-tool",
+              toolName: block.name,
+              toolCallId: block.id,
+              state: "input-available",
+              input: block.arguments,
+            }
+          : { ...prior, toolName: block.name, input: block.arguments },
+      );
+    } else if (block.type === "image") {
+      const prior = previousFiles[previousFileIndex++];
+      parts.push(
+        block.data === IMAGE_DATA_OMITTED && prior?.mediaType === block.mimeType
+          ? prior
+          : {
+              type: "file",
+              mediaType: block.mimeType,
+              url: imageUrl(block.data, block.mimeType),
+            },
+      );
+    }
+  }
+
+  return parts;
 }
 
 function partsFromContent(
@@ -555,8 +575,9 @@ function partsFromContent(
     }
   }
 
-  if (parts.length === 0) {
-    parts.push({ type: "text", text: fallbackText(rawContent), state: "done" });
+  if (parts.length === 0 && !Array.isArray(rawContent)) {
+    const text = fallbackText(rawContent);
+    if (text.length > 0) parts.push({ type: "text", text, state: "done" });
   }
 
   return parts;
@@ -572,17 +593,13 @@ function fallbackText(content: unknown): string {
   }
 }
 
-function reasoningIndexes(message: {
-  readonly role: ChatMessage["role"];
-  readonly content: unknown;
-}): Record<number, number> {
-  if (message.role !== "assistant" || !Array.isArray(message.content)) return {};
+function reasoningIndexes(message: LlmMessage): Record<number, number> {
+  if (message.role !== "assistant") return {};
   const indexes: Record<number, number> = {};
   let partIndex = 0;
   for (const [contentIndex, block] of message.content.entries()) {
-    const record = objectRecord(block);
-    if (record?.type === "thinking") indexes[contentIndex] = partIndex;
-    if (isRenderableContentBlock(record)) partIndex += 1;
+    if (block.type === "thinking") indexes[contentIndex] = partIndex;
+    partIndex += 1;
   }
   return indexes;
 }
@@ -594,15 +611,6 @@ function setReasoningPartIndex(
   partIndex: number,
 ): ChatState["reasoningPartIndexes"] {
   return { ...indexes, [messageId]: { ...indexes[messageId], [contentIndex]: partIndex } };
-}
-
-function isRenderableContentBlock(record: Readonly<Record<string, unknown>> | undefined): boolean {
-  return (
-    record?.type === "text" ||
-    record?.type === "thinking" ||
-    record?.type === "toolCall" ||
-    record?.type === "image"
-  );
 }
 
 function optimisticMessage(localId: string, message: string): ChatMessage {
@@ -619,19 +627,18 @@ function imageUrl(data: string, mimeType: string): string {
 }
 
 function streamEventId(event: DenoraConversationEvent): string {
-  const context = event.submissionId ?? event.messageId ?? event.turnId ?? "event";
-  return `${event.instanceId}:${context}:${event.eventIndex}:${event.timestamp}`;
+  const context = event.dispatchId ?? event.submissionId ?? event.turnId ?? "event";
+  return `${event.instanceId}:${context}:${event.timestamp}:${event.eventIndex}`;
 }
 
 function messageId(event: DenoraConversationEvent, role: ChatMessage["role"]): string {
-  if (event.messageId !== undefined) return event.messageId;
   if (role === "assistant" && event.turnId !== undefined) return `turn:${event.turnId}`;
   if (role === "user" && event.submissionId !== undefined) return userMessageId(event.submissionId);
-  return `event:${event.eventIndex}:${role}`;
+  return `event:${event.timestamp}:${event.eventIndex}:${role}`;
 }
 
 function userMessageId(submissionId: string): string {
-  return `submission:${submissionId}:user`;
+  return `submission:${submissionId}:user:0`;
 }
 
 function findEventAssistant(

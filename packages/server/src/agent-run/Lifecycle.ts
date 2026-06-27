@@ -18,6 +18,7 @@ import {
   isBufferedRunEvent,
   isStreamExcludedRunEvent,
   redactRunEventImages,
+  type LlmUserMessage,
 } from "./RunEventContract.ts";
 import type { Interface as PiRuntimeInterface } from "../agent-loop/PiRuntime.ts";
 import { ConversationDomain } from "../conversation/ConversationDomain.ts";
@@ -56,6 +57,19 @@ export interface CreateConversationSubmissionResult extends CreateRunResult {
   readonly conversationId: string;
   readonly submissionId: string;
   readonly messageId: string;
+}
+
+export interface AppendConversationUserMessageAppliedInput {
+  readonly agentName: string;
+  readonly conversationId: string;
+  readonly submissionId: string;
+  readonly userTurnId: string;
+  readonly message: LlmUserMessage;
+}
+
+export interface AppendConversationUserMessageAppliedResult {
+  readonly startOffset: string;
+  readonly endOffset: string;
 }
 
 export interface StartRunInput extends CreateRunInput {
@@ -134,48 +148,6 @@ export const createConversationSubmission = Effect.fn(
   const offset = existing?.nextOffset ?? "-1";
   yield* store.createStream(streamPath);
 
-  const startKey = `submission:${input.submissionId}:user:start`;
-  const endKey = `submission:${input.submissionId}:user:end`;
-  const existingStart = yield* store.readEventByKey(streamPath, startKey);
-  const existingEnd = yield* store.readEventByKey(streamPath, endKey);
-  const userMessage = userMessageFromInput(input.input);
-  const timestamp = DateTime.formatIso(yield* DateTime.now);
-  const firstIndex =
-    eventIndexFrom(existingStart?.event) ??
-    eventIndexFrom(existingEnd?.event) ??
-    (yield* parseOffset(offset)) + 1;
-  const startTimestamp = timestampFrom(existingStart?.event) ?? timestamp;
-  if (existingStart === null)
-    yield* store.appendEventOnce(
-      streamPath,
-      startKey,
-      redactRunEventImages({
-        v: 3,
-        type: "message_start",
-        instanceId: input.conversationId,
-        agentName: input.agentName,
-        submissionId: input.submissionId,
-        eventIndex: firstIndex,
-        timestamp: startTimestamp,
-        message: userMessage,
-      }),
-    );
-  if (existingEnd === null)
-    yield* store.appendEventOnce(
-      streamPath,
-      endKey,
-      redactRunEventImages({
-        v: 3,
-        type: "message_end",
-        instanceId: input.conversationId,
-        agentName: input.agentName,
-        submissionId: input.submissionId,
-        eventIndex: firstIndex + 1,
-        timestamp: startTimestamp,
-        message: userMessage,
-      }),
-    );
-
   return {
     runId: input.runId,
     conversationId: input.conversationId,
@@ -185,6 +157,74 @@ export const createConversationSubmission = Effect.fn(
     offset,
     created: existing === null,
   };
+});
+
+export const appendConversationUserMessageApplied = Effect.fn(
+  "AgentRunLifecycle.appendConversationUserMessageApplied",
+)(function* (
+  store: EventStreamStore,
+  input: AppendConversationUserMessageAppliedInput,
+): Effect.fn.Return<AppendConversationUserMessageAppliedResult, EventStreamError> {
+  const streamPath = agentStreamPath(input.agentName, input.conversationId);
+  yield* store.createStream(streamPath);
+  const meta = yield* store.getStreamMeta(streamPath);
+  if (meta === null) {
+    return yield* new EventStorageFailed({
+      operation: "append applied conversation user message",
+      cause: new Error(`Conversation stream ${streamPath} was not created.`),
+    });
+  }
+
+  const startKey = `submission:${input.submissionId}:user:start`;
+  const endKey = `submission:${input.submissionId}:user:end`;
+  const existingStart = yield* store.readEventByKey(streamPath, startKey);
+  const existingEnd = yield* store.readEventByKey(streamPath, endKey);
+  const existingStartIndex = eventIndexFrom(existingStart?.event);
+  const existingEndIndex = eventIndexFrom(existingEnd?.event);
+  const firstIndex =
+    existingStartIndex ??
+    (existingEndIndex === undefined
+      ? (yield* parseOffset(meta.nextOffset)) + 1
+      : existingEndIndex - 1);
+  const timestamp =
+    timestampFrom(existingStart?.event) ??
+    timestampFrom(existingEnd?.event) ??
+    DateTime.formatIso(yield* DateTime.now);
+
+  const startOffset = yield* store.appendEventOnce(
+    streamPath,
+    startKey,
+    redactRunEventImages({
+      v: 3,
+      type: "message_start",
+      instanceId: input.conversationId,
+      conversationId: input.conversationId,
+      agentName: input.agentName,
+      submissionId: input.submissionId,
+      turnId: input.userTurnId,
+      eventIndex: firstIndex,
+      timestamp,
+      message: input.message,
+    }),
+  );
+  const endOffset = yield* store.appendEventOnce(
+    streamPath,
+    endKey,
+    redactRunEventImages({
+      v: 3,
+      type: "message_end",
+      instanceId: input.conversationId,
+      conversationId: input.conversationId,
+      agentName: input.agentName,
+      submissionId: input.submissionId,
+      turnId: input.userTurnId,
+      eventIndex: firstIndex + 1,
+      timestamp,
+      message: input.message,
+    }),
+  );
+
+  return { startOffset, endOffset };
 });
 
 export const startRun = Effect.fn("AgentRunLifecycle.startRun")(function* (
@@ -348,6 +388,7 @@ export const executeConversationSubmissionAttempt = Effect.fn(
       return redactRunEventImages({
         ...attachedEvent,
         instanceId: input.conversationId,
+        conversationId: input.conversationId,
         agentName: input.agentName,
         submissionId: input.submissionId,
         v: 3,
@@ -396,6 +437,7 @@ export const executeConversationSubmissionAttempt = Effect.fn(
             v: 3,
             type: "submission_settled",
             instanceId: input.conversationId,
+            conversationId: input.conversationId,
             agentName: input.agentName,
             submissionId: input.submissionId,
             eventIndex: eventIndex++,
@@ -468,6 +510,7 @@ const makeFailedSubmissionSettled = Effect.fn("AgentRunLifecycle.makeFailedSubmi
       v: 3,
       type: "submission_settled",
       instanceId: input.conversationId,
+      conversationId: input.conversationId,
       agentName: input.agentName,
       submissionId: input.submissionId,
       eventIndex,
@@ -485,12 +528,6 @@ const makeFailedSubmissionSettled = Effect.fn("AgentRunLifecycle.makeFailedSubmi
     } satisfies ExecuteRunAttemptResult;
   },
 );
-
-const userMessageFromInput = (input: unknown): unknown => ({
-  role: "user",
-  content: ConversationDomain.submittedContentFromInput(input),
-  timestamp: Date.now(),
-});
 
 const eventIndexFrom = ConversationDomain.eventIndexFrom;
 

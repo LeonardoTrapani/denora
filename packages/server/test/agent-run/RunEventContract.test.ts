@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { RunEventContract } from "../../src/agent-run/RunEventContract.ts";
 
 const IMAGE_BYTES = "aGVsbG8taW1hZ2UtYnl0ZXM=";
@@ -60,6 +61,102 @@ describe("RunEventContract", () => {
         mimeType: "image/png",
       });
       assert.notInclude(JSON.stringify(content), IMAGE_BYTES);
+    }),
+  );
+
+  it.effect("accepts Flue-shaped attached agent events", () =>
+    Effect.sync(() => {
+      const decode = Schema.decodeUnknownSync(RunEventContract.PublicConversationEvent);
+      const decoded = decode({
+        v: 3,
+        type: "message_start",
+        instanceId: "conversation-1",
+        conversationId: "conversation-1",
+        agentName: "denora",
+        dispatchId: "dispatch-1",
+        submissionId: "submission-1",
+        turnId: "turn-1",
+        eventIndex: 0,
+        timestamp: "2026-06-12T00:00:00.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "checking" },
+            { type: "text", text: "hello" },
+            { type: "toolCall", id: "tool-1", name: "search", arguments: { q: "denora" } },
+          ],
+        },
+      });
+
+      assert.strictEqual(decoded.type, "message_start");
+      assert.strictEqual(decoded.turnId, "turn-1");
+      assert.strictEqual(decoded.dispatchId, "dispatch-1");
+      assert.strictEqual(decoded.conversationId, "conversation-1");
+      assert.notProperty(decoded, "messageId");
+      assert.notProperty(decoded, "runId");
+    }),
+  );
+
+  it.effect("rejects message events without turnId and public messageId", () =>
+    Effect.sync(() => {
+      const decode = Schema.decodeUnknownSync(RunEventContract.PublicConversationEvent);
+
+      assert.throws(() =>
+        decode({
+          v: 3,
+          type: "message_start",
+          instanceId: "conversation-1",
+          agentName: "denora",
+          submissionId: "submission-1",
+          eventIndex: 0,
+          timestamp: "2026-06-12T00:00:00.000Z",
+          message: { role: "user", content: "hello" },
+        }),
+      );
+      assert.throws(() =>
+        decode({
+          v: 3,
+          type: "message_start",
+          instanceId: "conversation-1",
+          agentName: "denora",
+          submissionId: "submission-1",
+          turnId: "turn-1",
+          messageId: "message-1",
+          eventIndex: 0,
+          timestamp: "2026-06-12T00:00:00.000Z",
+          message: { role: "user", content: "hello" },
+        }),
+      );
+    }),
+  );
+
+  it.effect("aligns submission_settled outcomes with Flue", () =>
+    Effect.sync(() => {
+      const decode = Schema.decodeUnknownSync(RunEventContract.PublicConversationEvent);
+      assert.strictEqual(
+        decode({
+          v: 3,
+          type: "submission_settled",
+          instanceId: "conversation-1",
+          submissionId: "submission-1",
+          eventIndex: 2,
+          timestamp: "2026-06-12T00:00:00.000Z",
+          outcome: "failed",
+          error: { message: "cancelled by user", type: "cancelled" },
+        }).outcome,
+        "failed",
+      );
+      assert.throws(() =>
+        decode({
+          v: 3,
+          type: "submission_settled",
+          instanceId: "conversation-1",
+          submissionId: "submission-1",
+          eventIndex: 2,
+          timestamp: "2026-06-12T00:00:00.000Z",
+          outcome: "cancelled",
+        }),
+      );
     }),
   );
 

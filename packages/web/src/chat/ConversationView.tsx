@@ -26,19 +26,14 @@ import {
 } from "@denora/ui/components/message-scroller";
 import { SidebarTrigger } from "@denora/ui/components/sidebar";
 import { Textarea } from "@denora/ui/components/textarea";
-import { useAtom, useAtomSet, useAtomValue } from "@effect/atom-react";
-import * as Cause from "effect/Cause";
-import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
+import { useAtomSet } from "@effect/atom-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
-import {
-  chatStateAtom,
-  startConversationStreamAtom,
-  submitConversationMessageAtom,
-} from "./atoms.ts";
+import { loadConversationsAtom } from "./atoms.ts";
 import { LoadingStates } from "./LoadingStates.tsx";
 import type { PersistedConversationMessage } from "./reducer.ts";
 import type { ChatMessage, ChatMessagePart, ChatStatus } from "./types.ts";
+import { useConversationChat } from "./useConversationChat.ts";
 
 export interface Props {
   readonly conversationId?: string | undefined;
@@ -48,52 +43,47 @@ export interface Props {
 }
 
 export function View({ conversationId, title, initialMessages, onConversationReady }: Props) {
-  const chat = useAtomValue(chatStateAtom);
+  const chat = useConversationChat({ conversationId, history: 100, initialMessages });
   const [composerText, setComposerText] = useState("");
-  const [sendResult, sendMessage] = useAtom(submitConversationMessageAtom, { mode: "promise" });
-  const startStream = useAtomSet(startConversationStreamAtom, { mode: "promise" });
+  const [sendPending, setSendPending] = useState(false);
+  const [sendError, setSendError] = useState<Error | undefined>(undefined);
+  const refreshConversations = useAtomSet(loadConversationsAtom, { mode: "promise" });
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
+  const routedConversationIdRef = useRef<string | undefined>(undefined);
 
-  useEffect(() => {
-    void startStream({ conversationId, history: 100, initialMessages });
-  }, [conversationId, initialMessages, startStream]);
-
-  const sendError = resultError(sendResult);
-  const isCurrentConversation =
-    conversationId === undefined
-      ? chat.conversationId === undefined
-      : chat.conversationId === conversationId;
-  const canCompose =
-    conversationId === undefined ||
-    initialMessages !== undefined ||
-    (isCurrentConversation && chat.historyReady);
-  const canSend = composerText.trim().length > 0 && !sendResult.waiting && canCompose;
-  const displayMessages = isCurrentConversation ? chat.messages : [];
-  const displayStatus =
-    !isCurrentConversation && conversationId !== undefined ? "hydrating" : chat.status;
-  const showHistorySkeleton =
-    conversationId !== undefined &&
-    displayMessages.length === 0 &&
-    (!isCurrentConversation || !chat.historyReady);
+  const canSend = composerText.trim().length > 0 && !sendPending;
+  const showHistorySkeleton = !chat.historyReady && chat.messages.length === 0;
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ block: "end" });
-  }, [displayMessages, displayStatus]);
+  }, [chat.messages, chat.status]);
+
+  useEffect(() => {
+    if (conversationId !== undefined || chat.conversationId === undefined || !onConversationReady) {
+      return;
+    }
+    if (routedConversationIdRef.current === chat.conversationId) return;
+    routedConversationIdRef.current = chat.conversationId;
+    void onConversationReady(chat.conversationId);
+  }, [chat.conversationId, conversationId, onConversationReady]);
 
   const send = (event: FormEvent) => {
     event.preventDefault();
     const message = composerText.trim();
-    if (message.length === 0 || sendResult.waiting || !canCompose) return;
+    if (message.length === 0 || sendPending) return;
     setComposerText("");
-    const submit =
-      conversationId === undefined
-        ? ({ target: "new", message } as const)
-        : ({ target: "conversation", conversationId, initialMessages, message } as const);
-    void sendMessage(submit).then(async (resolvedConversationId) => {
-      if (resolvedConversationId && onConversationReady) {
-        await onConversationReady(resolvedConversationId);
-      }
-    });
+    setSendPending(true);
+    setSendError(undefined);
+    void chat
+      .sendMessage(message)
+      .then(() => {
+        void refreshConversations();
+      })
+      .catch((error: unknown) => {
+        setComposerText(message);
+        setSendError(toError(error));
+      })
+      .finally(() => setSendPending(false));
   };
 
   return (
@@ -103,7 +93,7 @@ export function View({ conversationId, title, initialMessages, onConversationRea
           <SidebarTrigger />
           <h1 className="font-medium">{title ?? "Denora"}</h1>
         </div>
-        <ChatStatusMarker status={displayStatus} historyReady={canCompose} />
+        <ChatStatusMarker status={chat.status} historyReady={chat.historyReady} />
       </header>
 
       <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -115,19 +105,19 @@ export function View({ conversationId, title, initialMessages, onConversationRea
           <MessageScroller className="flex-1">
             <MessageScrollerViewport>
               <MessageScrollerContent
-                aria-busy={displayStatus === "streaming" || !canCompose}
+                aria-busy={chat.status === "streaming" || !chat.historyReady}
                 className="mx-auto w-full max-w-3xl gap-6 px-4 py-6"
               >
                 {showHistorySkeleton ? (
                   <MessageScrollerItem messageId="loading-history">
                     <LoadingStates.ConversationHistorySkeleton />
                   </MessageScrollerItem>
-                ) : displayMessages.length === 0 ? (
+                ) : chat.messages.length === 0 ? (
                   <MessageScrollerItem messageId="empty">
                     <EmptyChat />
                   </MessageScrollerItem>
                 ) : (
-                  displayMessages.map((message) => (
+                  chat.messages.map((message) => (
                     <MessageScrollerItem
                       key={message.id}
                       messageId={message.id}
@@ -137,6 +127,11 @@ export function View({ conversationId, title, initialMessages, onConversationRea
                     </MessageScrollerItem>
                   ))
                 )}
+                {!chat.historyReady && chat.messages.length > 0 ? (
+                  <MessageScrollerItem messageId="syncing-history">
+                    <SyncingHistory />
+                  </MessageScrollerItem>
+                ) : null}
                 <div ref={scrollAnchorRef} className="h-px shrink-0" />
               </MessageScrollerContent>
             </MessageScrollerViewport>
@@ -149,8 +144,8 @@ export function View({ conversationId, title, initialMessages, onConversationRea
           {sendError ? <ErrorMarker message={sendError.message} /> : null}
           <form className="mx-auto flex w-full max-w-3xl items-end gap-2" onSubmit={send}>
             <Textarea
-              disabled={!canCompose || sendResult.waiting}
-              placeholder={canCompose ? "Message Denora..." : "Loading history..."}
+              disabled={sendPending}
+              placeholder="Message Denora..."
               value={composerText}
               onChange={(event) => setComposerText(event.currentTarget.value)}
               onKeyDown={(event) => {
@@ -161,7 +156,7 @@ export function View({ conversationId, title, initialMessages, onConversationRea
               }}
             />
             <Button disabled={!canSend} type="submit">
-              {sendResult.waiting ? "Sending" : "Send"}
+              {sendPending ? "Sending" : "Send"}
             </Button>
           </form>
         </div>
@@ -182,9 +177,7 @@ function ChatStatusMarker({
       <MarkerIcon>
         {status === "streaming" || status === "submitted" || status === "connecting" ? "●" : "○"}
       </MarkerIcon>
-      <MarkerContent>
-        {historyReady ? statusLabel(status) : `Loading (${statusLabel(status)})`}
-      </MarkerContent>
+      <MarkerContent>{historyReady ? statusLabel(status) : "Syncing history"}</MarkerContent>
     </Marker>
   );
 }
@@ -193,6 +186,14 @@ function EmptyChat() {
   return (
     <Marker variant="separator">
       <MarkerContent>Start a conversation with your Denora agent.</MarkerContent>
+    </Marker>
+  );
+}
+
+function SyncingHistory() {
+  return (
+    <Marker variant="separator">
+      <MarkerContent>Syncing history...</MarkerContent>
     </Marker>
   );
 }
@@ -229,9 +230,11 @@ function ChatMessageView({ message }: { readonly message: ChatMessage }) {
         <MessageHeader>{isUser ? "You" : "Denora"}</MessageHeader>
         <Bubble variant={isUser ? "default" : "ghost"}>
           <BubbleContent>
-            {message.parts.map((part, index) => (
-              <MessagePart key={index} part={part} />
-            ))}
+            {message.parts.length === 0 && !isUser ? (
+              <LoadingStates.AssistantTyping />
+            ) : (
+              message.parts.map((part, index) => <MessagePart key={index} part={part} />)
+            )}
           </BubbleContent>
         </Bubble>
         {message.metadata?.model ? (
@@ -303,8 +306,6 @@ function statusLabel(status: ChatStatus): string {
   switch (status) {
     case "idle":
       return "Idle";
-    case "hydrating":
-      return "Loading history";
     case "connecting":
       return "Connecting";
     case "submitted":
@@ -314,11 +315,6 @@ function statusLabel(status: ChatStatus): string {
     case "error":
       return "Error";
   }
-}
-
-function resultError(result: AsyncResult.AsyncResult<unknown, unknown>): Error | undefined {
-  if (!AsyncResult.isFailure(result)) return undefined;
-  return toError(Cause.squash(result.cause));
 }
 
 function toError(error: unknown): Error {

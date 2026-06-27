@@ -11,7 +11,7 @@ import { AgentRunLifecycle } from "../../src/agent-run/Lifecycle.ts";
 import type { Interface as PiRuntimeInterface } from "../../src/agent-loop/PiRuntime.ts";
 
 describe("AgentRunLifecycle", () => {
-  it.effect("creates Flue-compatible attached agent user events", () =>
+  it.effect("creates conversation submission streams without admission-time user events", () =>
     Effect.gen(function* () {
       const store = makeInMemoryEventStreamStore();
       const instanceId = `conversation_${crypto.randomUUID()}`;
@@ -30,6 +30,40 @@ describe("AgentRunLifecycle", () => {
       assert.strictEqual(created.streamPath, streamPath);
       assert.strictEqual(created.offset, "-1");
       const replay = yield* store.readEvents(streamPath, { offset: "-1" });
+      assert.deepStrictEqual(replay.events, []);
+    }),
+  );
+
+  it.effect("appends Flue-compatible attached agent user events when input is applied", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      const instanceId = `conversation_${crypto.randomUUID()}`;
+      const submissionId = `submission_${crypto.randomUUID()}`;
+      const streamPath = agentStreamPath("denora", instanceId);
+
+      yield* AgentRunLifecycle.createConversationSubmission(store, {
+        agentName: "denora",
+        conversationId: instanceId,
+        submissionId,
+        runId: `run_${crypto.randomUUID()}`,
+        triggerMessageId: `message_${crypto.randomUUID()}`,
+      });
+      yield* AgentRunLifecycle.appendConversationUserMessageApplied(store, {
+        agentName: "denora",
+        conversationId: instanceId,
+        submissionId,
+        userTurnId: `submission:${submissionId}:user`,
+        message: { role: "user", content: "hello" },
+      });
+      yield* AgentRunLifecycle.appendConversationUserMessageApplied(store, {
+        agentName: "denora",
+        conversationId: instanceId,
+        submissionId,
+        userTurnId: `submission:${submissionId}:user`,
+        message: { role: "user", content: "hello" },
+      });
+
+      const replay = yield* store.readEvents(streamPath, { offset: "-1" });
       const events = replay.events.map((event) => event.data as Record<string, unknown>);
       assert.deepStrictEqual(
         events.map((event) => event.type),
@@ -38,9 +72,12 @@ describe("AgentRunLifecycle", () => {
       for (const event of events) {
         assert.strictEqual(event.v, 3);
         assert.strictEqual(event.instanceId, instanceId);
+        assert.strictEqual(event.conversationId, instanceId);
         assert.strictEqual(event.agentName, "denora");
         assert.strictEqual(event.submissionId, submissionId);
+        assert.strictEqual(event.turnId, `submission:${submissionId}:user`);
         assert.notProperty(event, "runId");
+        assert.notProperty(event, "messageId");
       }
     }),
   );

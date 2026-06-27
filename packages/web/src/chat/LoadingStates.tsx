@@ -142,6 +142,16 @@ function UserMessageSkeleton({ width }: { readonly width: string }) {
   );
 }
 
+export function AssistantTyping() {
+  return (
+    <div aria-label="Denora is thinking" className="flex items-center gap-1 py-1">
+      <Skeleton className="size-2 rounded-full" />
+      <Skeleton className="size-2 rounded-full" />
+      <Skeleton className="size-2 rounded-full" />
+    </div>
+  );
+}
+
 function ComposerSkeleton() {
   return (
     <div className="shrink-0 border-t bg-background p-4">

@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { LlmUserMessage } from "./RunEventContract.ts";
 import type * as Cloudflare from "alchemy/Cloudflare";
 import type { StreamChunks } from "./StreamChunks.ts";
 import * as Context from "effect/Context";
@@ -61,6 +62,8 @@ export interface RecordSubmissionStartedInput {
 export interface RecordedSubmissionStarted {
   readonly input: unknown;
   readonly nextAssistantMessageIndex: number;
+  readonly userMessage: LlmUserMessage;
+  readonly userTurnId: string;
 }
 
 export interface FinishRunInput {
@@ -282,6 +285,8 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
     return {
       input: runInput,
       nextAssistantMessageIndex: nextAssistantMessageIndex(activePath, input.runId),
+      userMessage: userMessageFromContent(content),
+      userTurnId: userTurnIdFromSubmission(input.submissionId),
     };
   });
 
@@ -1276,6 +1281,14 @@ const partsFromUserContent = (content: unknown): ReadonlyArray<unknown> => {
   const rich = ConversationDomain.richUserMessage(content)?.content;
   return Array.isArray(rich) ? rich : textParts(plainTextFromContent(content));
 };
+
+const userMessageFromContent = (content: unknown): LlmUserMessage => ({
+  role: "user",
+  content: ConversationDomain.messageContentFromSubmitted(content) as LlmUserMessage["content"],
+});
+
+const userTurnIdFromSubmission = (submissionId: string): string =>
+  `submission:${submissionId}:user`;
 
 const plainTextFromContent = (content: unknown): string => {
   if (typeof content === "object" && content !== null) {

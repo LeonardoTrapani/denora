@@ -9,6 +9,86 @@ export interface RunEvent {
 
 const PublicEventIndex = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const PublicRunEventRest = Schema.Record(Schema.String, Schema.Unknown);
+const NonNegativeDuration = Schema.Number.check(Schema.isGreaterThanOrEqualTo(0));
+
+export const LlmTextContent = Schema.Struct({
+  type: Schema.Literal("text"),
+  text: Schema.String,
+  textSignature: Schema.optionalKey(Schema.String),
+}).pipe(Schema.annotate({ identifier: "LlmTextContent" }));
+export type LlmTextContent = typeof LlmTextContent.Type;
+
+export const LlmImageContent = Schema.Struct({
+  type: Schema.Literal("image"),
+  data: Schema.String,
+  mimeType: Schema.String,
+}).pipe(Schema.annotate({ identifier: "LlmImageContent" }));
+export type LlmImageContent = typeof LlmImageContent.Type;
+
+export const LlmThinkingContent = Schema.Struct({
+  type: Schema.Literal("thinking"),
+  thinking: Schema.String,
+  thinkingSignature: Schema.optionalKey(Schema.String),
+  redacted: Schema.optionalKey(Schema.Boolean),
+}).pipe(Schema.annotate({ identifier: "LlmThinkingContent" }));
+export type LlmThinkingContent = typeof LlmThinkingContent.Type;
+
+export const LlmToolCall = Schema.Struct({
+  type: Schema.Literal("toolCall"),
+  id: Schema.String,
+  name: Schema.String,
+  arguments: Schema.Record(Schema.String, Schema.Unknown),
+  thoughtSignature: Schema.optionalKey(Schema.String),
+}).pipe(Schema.annotate({ identifier: "LlmToolCall" }));
+export type LlmToolCall = typeof LlmToolCall.Type;
+
+export const LlmUserMessage = Schema.Struct({
+  role: Schema.Literal("user"),
+  content: Schema.Union([
+    Schema.String,
+    Schema.Array(Schema.Union([LlmTextContent, LlmImageContent])),
+  ]),
+}).pipe(Schema.annotate({ identifier: "LlmUserMessage" }));
+export type LlmUserMessage = typeof LlmUserMessage.Type;
+
+export const LlmAssistantMessage = Schema.Struct({
+  role: Schema.Literal("assistant"),
+  content: Schema.Array(Schema.Union([LlmTextContent, LlmThinkingContent, LlmToolCall])),
+}).pipe(Schema.annotate({ identifier: "LlmAssistantMessage" }));
+export type LlmAssistantMessage = typeof LlmAssistantMessage.Type;
+
+export const LlmToolResultMessage = Schema.Struct({
+  role: Schema.Literal("toolResult"),
+  toolCallId: Schema.String,
+  toolName: Schema.String,
+  content: Schema.Array(Schema.Union([LlmTextContent, LlmImageContent])),
+  isError: Schema.Boolean,
+}).pipe(Schema.annotate({ identifier: "LlmToolResultMessage" }));
+export type LlmToolResultMessage = typeof LlmToolResultMessage.Type;
+
+export const LlmMessage = Schema.Union([
+  LlmUserMessage,
+  LlmAssistantMessage,
+  LlmToolResultMessage,
+]).pipe(Schema.annotate({ identifier: "LlmMessage" }));
+export type LlmMessage = typeof LlmMessage.Type;
+
+export const LlmTurnPurpose = Schema.Literals(["agent", "compaction", "compaction_prefix"]);
+export type LlmTurnPurpose = typeof LlmTurnPurpose.Type;
+
+export const OperationKind = Schema.Literals(["prompt", "skill", "task", "shell", "compact"]);
+export type OperationKind = typeof OperationKind.Type;
+
+export const FlueSerializedError = Schema.Struct({
+  name: Schema.optionalKey(Schema.String),
+  message: Schema.String,
+  type: Schema.optionalKey(Schema.String),
+  details: Schema.optionalKey(Schema.String),
+  dev: Schema.optionalKey(Schema.String),
+  meta: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+}).pipe(Schema.annotate({ identifier: "FlueSerializedError" }));
+export type FlueSerializedError = typeof FlueSerializedError.Type;
+
 const publicRunEventEnvelope = {
   v: Schema.Literal(3),
   runId: Schema.String,
@@ -16,14 +96,22 @@ const publicRunEventEnvelope = {
   timestamp: Schema.String,
 };
 
-const publicConversationEventEnvelope = {
+const attachedAgentEventEnvelope = {
   v: Schema.Literal(3),
   instanceId: Schema.String,
-  agentName: Schema.String,
   eventIndex: PublicEventIndex,
   timestamp: Schema.String,
+  runId: Schema.optionalKey(Schema.Never),
+  dispatchId: Schema.optionalKey(Schema.String),
   submissionId: Schema.optionalKey(Schema.String),
-  messageId: Schema.optionalKey(Schema.String),
+  messageId: Schema.optionalKey(Schema.Never),
+  agentName: Schema.optionalKey(Schema.String),
+  conversationId: Schema.optionalKey(Schema.String),
+  session: Schema.optionalKey(Schema.String),
+  parentSession: Schema.optionalKey(Schema.String),
+  taskId: Schema.optionalKey(Schema.String),
+  harness: Schema.optionalKey(Schema.String),
+  operationId: Schema.optionalKey(Schema.String),
   turnId: Schema.optionalKey(Schema.String),
 };
 
@@ -42,9 +130,8 @@ const PublicRunEndEvent = Schema.StructWithRest(
   Schema.Struct({
     ...publicRunEventEnvelope,
     type: Schema.Literal("run_end"),
-    runId: Schema.String,
     isError: Schema.Boolean,
-    durationMs: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+    durationMs: NonNegativeDuration,
     result: Schema.Unknown,
     error: Schema.optionalKey(Schema.Unknown),
   }),
@@ -79,36 +166,76 @@ export const PublicRunEvent = Schema.Union([
   PublicRunAgentEvent,
 ]);
 
-const PublicConversationMessageEvent = Schema.StructWithRest(
+const AttachedAgentStartEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
-    type: Schema.Literals(["message_start", "message_end"]),
-    message: Schema.Unknown,
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("agent_start"),
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationDeltaEvent = Schema.StructWithRest(
+const AttachedAgentEndEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("agent_end"),
+    messages: Schema.Array(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedTurnStartEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("turn_start"),
+    turnId: Schema.String,
+    purpose: LlmTurnPurpose,
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedTurnMessagesEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("turn_messages"),
+    turnId: Schema.String,
+    purpose: LlmTurnPurpose,
+    message: Schema.Unknown,
+    toolResults: Schema.Array(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedMessageEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literals(["message_start", "message_end"]),
+    message: LlmMessage,
+    turnId: Schema.String,
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedTextDeltaEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("text_delta"),
     text: Schema.String,
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationThinkingStartEvent = Schema.StructWithRest(
+const AttachedThinkingStartEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("thinking_start"),
     contentIndex: Schema.optionalKey(Schema.Number),
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationThinkingDeltaEvent = Schema.StructWithRest(
+const AttachedThinkingDeltaEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("thinking_delta"),
     contentIndex: Schema.optionalKey(Schema.Number),
     delta: Schema.String,
@@ -116,9 +243,9 @@ const PublicConversationThinkingDeltaEvent = Schema.StructWithRest(
   [PublicRunEventRest],
 );
 
-const PublicConversationThinkingEndEvent = Schema.StructWithRest(
+const AttachedThinkingEndEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("thinking_end"),
     contentIndex: Schema.optionalKey(Schema.Number),
     content: Schema.String,
@@ -126,107 +253,186 @@ const PublicConversationThinkingEndEvent = Schema.StructWithRest(
   [PublicRunEventRest],
 );
 
-const PublicConversationToolStartEvent = Schema.StructWithRest(
+const AttachedToolStartEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("tool_start"),
     toolName: Schema.String,
     toolCallId: Schema.String,
-    input: Schema.optionalKey(Schema.Unknown),
     args: Schema.optionalKey(Schema.Unknown),
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationToolResultEvent = Schema.StructWithRest(
+const AttachedToolResultEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("tool"),
     toolName: Schema.String,
     toolCallId: Schema.String,
     isError: Schema.Boolean,
     result: Schema.optionalKey(Schema.Unknown),
+    durationMs: NonNegativeDuration,
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationAgentMarkerEvent = Schema.StructWithRest(
+const AttachedTurnEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
-    type: Schema.Literals(["agent_start", "agent_end", "turn_start", "turn_messages"]),
-  }),
-  [PublicRunEventRest],
-);
-
-const PublicConversationTurnEvent = Schema.StructWithRest(
-  Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("turn"),
-    request: Schema.optionalKey(Schema.Unknown),
-    response: Schema.optionalKey(Schema.Unknown),
+    turnId: Schema.String,
+    purpose: LlmTurnPurpose,
+    durationMs: NonNegativeDuration,
+    request: Schema.Unknown,
+    response: Schema.Unknown,
+    isError: Schema.Boolean,
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationSubmissionSettledEvent = Schema.StructWithRest(
+const AttachedTaskStartEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("task_start"),
+    taskId: Schema.String,
+    prompt: Schema.String,
+    agent: Schema.optionalKey(Schema.String),
+    cwd: Schema.optionalKey(Schema.String),
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedTaskEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("task"),
+    taskId: Schema.String,
+    agent: Schema.optionalKey(Schema.String),
+    isError: Schema.Boolean,
+    result: Schema.optionalKey(Schema.Unknown),
+    durationMs: NonNegativeDuration,
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedCompactionStartEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("compaction_start"),
+    reason: Schema.Literals(["threshold", "overflow", "manual"]),
+    estimatedTokens: Schema.Number,
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedCompactionEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("compaction"),
+    messagesBefore: Schema.Number,
+    messagesAfter: Schema.Number,
+    durationMs: NonNegativeDuration,
+    isError: Schema.Boolean,
+    error: Schema.optionalKey(Schema.Unknown),
+    usage: Schema.optionalKey(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedOperationStartEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("operation_start"),
+    operationId: Schema.String,
+    operationKind: OperationKind,
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedOperationEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("operation"),
+    operationId: Schema.String,
+    operationKind: OperationKind,
+    durationMs: NonNegativeDuration,
+    isError: Schema.Boolean,
+    error: Schema.optionalKey(Schema.Unknown),
+    result: Schema.optionalKey(Schema.Unknown),
+    usage: Schema.optionalKey(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedLogEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
+    type: Schema.Literal("log"),
+    level: Schema.Literals(["info", "warn", "error"]),
+    message: Schema.String,
+    attributes: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+  }),
+  [PublicRunEventRest],
+);
+
+const AttachedSubmissionSettledEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("submission_settled"),
     submissionId: Schema.String,
-    outcome: Schema.Literals(["completed", "failed", "cancelled"]),
+    outcome: Schema.Literals(["completed", "failed"]),
     result: Schema.optionalKey(Schema.Unknown),
-    error: Schema.optionalKey(Schema.Unknown),
+    error: Schema.optionalKey(FlueSerializedError),
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationIdleEvent = Schema.StructWithRest(
+const AttachedIdleEvent = Schema.StructWithRest(
   Schema.Struct({
-    ...publicConversationEventEnvelope,
+    ...attachedAgentEventEnvelope,
     type: Schema.Literal("idle"),
   }),
   [PublicRunEventRest],
 );
 
-export const PublicConversationEvent = Schema.Union([
-  PublicConversationMessageEvent,
-  PublicConversationDeltaEvent,
-  PublicConversationThinkingStartEvent,
-  PublicConversationThinkingDeltaEvent,
-  PublicConversationThinkingEndEvent,
-  PublicConversationToolStartEvent,
-  PublicConversationToolResultEvent,
-  PublicConversationAgentMarkerEvent,
-  PublicConversationTurnEvent,
-  PublicConversationSubmissionSettledEvent,
-  PublicConversationIdleEvent,
-]);
+export const AttachedAgentEvent = Schema.Union([
+  AttachedAgentStartEvent,
+  AttachedAgentEndEvent,
+  AttachedTurnStartEvent,
+  AttachedTurnMessagesEvent,
+  AttachedMessageEvent,
+  AttachedTextDeltaEvent,
+  AttachedThinkingStartEvent,
+  AttachedThinkingDeltaEvent,
+  AttachedThinkingEndEvent,
+  AttachedToolStartEvent,
+  AttachedToolResultEvent,
+  AttachedTurnEvent,
+  AttachedTaskStartEvent,
+  AttachedTaskEvent,
+  AttachedCompactionStartEvent,
+  AttachedCompactionEvent,
+  AttachedOperationStartEvent,
+  AttachedOperationEvent,
+  AttachedLogEvent,
+  AttachedSubmissionSettledEvent,
+  AttachedIdleEvent,
+]).pipe(Schema.annotate({ identifier: "AttachedAgentEvent" }));
+export type AttachedAgentEvent = typeof AttachedAgentEvent.Type;
 
-export const PublicStreamEvent = Schema.Union([PublicRunEvent, PublicConversationEvent]);
+export const PublicConversationEvent = AttachedAgentEvent;
+export type PublicConversationEvent = AttachedAgentEvent;
+
+export const PublicStreamEvent = Schema.Union([PublicRunEvent, AttachedAgentEvent]);
 
 type ProviderTextOrImageContent = Exclude<UserMessage["content"], string>[number];
 type ProviderContentBlock =
   | ProviderTextOrImageContent
   | AssistantMessage["content"][number]
   | ToolResultMessage["content"][number];
-type TurnUserContent =
-  | { readonly type: "text"; readonly text: string; readonly textSignature?: string | undefined }
-  | { readonly type: "image"; readonly data: string; readonly mimeType: string };
-type TurnAssistantContent =
-  | TurnUserContent
-  | {
-      readonly type: "thinking";
-      readonly thinking: string;
-      readonly thinkingSignature?: string | undefined;
-      readonly redacted?: boolean | undefined;
-    }
-  | {
-      readonly type: "toolCall";
-      readonly id: string;
-      readonly name: string;
-      readonly arguments: Record<string, unknown>;
-      readonly thoughtSignature?: string | undefined;
-    };
+type TurnUserContent = LlmTextContent | LlmImageContent;
+type TurnAssistantContent = LlmTextContent | LlmImageContent | LlmThinkingContent | LlmToolCall;
 type TurnToolResultContent = TurnUserContent;
 type TurnContent = TurnUserContent | TurnAssistantContent | TurnToolResultContent;
 type SignalMessageLike = {
@@ -333,7 +539,11 @@ export const toTurnMessage = (message: TurnSourceMessage): TurnInputMessage => {
 
 export const toTurnContent = (block: ProviderContentBlock): TurnContent => {
   if (block.type === "text") {
-    return { type: "text", text: block.text, textSignature: block.textSignature };
+    return {
+      type: "text",
+      text: block.text,
+      ...(block.textSignature === undefined ? {} : { textSignature: block.textSignature }),
+    };
   }
   if (block.type === "image") {
     return { type: "image", data: IMAGE_DATA_OMITTED, mimeType: block.mimeType };
@@ -342,8 +552,10 @@ export const toTurnContent = (block: ProviderContentBlock): TurnContent => {
     return {
       type: "thinking",
       thinking: block.thinking,
-      thinkingSignature: block.thinkingSignature,
-      redacted: block.redacted,
+      ...(block.thinkingSignature === undefined
+        ? {}
+        : { thinkingSignature: block.thinkingSignature }),
+      ...(block.redacted === undefined ? {} : { redacted: block.redacted }),
     };
   }
   return {
@@ -351,7 +563,7 @@ export const toTurnContent = (block: ProviderContentBlock): TurnContent => {
     id: block.id,
     name: block.name,
     arguments: block.arguments,
-    thoughtSignature: block.thoughtSignature,
+    ...(block.thoughtSignature === undefined ? {} : { thoughtSignature: block.thoughtSignature }),
   };
 };
 

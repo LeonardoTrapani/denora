@@ -1,6 +1,6 @@
-import type { PublicConversationEvent } from "@denora/server/stream-events";
+import type { AttachedAgentEvent } from "@denora/server/stream-events";
 
-export type ChatStatus = "idle" | "hydrating" | "connecting" | "submitted" | "streaming" | "error";
+export type ChatStatus = "idle" | "connecting" | "submitted" | "streaming" | "error";
 
 export type ChatRole = "user" | "assistant" | "system";
 
@@ -50,6 +50,6 @@ export interface ChatSnapshot {
   readonly error: Error | undefined;
 }
 
-export type DenoraConversationEvent = typeof PublicConversationEvent.Type;
+export type DenoraConversationEvent = AttachedAgentEvent;
 
 export * as ChatTypes from "./types.ts";

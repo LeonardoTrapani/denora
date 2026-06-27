@@ -15,6 +15,7 @@ import {
   AgentRunLifecycle,
   type CreateConversationSubmissionInput,
 } from "../agent-run/Lifecycle.ts";
+import type { LlmUserMessage } from "../agent-run/RunEventContract.ts";
 import {
   eventStreamErrorResponse,
   forbiddenResponse,
@@ -385,41 +386,53 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
             input: inputPayload,
             userId: input.userId,
           }).pipe(Effect.mapError(conversationRequestFailed));
-          yield* AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
-            agentName,
-            conversationId: input.conversationId,
-            submissionId,
-            runId,
-            triggerMessageId: messageId,
-            input: inputPayload,
-            userId: input.userId,
-            pi,
-          }).pipe(
-            Effect.flatMap((result) =>
-              store
-                .appendEventOnce(
-                  agentStreamPath(agentName, input.conversationId),
-                  `direct-submission:${submissionId}:settled`,
-                  result.terminalEvent,
-                )
-                .pipe(
-                  Effect.flatMap(() =>
-                    store.appendEventOnce(
-                      agentStreamPath(agentName, input.conversationId),
-                      `direct-submission:${submissionId}:idle`,
-                      {
-                        v: 3,
-                        type: "idle",
-                        instanceId: input.conversationId,
-                        agentName,
-                        submissionId,
-                        eventIndex: ConversationDomain.nextEventIndex(result.terminalEvent),
-                        timestamp: new Date().toISOString(),
-                      },
-                    ),
+          yield* Effect.gen(function* () {
+            yield* AgentRunLifecycle.appendConversationUserMessageApplied(store, {
+              agentName,
+              conversationId: input.conversationId,
+              submissionId,
+              userTurnId: `submission:${submissionId}:user`,
+              message: {
+                role: "user",
+                content: ConversationDomain.messageContentFromSubmitted(
+                  content,
+                ) as LlmUserMessage["content"],
+              },
+            });
+            const result = yield* AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
+              agentName,
+              conversationId: input.conversationId,
+              submissionId,
+              runId,
+              triggerMessageId: messageId,
+              input: inputPayload,
+              userId: input.userId,
+              pi,
+            });
+            yield* store
+              .appendEventOnce(
+                agentStreamPath(agentName, input.conversationId),
+                `direct-submission:${submissionId}:settled`,
+                result.terminalEvent,
+              )
+              .pipe(
+                Effect.flatMap(() =>
+                  store.appendEventOnce(
+                    agentStreamPath(agentName, input.conversationId),
+                    `direct-submission:${submissionId}:idle`,
+                    {
+                      v: 3,
+                      type: "idle",
+                      instanceId: input.conversationId,
+                      agentName,
+                      submissionId,
+                      eventIndex: ConversationDomain.nextEventIndex(result.terminalEvent),
+                      timestamp: new Date().toISOString(),
+                    },
                   ),
                 ),
-            ),
+              );
+          }).pipe(
             Effect.catch((error) =>
               Effect.logError("in-memory conversation submission failed", { error }),
             ),

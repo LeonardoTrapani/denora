@@ -210,8 +210,11 @@ describe("Api http surface", () => {
         assert.strictEqual(replay.status, 200);
         assert.strictEqual(events[0]?.type, "message_start");
         assert.strictEqual(events[0]?.instanceId, conversationId);
+        assert.strictEqual(events[0]?.conversationId, conversationId);
         assert.strictEqual(events[0]?.agentName, "default");
         assert.strictEqual(events[0]?.submissionId, createdBody.submissionId);
+        assert.strictEqual(events[0]?.turnId, `submission:${createdBody.submissionId}:user`);
+        assert.notProperty(events[0] ?? {}, "messageId");
         assert.notProperty(events[0] ?? {}, "runId");
         assert.strictEqual(events[0]?.v, 3);
         assert.includeMembers(
@@ -239,8 +242,10 @@ describe("Api http surface", () => {
         );
         const textDelta = events.find((event) => event.type === "text_delta");
         assert.strictEqual(textDelta?.instanceId, conversationId);
+        assert.strictEqual(textDelta?.conversationId, conversationId);
         assert.strictEqual(textDelta?.agentName, "default");
         assert.strictEqual(textDelta?.submissionId, createdBody.submissionId);
+        assert.notProperty(textDelta ?? {}, "messageId");
         assert.notProperty(textDelta ?? {}, "runId");
         assert.strictEqual(textDelta?.text, "hello");
         const settled = events.find((event) => event.type === "submission_settled");
@@ -286,8 +291,11 @@ describe("Api http surface", () => {
         const { events } = yield* waitForConversationEvent(client, conversationId, "denora");
         const userStart = events.find((event) => event.type === "message_start");
         assert.strictEqual(userStart?.instanceId, conversationId);
+        assert.strictEqual(userStart?.conversationId, conversationId);
         assert.strictEqual(userStart?.agentName, "denora");
         assert.strictEqual(userStart?.submissionId, createdBody.submissionId);
+        assert.strictEqual(userStart?.turnId, `submission:${createdBody.submissionId}:user`);
+        assert.notProperty(userStart ?? {}, "messageId");
         assert.notProperty(userStart ?? {}, "runId");
         assert.includeMembers(
           events.map((event) => event.type),

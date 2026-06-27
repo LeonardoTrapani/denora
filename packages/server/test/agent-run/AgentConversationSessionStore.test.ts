@@ -34,7 +34,7 @@ import { SqliteStorage, type TestSqliteStorage } from "../helpers/SqliteStorage.
 type TestSqlStorage = TestSqliteStorage["sql"];
 
 describe("AgentConversationSessionStore", () => {
-  it.effect("replaying the same submission admission does not duplicate input stream events", () =>
+  it.effect("replaying the same submission admission does not emit input stream events", () =>
     withHarness(
       Effect.gen(function* () {
         const { sql, store, coordinator } = yield* AgentConversationHarness;
@@ -51,17 +51,54 @@ describe("AgentConversationSessionStore", () => {
             offset: "-1",
           },
         );
-        const events = replay.events.map((event) => event.data as Record<string, unknown>);
 
         assert.isTrue(firstAdmission.admitted);
         assert.isFalse(secondAdmission.admitted);
         assert.isTrue(firstCreated.created);
         assert.isFalse(secondCreated.created);
+        assert.deepStrictEqual(replay.events, []);
+        assert.strictEqual(yield* countSubmissions(sql), 1);
+      }),
+    ),
+  );
+
+  it.effect("emits applied user input once after the session store records it", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, store, coordinator } = yield* AgentConversationHarness;
+        const input = submissionInput({ text: "hello" });
+        const contexts: Array<ReadonlyArray<AgentMessage>> = [];
+
+        yield* admitAndCreate(store, coordinator, input);
+        yield* coordinator.reconcile({
+          pi: makePi(["reply"], contexts),
+          scheduleWake: () => Effect.void,
+        });
+        yield* coordinator.reconcile({
+          pi: makePi(["duplicate should not run"], contexts),
+          scheduleWake: () => Effect.void,
+        });
+
+        const replay = yield* store.readEvents(
+          agentStreamPath(input.agentName, input.conversationId),
+          { offset: "-1" },
+        );
+        const events = replay.events.map((event) => event.data as Record<string, unknown>);
+        const userEvents = events.filter(
+          (event) =>
+            (event.type === "message_start" || event.type === "message_end") &&
+            (event.message as { readonly role?: unknown } | undefined)?.role === "user",
+        );
+
         assert.deepStrictEqual(
-          events.map((event) => event.type),
+          userEvents.map((event) => event.type),
           ["message_start", "message_end"],
         );
-        assert.strictEqual(yield* countSubmissions(sql), 1);
+        assert.strictEqual(userEvents[0]?.turnId, `submission:${input.submissionId}:user`);
+        assert.notProperty(userEvents[0] ?? {}, "messageId");
+        assert.notProperty(userEvents[0] ?? {}, "runId");
+        assert.strictEqual(yield* countMessages(sql, "user"), 1);
+        assert.strictEqual(contexts.length, 1);
       }),
     ),
   );
@@ -1477,6 +1514,212 @@ describe("AgentConversationSessionStore", () => {
         ]);
       }),
     ),
+  );
+
+  it.effect("fails closed when reading an active path for an unknown leaf", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+
+        yield* insertSessionMessage(sql, {
+          conversationId: "conversation_unknown_leaf",
+          messageId: "message_unknown_leaf_root",
+          parentMessageId: null,
+          role: "user",
+          plainText: "root",
+        });
+
+        const error = yield* sessions
+          .readActivePath({
+            conversationId: "conversation_unknown_leaf",
+            leafMessageId: "message_unknown_leaf_missing",
+          })
+          .pipe(Effect.flip);
+
+        assert.strictEqual(error._tag, "EventStorageFailed");
+        assert.strictEqual(error.operation, "read conversation session active path");
+        assert.include(String(error.cause), "message_unknown_leaf_missing");
+      }),
+    ),
+  );
+
+  it.effect("fails closed when active-path traversal reaches a missing parent", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+
+        yield* insertSessionMessage(sql, {
+          conversationId: "conversation_missing_parent",
+          messageId: "message_missing_parent_leaf",
+          parentMessageId: "message_missing_parent_absent",
+          role: "assistant",
+          plainText: "orphaned leaf",
+        });
+
+        const error = yield* sessions
+          .readActivePath({
+            conversationId: "conversation_missing_parent",
+            leafMessageId: "message_missing_parent_leaf",
+          })
+          .pipe(Effect.flip);
+
+        assert.strictEqual(error._tag, "EventStorageFailed");
+        assert.strictEqual(error.operation, "read conversation session active path");
+        assert.include(String(error.cause), "message_missing_parent_absent");
+      }),
+    ),
+  );
+
+  it.effect("fails closed when active-path traversal encounters parent cycles", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const { sql, sessions } = yield* AgentConversationHarness;
+
+        yield* insertSessionMessage(sql, {
+          conversationId: "conversation_self_cycle",
+          messageId: "message_self_cycle",
+          parentMessageId: "message_self_cycle",
+          role: "user",
+          plainText: "self cycle",
+        });
+        const selfCycleError = yield* sessions
+          .readActivePath({
+            conversationId: "conversation_self_cycle",
+            leafMessageId: "message_self_cycle",
+          })
+          .pipe(Effect.flip);
+
+        yield* insertSessionMessage(sql, {
+          conversationId: "conversation_two_node_cycle",
+          messageId: "message_two_node_cycle_a",
+          parentMessageId: "message_two_node_cycle_b",
+          role: "user",
+          plainText: "cycle a",
+        });
+        yield* insertSessionMessage(sql, {
+          conversationId: "conversation_two_node_cycle",
+          messageId: "message_two_node_cycle_b",
+          parentMessageId: "message_two_node_cycle_a",
+          role: "assistant",
+          plainText: "cycle b",
+        });
+        const twoNodeCycleError = yield* sessions
+          .readActivePath({
+            conversationId: "conversation_two_node_cycle",
+            leafMessageId: "message_two_node_cycle_a",
+          })
+          .pipe(Effect.flip);
+
+        assert.strictEqual(selfCycleError._tag, "EventStorageFailed");
+        assert.strictEqual(selfCycleError.operation, "read conversation session active path");
+        assert.include(String(selfCycleError.cause), "forms a cycle");
+        assert.strictEqual(twoNodeCycleError._tag, "EventStorageFailed");
+        assert.strictEqual(twoNodeCycleError.operation, "read conversation session active path");
+        assert.include(String(twoNodeCycleError.cause), "forms a cycle");
+      }),
+    ),
+  );
+
+  it.effect(
+    "walks branched tool-result active paths in root-to-leaf order without sibling results",
+    () =>
+      withHarness(
+        Effect.gen(function* () {
+          const { sql, sessions } = yield* AgentConversationHarness;
+          const conversationId = "conversation_tool_result_branch";
+          const assistantId = "assistant:run_tool_result_branch:0";
+          const siblingResultId = "tool-result:run_tool_result_branch:call_sibling";
+          const selectedFirstResultId = "tool-result:run_tool_result_branch:call_first";
+          const selectedLeafResultId = "tool-result:run_tool_result_branch:call_leaf";
+
+          yield* insertSessionMessage(sql, {
+            conversationId,
+            messageId: "message_tool_result_branch_root",
+            parentMessageId: null,
+            runId: "run_tool_result_branch",
+            submissionId: "submission_tool_result_branch",
+            role: "user",
+            parts: [{ type: "text", text: "Run the tools." }],
+            plainText: "Run the tools.",
+          });
+          yield* insertSessionMessage(sql, {
+            conversationId,
+            messageId: assistantId,
+            parentMessageId: "message_tool_result_branch_root",
+            runId: "run_tool_result_branch",
+            submissionId: "submission_tool_result_branch",
+            role: "assistant",
+            parts: [
+              { type: "toolCall", id: "call_first", name: "sample_tool", arguments: {} },
+              { type: "toolCall", id: "call_leaf", name: "sample_tool", arguments: {} },
+              { type: "toolCall", id: "call_sibling", name: "sample_tool", arguments: {} },
+            ],
+            plainText: "",
+          });
+          yield* insertSessionMessage(sql, {
+            conversationId,
+            messageId: siblingResultId,
+            parentMessageId: assistantId,
+            runId: "run_tool_result_branch",
+            submissionId: "submission_tool_result_branch",
+            role: "toolResult",
+            parts: [toolResultPart("call_sibling", "sibling result")],
+            plainText: "sibling result",
+          });
+          yield* insertSessionMessage(sql, {
+            conversationId,
+            messageId: selectedFirstResultId,
+            parentMessageId: assistantId,
+            runId: "run_tool_result_branch",
+            submissionId: "submission_tool_result_branch",
+            role: "toolResult",
+            parts: [toolResultPart("call_first", "first selected result")],
+            plainText: "first selected result",
+          });
+          yield* insertSessionMessage(sql, {
+            conversationId,
+            messageId: selectedLeafResultId,
+            parentMessageId: selectedFirstResultId,
+            runId: "run_tool_result_branch",
+            submissionId: "submission_tool_result_branch",
+            role: "toolResult",
+            parts: [toolResultPart("call_leaf", "leaf selected result")],
+            plainText: "leaf selected result",
+          });
+
+          const selectedPath = yield* sessions.readActivePath({
+            conversationId,
+            leafMessageId: selectedLeafResultId,
+          });
+          const siblingPath = yield* sessions.readActivePath({
+            conversationId,
+            leafMessageId: siblingResultId,
+          });
+
+          assert.deepStrictEqual(
+            selectedPath.map((message) => message.messageId),
+            [
+              "message_tool_result_branch_root",
+              assistantId,
+              selectedFirstResultId,
+              selectedLeafResultId,
+            ],
+          );
+          assert.deepStrictEqual(
+            selectedPath.map((message) => message.role),
+            ["user", "assistant", "toolResult", "toolResult"],
+          );
+          assert.deepStrictEqual(
+            selectedPath.map((message) => message.plainText),
+            ["Run the tools.", "", "first selected result", "leaf selected result"],
+          );
+          assert.isFalse(selectedPath.some((message) => message.messageId === siblingResultId));
+          assert.deepStrictEqual(
+            siblingPath.map((message) => message.messageId),
+            ["message_tool_result_branch_root", assistantId, siblingResultId],
+          );
+        }),
+      ),
   );
 
   it.effect("retries after input was applied using the persisted local session history", () =>
@@ -3833,6 +4076,52 @@ const readTerminalEventOffset = (sql: TestSqlStorage, submissionId: string) =>
     );
     return (yield* cursor.one()).terminal_event_offset;
   });
+
+const insertSessionMessage = (
+  sql: TestSqlStorage,
+  input: {
+    readonly conversationId: string;
+    readonly messageId: string;
+    readonly parentMessageId?: string | null | undefined;
+    readonly runId?: string | null | undefined;
+    readonly submissionId?: string | null | undefined;
+    readonly role: "user" | "assistant" | "toolCall" | "toolResult";
+    readonly parts?: ReadonlyArray<unknown> | undefined;
+    readonly plainText: string;
+    readonly status?: string | undefined;
+    readonly createdAt?: string | undefined;
+    readonly updatedAt?: string | undefined;
+  },
+) => {
+  const timestamp = input.createdAt ?? new Date().toISOString();
+  return sql
+    .exec(
+      `INSERT INTO denora_agent_conversation_session_messages
+       (message_id, conversation_id, parent_message_id, run_id, submission_id, role,
+        parts_json, plain_text, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      input.messageId,
+      input.conversationId,
+      input.parentMessageId ?? null,
+      input.runId ?? null,
+      input.submissionId ?? null,
+      input.role,
+      JSON.stringify(input.parts ?? [{ type: "text", text: input.plainText }]),
+      input.plainText,
+      input.status ?? "completed",
+      timestamp,
+      input.updatedAt ?? timestamp,
+    )
+    .pipe(Effect.asVoid);
+};
+
+const toolResultPart = (toolCallId: string, text: string) => ({
+  type: "text",
+  text,
+  toolCallId,
+  toolName: "sample_tool",
+  details: {},
+});
 
 const readSessionMessages = (sql: TestSqlStorage) =>
   Effect.gen(function* () {

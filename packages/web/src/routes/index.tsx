@@ -1,10 +1,10 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { getServerSession } from "../lib/auth-server.ts";
+import { Auth } from "../lib/Auth.ts";
 
 export const Route = createFileRoute("/")({
   beforeLoad: async ({ context }) => {
-    const session = context.auth ?? (await getServerSession());
+    const session = context.auth ?? (await Auth.getSession());
 
     throw redirect({
       to: session?.session ? "/app" : "/login",

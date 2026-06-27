@@ -1,9 +1,13 @@
+import { PublicConversationEvent } from "@denora/server/stream-events";
 import type { BackoffOptions, LiveMode } from "@durable-streams/client";
 import { stream } from "@durable-streams/client";
+import * as Schema from "effect/Schema";
 
+import { Auth } from "../lib/Auth.ts";
 import { WebConfig } from "../lib/WebConfig.ts";
-import { withAuthForwardingHeaders } from "../lib/request-auth-headers";
 import type { DenoraConversationEvent } from "./types.ts";
+
+type StreamFetch = (...args: Parameters<typeof globalThis.fetch>) => Promise<Response>;
 
 export interface ConversationStreamOptions {
   readonly conversationId: string;
@@ -12,28 +16,42 @@ export interface ConversationStreamOptions {
   readonly live?: LiveMode | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly backoffOptions?: BackoffOptions | undefined;
+  readonly baseUrl?: string | undefined;
+  readonly fetch?: StreamFetch | undefined;
 }
 
-export interface ConversationEventStream<T = DenoraConversationEvent> extends AsyncIterable<T> {
+export interface ConversationEventStream extends AsyncIterable<DenoraConversationEvent> {
   cancel(reason?: unknown): void;
   readonly offset: string;
 }
 
-export function createConversationEventStream<T = DenoraConversationEvent>(
+export class UnsupportedConversationEventVersionError extends Error {
+  readonly received: unknown;
+  readonly supported = 3;
+
+  constructor(received: unknown) {
+    super(`Denora conversation event version ${String(received)} is unsupported.`);
+    this.name = "UnsupportedConversationEventVersionError";
+    this.received = received;
+  }
+}
+
+export function createConversationEventStream(
   options: ConversationStreamOptions,
-): ConversationEventStream<T> {
+): ConversationEventStream {
+  const decodeEvent = Schema.decodeUnknownSync(PublicConversationEvent);
   const abortController = new AbortController();
   const removeExternalAbortListener = linkAbortSignal(options.signal, abortController);
-  const url = conversationEventsUrl(options.conversationId);
+  const url = conversationEventsUrl(options.conversationId, options.baseUrl);
   if (options.tail !== undefined) url.searchParams.set("tail", String(options.tail));
 
   let connectOffset = options.offset ?? "-1";
   let currentOffset = connectOffset;
-  let responsePromise: Promise<Awaited<ReturnType<typeof stream<T>>>> | undefined;
+  let responsePromise: Promise<Awaited<ReturnType<typeof stream<unknown>>>> | undefined;
   let started = false;
   let pending:
     | {
-        readonly items: readonly T[];
+        readonly items: readonly unknown[];
         next: number;
         readonly offset: string;
         readonly final: { readonly upToDate: boolean } | undefined;
@@ -63,21 +81,24 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
     wake();
   };
   const connect = () => {
+    const fetch = Object.assign(options.fetch ?? fetchWithCredentials, {
+      preconnect: globalThis.fetch.preconnect,
+    }) satisfies typeof globalThis.fetch;
     const streamOptions = {
       url: url.toString(),
       offset: connectOffset,
       live: options.live ?? true,
       json: true,
       signal: abortController.signal,
-      fetch: fetchWithCredentials,
+      fetch,
       warnOnHttp: false,
       ...(options.backoffOptions === undefined ? {} : { backoffOptions: options.backoffOptions }),
     };
-    responsePromise ??= stream<T>(streamOptions);
+    responsePromise ??= stream<unknown>(streamOptions);
     return responsePromise;
   };
-  const startConsuming = (res: Awaited<ReturnType<typeof stream<T>>>) => {
-    res.subscribeJson<T>((batch) => {
+  const startConsuming = (res: Awaited<ReturnType<typeof stream<unknown>>>) => {
+    res.subscribeJson<unknown>((batch) => {
       if (abortController.signal.aborted) return;
       const final =
         batch.streamClosed || options.live === false ? { upToDate: batch.upToDate } : undefined;
@@ -108,11 +129,11 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
       },
     );
   };
-  const nextResult = async (): Promise<IteratorResult<T>> => {
+  const nextResult = async (): Promise<IteratorResult<DenoraConversationEvent>> => {
     while (true) {
       if (abortController.signal.aborted) {
         removeExternalAbortListener?.();
-        return { value: undefined as T, done: true };
+        return { value: undefined, done: true };
       }
 
       if (!started) {
@@ -123,14 +144,22 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
           started = false;
           removeExternalAbortListener?.();
           if (abortController.signal.aborted || isAbortError(error)) {
-            return { value: undefined as T, done: true };
+            return { value: undefined, done: true };
           }
           throw error;
         }
       }
 
       if (pending) {
-        const value = pending.items[pending.next] as T;
+        let value: DenoraConversationEvent;
+        try {
+          value = decodeConversationEvent(pending.items[pending.next], decodeEvent);
+        } catch (error) {
+          pending = undefined;
+          releaseBatch();
+          cancel(error);
+          throw error;
+        }
         pending.next += 1;
         if (pending.next >= pending.items.length) {
           currentOffset = pending.offset;
@@ -150,7 +179,7 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
           streamFailure = undefined;
           removeExternalAbortListener?.();
           if (abortController.signal.aborted || isAbortError(error)) {
-            return { value: undefined as T, done: true };
+            return { value: undefined, done: true };
           }
           throw error;
         }
@@ -169,14 +198,14 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
           continue;
         }
         removeExternalAbortListener?.();
-        return { value: undefined as T, done: true };
+        return { value: undefined, done: true };
       }
 
       if (fetchDone && options.live === "sse") {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         if (pending || deliveryDone || abortController.signal.aborted) continue;
         removeExternalAbortListener?.();
-        return { value: undefined as T, done: true };
+        return { value: undefined, done: true };
       }
 
       await new Promise<void>((resolve) => {
@@ -186,7 +215,7 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
   };
 
   let lastNext: Promise<unknown> | undefined;
-  const iterator: AsyncIterator<T> = {
+  const iterator: AsyncIterator<DenoraConversationEvent> = {
     next() {
       const result = lastNext ? lastNext.then(nextResult, nextResult) : nextResult();
       lastNext = result.catch(() => undefined);
@@ -194,7 +223,7 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
     },
     async return() {
       cancel();
-      return { value: undefined as T, done: true };
+      return { value: undefined, done: true };
     },
   };
 
@@ -209,14 +238,24 @@ export function createConversationEventStream<T = DenoraConversationEvent>(
   };
 }
 
-const conversationEventsUrl = (conversationId: string) => {
-  const baseUrl = WebConfig.requireApiUrl();
+const decodeConversationEvent = (
+  value: unknown,
+  decodeEvent: (value: unknown) => DenoraConversationEvent,
+): DenoraConversationEvent => {
+  const version =
+    value && typeof value === "object" ? (value as { readonly v?: unknown }).v : undefined;
+  if (version !== 3) throw new UnsupportedConversationEventVersionError(version);
+  return decodeEvent(value);
+};
+
+const conversationEventsUrl = (conversationId: string, configuredBaseUrl?: string | undefined) => {
+  const baseUrl = configuredBaseUrl ?? WebConfig.requireApiUrl();
   return new URL(`/conversations/${encodeURIComponent(conversationId)}/events`, `${baseUrl}/`);
 };
 
 const fetchWithCredentials = Object.assign(
   async (...[input, init]: Parameters<typeof globalThis.fetch>): Promise<Response> => {
-    const headers = await withAuthForwardingHeaders(init?.headers);
+    const headers = await Auth.withAuthForwardingHeaders(init?.headers);
     return fetch(input, { ...init, headers, credentials: "include" });
   },
   { preconnect: globalThis.fetch.preconnect },

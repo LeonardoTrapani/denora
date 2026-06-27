@@ -6,7 +6,13 @@ import { SystemGroup } from "./system/Api.ts";
 
 export { AccountGroup } from "./account/Api.ts";
 export { AgentRunGroup } from "./agent-run/Api.ts";
-export { ConversationGroup } from "./conversation/Api.ts";
+export {
+  AbortConversationResponse,
+  Conversation,
+  ConversationGroup,
+  ConversationMessage,
+  SubmitConversationMessageResponse,
+} from "./conversation/Api.ts";
 export { Health } from "./system/Schema.ts";
 export { SystemGroup } from "./system/Api.ts";
 

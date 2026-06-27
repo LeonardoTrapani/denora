@@ -24,6 +24,7 @@ const publicConversationEventEnvelope = {
   timestamp: Schema.String,
   submissionId: Schema.optionalKey(Schema.String),
   messageId: Schema.optionalKey(Schema.String),
+  turnId: Schema.optionalKey(Schema.String),
 };
 
 const PublicRunStartEvent = Schema.StructWithRest(
@@ -96,18 +97,63 @@ const PublicConversationDeltaEvent = Schema.StructWithRest(
   [PublicRunEventRest],
 );
 
-const PublicConversationThinkingEvent = Schema.StructWithRest(
+const PublicConversationThinkingStartEvent = Schema.StructWithRest(
   Schema.Struct({
     ...publicConversationEventEnvelope,
-    type: Schema.Literals(["thinking_start", "thinking_delta", "thinking_end"]),
+    type: Schema.Literal("thinking_start"),
+    contentIndex: Schema.optionalKey(Schema.Number),
   }),
   [PublicRunEventRest],
 );
 
-const PublicConversationToolEvent = Schema.StructWithRest(
+const PublicConversationThinkingDeltaEvent = Schema.StructWithRest(
   Schema.Struct({
     ...publicConversationEventEnvelope,
-    type: Schema.Literals(["tool_start", "tool"]),
+    type: Schema.Literal("thinking_delta"),
+    contentIndex: Schema.optionalKey(Schema.Number),
+    delta: Schema.String,
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationThinkingEndEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literal("thinking_end"),
+    contentIndex: Schema.optionalKey(Schema.Number),
+    content: Schema.String,
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationToolStartEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literal("tool_start"),
+    toolName: Schema.String,
+    toolCallId: Schema.String,
+    input: Schema.optionalKey(Schema.Unknown),
+    args: Schema.optionalKey(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationToolResultEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literal("tool"),
+    toolName: Schema.String,
+    toolCallId: Schema.String,
+    isError: Schema.Boolean,
+    result: Schema.optionalKey(Schema.Unknown),
+  }),
+  [PublicRunEventRest],
+);
+
+const PublicConversationAgentMarkerEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...publicConversationEventEnvelope,
+    type: Schema.Literals(["agent_start", "agent_end", "turn_start", "turn_messages"]),
   }),
   [PublicRunEventRest],
 );
@@ -115,7 +161,9 @@ const PublicConversationToolEvent = Schema.StructWithRest(
 const PublicConversationTurnEvent = Schema.StructWithRest(
   Schema.Struct({
     ...publicConversationEventEnvelope,
-    type: Schema.Literals(["agent_start", "agent_end", "turn_start", "turn_messages", "turn"]),
+    type: Schema.Literal("turn"),
+    request: Schema.optionalKey(Schema.Unknown),
+    response: Schema.optionalKey(Schema.Unknown),
   }),
   [PublicRunEventRest],
 );
@@ -143,8 +191,12 @@ const PublicConversationIdleEvent = Schema.StructWithRest(
 export const PublicConversationEvent = Schema.Union([
   PublicConversationMessageEvent,
   PublicConversationDeltaEvent,
-  PublicConversationThinkingEvent,
-  PublicConversationToolEvent,
+  PublicConversationThinkingStartEvent,
+  PublicConversationThinkingDeltaEvent,
+  PublicConversationThinkingEndEvent,
+  PublicConversationToolStartEvent,
+  PublicConversationToolResultEvent,
+  PublicConversationAgentMarkerEvent,
   PublicConversationTurnEvent,
   PublicConversationSubmissionSettledEvent,
   PublicConversationIdleEvent,

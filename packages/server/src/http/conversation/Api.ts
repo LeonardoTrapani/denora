@@ -14,7 +14,7 @@ export const CreateConversationPayload = Schema.Struct({
 }).pipe(Schema.annotate({ identifier: "CreateConversationPayload" }));
 export type CreateConversationPayload = typeof CreateConversationPayload.Type;
 
-export class Conversation extends Schema.Class<Conversation>("Conversation")({
+export const Conversation = Schema.Struct({
   id: ConversationDomain.ConversationId,
   ownerUserId: ConversationDomain.UserId,
   agentId: Schema.NullOr(Schema.String),
@@ -24,9 +24,10 @@ export class Conversation extends Schema.Class<Conversation>("Conversation")({
   createdAt: Schema.String,
   updatedAt: Schema.String,
   archivedAt: Schema.NullOr(Schema.String),
-}) {}
+}).pipe(Schema.annotate({ identifier: "Conversation" }));
+export type Conversation = typeof Conversation.Type;
 
-export class ConversationMessage extends Schema.Class<ConversationMessage>("ConversationMessage")({
+export const ConversationMessage = Schema.Struct({
   id: ConversationDomain.MessageId,
   conversationId: ConversationDomain.ConversationId,
   runId: Schema.NullOr(ConversationDomain.RunId),
@@ -34,7 +35,8 @@ export class ConversationMessage extends Schema.Class<ConversationMessage>("Conv
   content: Schema.Unknown,
   metadata: Schema.Unknown,
   createdAt: Schema.String,
-}) {}
+}).pipe(Schema.annotate({ identifier: "ConversationMessage" }));
+export type ConversationMessage = typeof ConversationMessage.Type;
 
 export const SubmitConversationMessagePayload = Schema.Struct({
   message: Schema.optional(Schema.String),
@@ -42,9 +44,7 @@ export const SubmitConversationMessagePayload = Schema.Struct({
 }).pipe(Schema.annotate({ identifier: "SubmitConversationMessagePayload" }));
 export type SubmitConversationMessagePayload = typeof SubmitConversationMessagePayload.Type;
 
-export class SubmitConversationMessageResponse extends Schema.Class<SubmitConversationMessageResponse>(
-  "SubmitConversationMessageResponse",
-)({
+export const SubmitConversationMessageResponse = Schema.Struct({
   conversationId: ConversationDomain.ConversationId,
   messageId: ConversationDomain.MessageId,
   submissionId: ConversationDomain.SubmissionId,
@@ -52,18 +52,18 @@ export class SubmitConversationMessageResponse extends Schema.Class<SubmitConver
   streamUrl: Schema.String,
   streamPath: Schema.String,
   offset: Schema.String,
-}) {}
+}).pipe(Schema.annotate({ identifier: "SubmitConversationMessageResponse" }));
+export type SubmitConversationMessageResponse = typeof SubmitConversationMessageResponse.Type;
 
 export const AbortConversationPayload = Schema.Struct({
   reason: Schema.optional(Schema.String),
 }).pipe(Schema.annotate({ identifier: "AbortConversationPayload" }));
 export type AbortConversationPayload = typeof AbortConversationPayload.Type;
 
-export class AbortConversationResponse extends Schema.Class<AbortConversationResponse>(
-  "AbortConversationResponse",
-)({
+export const AbortConversationResponse = Schema.Struct({
   abortedSubmissions: Schema.Number,
-}) {}
+}).pipe(Schema.annotate({ identifier: "AbortConversationResponse" }));
+export type AbortConversationResponse = typeof AbortConversationResponse.Type;
 
 const ConversationParams = { conversationId: Schema.String };
 

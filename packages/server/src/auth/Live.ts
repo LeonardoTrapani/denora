@@ -8,6 +8,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Url from "effect/unstable/http/Url";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { Auth, AuthProviderError } from "./Auth.ts";
@@ -196,7 +197,7 @@ const json = (body: unknown, init: ResponseInit = {}, cookies: ReadonlyArray<str
 };
 
 const toDenoraUser = (user: User): DenoraUser =>
-  new DenoraUser({
+  Schema.decodeUnknownSync(DenoraUser)({
     id: user.id,
     email: user.email,
     emailVerified: user.emailVerified,

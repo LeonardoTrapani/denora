@@ -8,12 +8,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@denora/ui/components/card";
-import { useMutation } from "@tanstack/react-query";
+import { useAtom } from "@effect/atom-react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
+import * as Atom from "effect/unstable/reactivity/Atom";
 import { z } from "zod";
 
-import { getAuthClient } from "../../../auth-client.ts";
-import { getServerSession } from "../../../lib/auth-server.ts";
+import { Auth } from "../../../lib/Auth.ts";
 
 const loginSearchSchema = z
   .object({
@@ -30,7 +33,7 @@ type LoginSearch = z.infer<typeof loginSearchSchema>;
 export const Route = createFileRoute("/(auth)/_auth/login")({
   validateSearch: (search): LoginSearch => loginSearchSchema.parse(search),
   beforeLoad: async ({ context, search }) => {
-    const session = context.auth ?? (await getServerSession());
+    const session = context.auth ?? (await Auth.getSession());
 
     if (session?.session) {
       if (search.redirect) {
@@ -42,6 +45,15 @@ export const Route = createFileRoute("/(auth)/_auth/login")({
   },
   component: LoginPage,
 });
+
+const signInAtom = Atom.fn<string>()((redirectTo) =>
+  Effect.sync(() => {
+    Auth.signIn({
+      redirect: new URL(redirectTo, window.location.origin).toString(),
+      screenHint: "sign-in",
+    });
+  }),
+);
 
 function LoginPage() {
   return (
@@ -64,34 +76,33 @@ function LoginPage() {
 
 function AuthKitLogin() {
   const search = Route.useSearch();
-
-  const signInMutation = useMutation({
-    mutationFn: async () => {
-      getAuthClient().signIn({
-        redirect: new URL(search.redirect ?? "/app", window.location.origin).toString(),
-        screenHint: "sign-in",
-      });
-    },
-    onError: (error) => {
-      console.error("AuthKit sign-in failed", error);
-    },
-  });
+  const [signInResult, signIn] = useAtom(signInAtom, { mode: "promise" });
+  const error = resultError(signInResult);
 
   return (
     <div className="grid gap-3">
       <Button
-        disabled={signInMutation.isPending}
-        onClick={() => signInMutation.mutate()}
+        disabled={signInResult.waiting}
+        onClick={() => void signIn(search.redirect ?? "/app")}
         size="lg"
         type="button"
       >
-        {signInMutation.isPending ? "Opening sign-in..." : "Continue with WorkOS"}
+        {signInResult.waiting ? "Opening sign-in..." : "Continue with WorkOS"}
       </Button>
-      {signInMutation.error instanceof Error ? (
+      {error ? (
         <Alert variant="destructive">
-          <AlertDescription>{signInMutation.error.message}</AlertDescription>
+          <AlertDescription>{error.message}</AlertDescription>
         </Alert>
       ) : null}
     </div>
   );
+}
+
+function resultError(result: AsyncResult.AsyncResult<unknown, unknown>): Error | undefined {
+  if (!AsyncResult.isFailure(result)) return undefined;
+  return toError(Cause.squash(result.cause));
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

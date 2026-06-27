@@ -6,14 +6,15 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
-    "check-types": "tsc --noEmit"
+    "check-types": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@denora/server": "workspace:*",
     "@denora/ui": "workspace:*",
     "@durable-streams/client": "^0.2.6",
+    "@effect/atom-react": "4.0.0-beta.83",
     "@tailwindcss/vite": "^4",
-    "@tanstack/react-query": "^5.95.2",
     "@tanstack/react-router": "^1.170.15",
     "@tanstack/react-start": "^1.168.25",
     "effect": "^4.0.0-beta.83",
@@ -28,6 +29,7 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^4.1.8"
   }
 }

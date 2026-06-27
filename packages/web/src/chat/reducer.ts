@@ -1,3 +1,5 @@
+import type { ConversationMessage } from "@denora/server/http/Api";
+
 import type {
   ChatMessage,
   ChatMessagePart,
@@ -19,12 +21,7 @@ export interface ChatState extends ChatSnapshot {
   readonly reasoningPartIndexes: Readonly<Record<string, Readonly<Record<number, number>>>>;
 }
 
-export interface PersistedConversationMessage {
-  readonly id: string;
-  readonly role: "system" | "user" | "assistant" | "tool" | "event";
-  readonly content: unknown;
-  readonly metadata?: unknown;
-}
+export type PersistedConversationMessage = ConversationMessage;
 
 export type ChatReducerEvent =
   | DenoraConversationEvent

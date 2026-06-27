@@ -1,9 +1,10 @@
+import * as Schema from "effect/Schema";
 import { DenoraUser } from "../../src/auth/User.ts";
 
 // A fully-populated authenticated user. Tests override only the fields they
 // assert on.
 export const makeDenoraUser = (overrides: Partial<DenoraUser> = {}): DenoraUser =>
-  new DenoraUser({
+  Schema.decodeUnknownSync(DenoraUser)({
     id: "00000000-0000-0000-0000-000000000001",
     email: "ada@example.com",
     emailVerified: true,

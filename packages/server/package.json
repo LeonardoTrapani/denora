@@ -28,6 +28,12 @@
       "import": "./src/http/Api.ts",
       "default": "./src/http/Api.ts"
     },
+    "./stream-events": {
+      "types": "./src/agent-run/RunEventContract.ts",
+      "bun": "./src/agent-run/RunEventContract.ts",
+      "import": "./src/agent-run/RunEventContract.ts",
+      "default": "./src/agent-run/RunEventContract.ts"
+    },
     "./agent-loop/PiAgentModel": {
       "types": "./src/agent-loop/PiAgentModel.ts",
       "bun": "./src/agent-loop/PiAgentModel.ts",

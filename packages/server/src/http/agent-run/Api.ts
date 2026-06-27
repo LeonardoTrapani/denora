@@ -13,14 +13,13 @@ export const CreateAgentRunPayload = Schema.Struct({
 }).pipe(Schema.annotate({ identifier: "CreateAgentRunPayload" }));
 export type CreateAgentRunPayload = typeof CreateAgentRunPayload.Type;
 
-export class CreateAgentRunResponse extends Schema.Class<CreateAgentRunResponse>(
-  "CreateAgentRunResponse",
-)({
+export const CreateAgentRunResponse = Schema.Struct({
   runId: ConversationDomain.RunId,
   streamUrl: Schema.String,
   streamPath: Schema.String,
   offset: Schema.String,
-}) {}
+}).pipe(Schema.annotate({ identifier: "CreateAgentRunResponse" }));
+export type CreateAgentRunResponse = typeof CreateAgentRunResponse.Type;
 
 export class AgentRunGroup extends HttpApiGroup.make("AgentRun", { topLevel: true })
   .add(

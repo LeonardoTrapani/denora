@@ -1,13 +1,4 @@
 import * as ClientApi from "@denora/server/client-api";
-import {
-  mutationOptions,
-  queryOptions,
-  type MutationFunctionContext,
-  type QueryFunctionContext,
-  type QueryKey,
-  type UseMutationOptions,
-  type UseQueryOptions,
-} from "@tanstack/react-query";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -17,11 +8,11 @@ import * as Option from "effect/Option";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import { WebConfig } from "./WebConfig.ts";
-import { withAuthForwardingHeaders } from "./request-auth-headers";
+import { Auth } from "./Auth.ts";
 
 const withRequestHeaders = HttpClient.mapRequestEffect((request) =>
   Effect.promise(async () => {
-    const headers = await withAuthForwardingHeaders(request.headers);
+    const headers = await Auth.withAuthForwardingHeaders(request.headers);
     return HttpClientRequest.setHeaders(request, Object.fromEntries(headers.entries()));
   }),
 );
@@ -30,15 +21,13 @@ const FetchClientLive = FetchHttpClient.layer.pipe(
   Layer.provide(Layer.succeed(FetchHttpClient.RequestInit)({ credentials: "include" })),
 );
 
-const apiRuntime =
-  WebConfig.apiUrl.length > 0
-    ? ManagedRuntime.make(
-        ClientApi.layer(WebConfig.apiUrl, {
-          httpClientLayer: FetchClientLive,
-          transformClient: (client) => client.pipe(withRequestHeaders),
-        }),
-      )
-    : undefined;
+export const clientLayer = ClientApi.layer(WebConfig.apiUrl || "http://localhost", {
+  httpClientLayer: FetchClientLive,
+  transformClient: (client) => client.pipe(withRequestHeaders),
+});
+
+const managedApiRuntime =
+  WebConfig.apiUrl.length > 0 ? ManagedRuntime.make(clientLayer) : undefined;
 
 export type DenoraApiClient = ClientApi.DenoraClient["Service"];
 
@@ -57,10 +46,6 @@ export class ApiDefect extends Error {
   }
 }
 
-export interface HealthResponse {
-  readonly status: string;
-}
-
 export function apiEffect<A, E>(
   makeEffect: (client: DenoraApiClient) => Effect.Effect<A, E, never>,
 ): Effect.Effect<A, E, ClientApi.DenoraClient> {
@@ -71,7 +56,7 @@ export async function runApi<A, E>(
   effect: Effect.Effect<A, E, ClientApi.DenoraClient>,
   options: ApiRunOptions = {},
 ): Promise<A> {
-  const runtime = apiRuntime ?? WebConfig.missingApiUrl();
+  const runtime = managedApiRuntime ?? WebConfig.missingApiUrl();
 
   const runnable = Effect.scoped(
     effect.pipe(Effect.withSpan(options.span ?? "api"), Effect.tapCause(Effect.logError)),
@@ -92,87 +77,4 @@ export async function runApi<A, E>(
   throw new ApiDefect(Cause.squash(exit.cause));
 }
 
-const spanFromKey = (key: readonly unknown[] | undefined, fallback: string) => {
-  const firstSegment = key?.[0];
-  return typeof firstSegment === "string" ? firstSegment : fallback;
-};
-
-type ApiQueryFn<TQueryFnData, TError, TQueryKey extends QueryKey> = (input: {
-  readonly client: DenoraApiClient;
-  readonly context: QueryFunctionContext<TQueryKey>;
-}) => Effect.Effect<TQueryFnData, TError, never>;
-
-export type ApiQueryOptions<
-  TQueryFnData,
-  TError,
-  TData = TQueryFnData,
-  TQueryKey extends QueryKey = QueryKey,
-> = Omit<UseQueryOptions<TQueryFnData, TError | ApiDefect, TData, TQueryKey>, "queryFn"> & {
-  readonly queryFn: ApiQueryFn<TQueryFnData, TError, TQueryKey>;
-  readonly span?: string | undefined;
-};
-
-export function apiQueryOptions<
-  TQueryFnData,
-  TError = never,
-  TData = TQueryFnData,
-  TQueryKey extends QueryKey = QueryKey,
->(options: ApiQueryOptions<TQueryFnData, TError, TData, TQueryKey>) {
-  const { queryFn, queryKey, span, ...tanstackOptions } = options;
-
-  return queryOptions({
-    ...tanstackOptions,
-    queryKey,
-    queryFn: (context: QueryFunctionContext<TQueryKey>) =>
-      runApi(
-        apiEffect((client) => queryFn({ client, context })),
-        {
-          signal: context.signal,
-          span: span ?? spanFromKey(queryKey, "api-query"),
-        },
-      ),
-  });
-}
-
-type ApiMutationFn<TData, TError, TVariables> = (input: {
-  readonly client: DenoraApiClient;
-  readonly variables: TVariables;
-  readonly context: MutationFunctionContext;
-}) => Effect.Effect<TData, TError, never>;
-
-export type ApiMutationOptions<TData, TError, TVariables = void, TOnMutateResult = unknown> = Omit<
-  UseMutationOptions<TData, TError | ApiDefect, TVariables, TOnMutateResult>,
-  "mutationFn"
-> & {
-  readonly mutationFn: ApiMutationFn<TData, TError, TVariables>;
-  readonly span?: string | undefined;
-};
-
-export function apiMutationOptions<
-  TData,
-  TError = never,
-  TVariables = void,
-  TOnMutateResult = unknown,
->(options: ApiMutationOptions<TData, TError, TVariables, TOnMutateResult>) {
-  const { mutationFn, mutationKey, span, ...tanstackOptions } = options;
-  const resolvedMutationFn = (variables: TVariables, context: MutationFunctionContext) =>
-    runApi(
-      apiEffect((client) => mutationFn({ client, variables, context })),
-      {
-        span: span ?? spanFromKey(mutationKey, "api-mutation"),
-      },
-    );
-
-  if (mutationKey === undefined) {
-    return mutationOptions({
-      ...tanstackOptions,
-      mutationFn: resolvedMutationFn,
-    });
-  }
-
-  return mutationOptions({
-    ...tanstackOptions,
-    mutationKey,
-    mutationFn: resolvedMutationFn,
-  });
-}
+export * as Api from "./api.ts";

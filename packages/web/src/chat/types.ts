@@ -1,3 +1,5 @@
+import type { PublicConversationEvent } from "@denora/server/stream-events";
+
 export type ChatStatus = "idle" | "hydrating" | "connecting" | "submitted" | "streaming" | "error";
 
 export type ChatRole = "user" | "assistant" | "system";
@@ -48,75 +50,6 @@ export interface ChatSnapshot {
   readonly error: Error | undefined;
 }
 
-interface DenoraConversationEventBase {
-  readonly v: 3;
-  readonly instanceId: string;
-  readonly agentName: string;
-  readonly eventIndex: number;
-  readonly timestamp: string;
-  readonly submissionId?: string | undefined;
-  readonly messageId?: string | undefined;
-  readonly turnId?: string | undefined;
-}
-
-export type DenoraConversationEvent =
-  | (DenoraConversationEventBase & {
-      readonly type: "message_start" | "message_end";
-      readonly message: unknown;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "text_delta";
-      readonly text: string;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "thinking_start";
-      readonly contentIndex?: number | undefined;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "thinking_delta";
-      readonly contentIndex?: number | undefined;
-      readonly delta: string;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "thinking_end";
-      readonly contentIndex?: number | undefined;
-      readonly content: string;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "tool_start";
-      readonly toolName: string;
-      readonly toolCallId: string;
-      readonly input?: unknown;
-      readonly args?: unknown;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "tool";
-      readonly toolName: string;
-      readonly toolCallId: string;
-      readonly isError: boolean;
-      readonly result?: unknown;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "turn";
-      readonly request?: unknown;
-      readonly response?: unknown;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "submission_settled";
-      readonly submissionId: string;
-      readonly outcome: "completed" | "failed" | "cancelled";
-      readonly result?: unknown;
-      readonly error?: unknown;
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "idle";
-    })
-  | (DenoraConversationEventBase & {
-      readonly type: "agent_start" | "agent_end" | "turn_start" | "turn_messages";
-      readonly message?: unknown;
-      readonly text?: string | undefined;
-      readonly outcome?: "completed" | "failed" | "cancelled" | undefined;
-      readonly error?: unknown;
-    });
+export type DenoraConversationEvent = typeof PublicConversationEvent.Type;
 
 export * as ChatTypes from "./types.ts";

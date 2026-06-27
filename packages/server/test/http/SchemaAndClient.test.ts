@@ -37,7 +37,7 @@ describe("schema: Health", () => {
   it("decodes { status: 'ok' }", () => {
     const health = Schema.decodeSync(Health)({ status: "ok" });
     assert.strictEqual(health.status, "ok");
-    assert.instanceOf(health, Health);
+    assert.deepStrictEqual(health, { status: "ok" });
   });
 
   it("rejects a non-'ok' status", () => {
@@ -68,7 +68,7 @@ describe("schema: DenoraUser", () => {
 
   it("round-trips a fully-populated user (decode then encode)", () => {
     const user = Schema.decodeSync(DenoraUser)(fullEncoded);
-    assert.instanceOf(user, DenoraUser);
+    assert.deepStrictEqual(user, fullEncoded);
     assert.strictEqual(user.email, "ada@example.com");
     assert.strictEqual(user.emailVerified, true);
     assert.deepStrictEqual(Schema.encodeSync(DenoraUser)(user), fullEncoded);
@@ -398,7 +398,7 @@ describe("client: makeDenoraClient (real round-trip)", () => {
       const baseUrl = `http://127.0.0.1:${port}`;
       const client = yield* Client.makeDenoraClient(baseUrl);
       const health = yield* client.health();
-      assert.deepStrictEqual(health, new Health({ status: "ok" }));
+      assert.deepStrictEqual(health, { status: "ok" });
       assert.strictEqual(health.status, "ok");
     }).pipe(Effect.provide(serverLayer)),
   );
@@ -462,7 +462,7 @@ describe("client: makeDenoraClient (real round-trip)", () => {
         httpClientLayer: FetchHttpClient.layer,
       });
       const health = yield* client.health();
-      assert.deepStrictEqual(health, new Health({ status: "ok" }));
+      assert.deepStrictEqual(health, { status: "ok" });
     }).pipe(Effect.provide(serverLayer)),
   );
 });

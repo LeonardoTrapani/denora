@@ -7,12 +7,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
 import { Conversations } from "../../conversation/Conversations.ts";
 import { DenoraApi } from "../Api.ts";
-import {
-  AbortConversationResponse,
-  Conversation,
-  ConversationMessage,
-  SubmitConversationMessageResponse,
-} from "./Api.ts";
+import { Conversation, ConversationMessage, SubmitConversationMessageResponse } from "./Api.ts";
 
 export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) =>
   handlers
@@ -90,7 +85,7 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Conversation", (handlers) 
           userId: user.id,
           reason: payload.reason,
         });
-        return new AbortConversationResponse({ abortedSubmissions: result.abortedSubmissions });
+        return { abortedSubmissions: result.abortedSubmissions };
       }),
     )
     .handle("archiveConversation", ({ params }) =>

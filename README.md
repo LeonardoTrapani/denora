@@ -40,9 +40,9 @@ The stack adopts the existing `denora.me` Cloudflare zone and attaches Workers t
 
 `.env*` files contain only secrets and per-stage WorkOS client credentials. Public URLs and CORS origins are derived by Alchemy from the stage domains.
 
-Use one WorkOS client per stage with these Redirect URIs:
+Use one WorkOS client per stage with these Redirect URIs. Local development pins the web worker to `localhost:1337` and the API worker to `localhost:1338`:
 
-- local: `http://localhost:1337/api/auth/callback`
+- local: `http://localhost:1338/api/auth/callback`
 - dev: `https://api.dev.denora.me/api/auth/callback`
 - staging: `https://api.staging.denora.me/api/auth/callback`
 - prod: `https://api.denora.me/api/auth/callback`

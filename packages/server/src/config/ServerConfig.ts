@@ -5,25 +5,25 @@ import * as Layer from "effect/Layer";
 import type * as Redacted from "effect/Redacted";
 
 export const DefaultWebOrigins = [
-  "http://localhost:3000",
-  "http://localhost:5173",
   "http://localhost:1337",
   "http://localhost:1338",
   "http://localhost:1339",
   "http://localhost:1340",
   "http://localhost:1341",
+  "http://localhost:3000",
+  "http://localhost:5173",
   "http://localhost:8081",
-  "http://127.0.0.1:3000",
-  "http://127.0.0.1:5173",
   "http://127.0.0.1:1337",
   "http://127.0.0.1:1338",
   "http://127.0.0.1:1339",
   "http://127.0.0.1:1340",
   "http://127.0.0.1:1341",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:5173",
   "http://127.0.0.1:8081",
 ] as const;
 
-export const DefaultApiOrigin = "http://localhost:1337";
+export const DefaultApiOrigin = "http://localhost:1338";
 
 export interface Auth {
   readonly apiKey: Redacted.Redacted<string>;

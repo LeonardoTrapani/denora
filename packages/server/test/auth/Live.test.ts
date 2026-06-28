@@ -28,7 +28,7 @@ describe("AuthLive", () => {
   it.effect("starts WorkOS AuthKit login with PKCE and a callback-scoped transaction cookie", () =>
     Effect.gen(function* () {
       const response = yield* runAuth(
-        new Request("http://localhost:3000/api/auth/login?redirect=/app&screen_hint=sign-up"),
+        new Request("http://localhost:1338/api/auth/login?redirect=/app&screen_hint=sign-up"),
       );
 
       assert.strictEqual(response.status, 302);
@@ -46,7 +46,7 @@ describe("AuthLive", () => {
       assert.strictEqual(url.searchParams.get("screen_hint"), "sign-up");
       assert.strictEqual(
         url.searchParams.get("redirect_uri"),
-        "http://localhost:3000/api/auth/callback",
+        "http://localhost:1338/api/auth/callback",
       );
 
       const setCookie = response.headers.get("set-cookie");
@@ -57,6 +57,25 @@ describe("AuthLive", () => {
       assert.match(setCookie, /SameSite=Lax/);
       assert.match(setCookie, /Max-Age=600/);
       assert.ok(!/Secure/.test(setCookie));
+    }),
+  );
+
+  it.effect("keeps the local auth callback on the configured API origin", () =>
+    Effect.gen(function* () {
+      const response = yield* runAuth(
+        new Request(
+          "http://127.0.0.1:40773/api/auth/login?redirect=http%3A%2F%2Flocalhost%3A1337%2Fapp",
+        ),
+      );
+
+      assert.strictEqual(response.status, 302);
+
+      const location = response.headers.get("location");
+      assert.ok(location);
+      assert.strictEqual(
+        new URL(location).searchParams.get("redirect_uri"),
+        "http://localhost:1338/api/auth/callback",
+      );
     }),
   );
 
@@ -86,7 +105,7 @@ describe("AuthLive", () => {
   it.effect("clears an invalid session cookie when session lookup is unauthenticated", () =>
     Effect.gen(function* () {
       const response = yield* runAuth(
-        new Request("http://localhost:3000/api/auth/session", {
+        new Request("http://localhost:1338/api/auth/session", {
           headers: { cookie: "denora_session=bogus" },
         }),
       );
@@ -110,13 +129,13 @@ describe("AuthLive", () => {
   it.effect("logs out locally when the sealed session cannot yield a WorkOS session id", () =>
     Effect.gen(function* () {
       const response = yield* runAuth(
-        new Request("http://localhost:3000/api/auth/logout?return_to=/login", {
+        new Request("http://localhost:1338/api/auth/logout?return_to=/login", {
           headers: { cookie: "denora_session=bogus" },
         }),
       );
 
       assert.strictEqual(response.status, 302);
-      assert.strictEqual(response.headers.get("location"), "http://localhost:3000/login");
+      assert.strictEqual(response.headers.get("location"), "http://localhost:1337/login");
 
       const setCookie = response.headers.get("set-cookie");
       assert.ok(setCookie);

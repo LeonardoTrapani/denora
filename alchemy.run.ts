@@ -258,6 +258,10 @@ export default Alchemy.Stack(
     const webProps = Option.match(deployment, {
       onNone: () => ({
         rootDir: "./packages/web",
+        dev: {
+          port: 1337,
+          strictPort: true,
+        },
         env: {
           VITE_API_URL: serverUrl,
         },

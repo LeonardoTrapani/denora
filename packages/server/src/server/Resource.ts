@@ -79,6 +79,10 @@ const props = Effect.gen(function* () {
     compatibility: {
       flags: ["nodejs_compat" as const],
     },
+    dev: {
+      port: 1338,
+      strictPort: true,
+    },
     env,
     logpush: observability !== undefined,
     observability: {

@@ -110,20 +110,13 @@ function AppLayout() {
   return (
     <SidebarProvider>
       <Sidebar collapsible="icon">
-        <SidebarHeader>
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton size="lg" render={<Link to="/app" />}>
-                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary font-semibold text-primary-foreground">
-                  D
-                </div>
-                <div className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-medium">Denora</span>
-                  <span className="truncate text-xs text-muted-foreground">Personal agent</span>
-                </div>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
+        <SidebarHeader className="px-4 pt-4 pb-3 group-data-[collapsible=icon]:px-2">
+          <Link
+            to="/app"
+            className="font-heading text-xl font-semibold tracking-tight text-sidebar-foreground group-data-[collapsible=icon]:hidden"
+          >
+            Denora
+          </Link>
         </SidebarHeader>
 
         <SidebarContent>

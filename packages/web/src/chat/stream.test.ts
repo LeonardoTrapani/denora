@@ -203,6 +203,7 @@ describe("createConversationEventStream", () => {
     const events = createConversationEventStream({
       conversationId: "conversation-1",
       baseUrl: "https://denora.test",
+      live: "long-poll",
       fetch: async (input) => {
         const url = new URL(typeof input === "string" ? input : new Request(input).url);
         if (url.searchParams.get("offset") === "-1") {

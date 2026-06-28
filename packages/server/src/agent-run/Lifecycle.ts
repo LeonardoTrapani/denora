@@ -407,7 +407,11 @@ export const executeConversationSubmissionAttempt = Effect.fn(
     for (const subscriber of subscribers) yield* subscriber(decorated);
   });
 
-  const fanout = subscribeRunFanout(store, streamPath, subscribers);
+  // Match Flue attached-agent streams: publish live deltas immediately.
+  // Only standalone run streams throttle per-token persistence.
+  const fanout = subscribeRunFanout(store, streamPath, subscribers, {
+    bufferStreamingEvents: false,
+  });
 
   return yield* AgentRunSession.execute({
     runId: input.runId,
@@ -533,11 +537,17 @@ const eventIndexFrom = ConversationDomain.eventIndexFrom;
 
 const timestampFrom = ConversationDomain.timestampFrom;
 
+interface SubscribeRunFanoutOptions {
+  readonly bufferStreamingEvents?: boolean | undefined;
+}
+
 const subscribeRunFanout = (
   store: EventStreamStore,
   streamPath: string,
   subscribers: Set<(event: RunEvent) => Effect.Effect<void, EventStreamError>>,
+  options: SubscribeRunFanoutOptions = {},
 ): { readonly flush: () => Effect.Effect<void, EventStreamError> } => {
+  const bufferStreamingEvents = options.bufferStreamingEvents ?? true;
   let bufferedEvents: RunEvent[] = [];
   let bufferTimer: ReturnType<typeof setTimeout> | undefined;
   let timerFlush: Promise<void> | undefined;
@@ -580,7 +590,7 @@ const subscribeRunFanout = (
   const appendEvent = Effect.fn("AgentRunLifecycle.fanoutAppendEvent")(function* (
     event: RunEvent,
   ): Effect.fn.Return<void, EventStreamError> {
-    if (isBufferedRunEvent(event)) {
+    if (bufferStreamingEvents && isBufferedRunEvent(event)) {
       bufferedEvents.push(event);
       scheduleBufferFlush();
       return;

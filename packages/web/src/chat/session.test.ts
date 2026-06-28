@@ -1,4 +1,4 @@
-import { FetchError, type LiveMode } from "@durable-streams/client";
+import { FetchError } from "@durable-streams/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { type ConversationEventStream } from "./stream.ts";
@@ -200,7 +200,7 @@ describe("Session", () => {
     await settle();
     expect(stream.mock.calls[1]?.[0]).toEqual({
       conversationId: "conversation-1",
-      live: true,
+      live: "sse",
       offset: "offset-history",
     });
     session.dispose();
@@ -278,12 +278,12 @@ describe("Session", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(stream).toHaveBeenCalledTimes(2);
-    expect(stream.mock.calls[1]?.[0]).toMatchObject({ live: true, offset: "offset-admitted" });
+    expect(stream.mock.calls[1]?.[0]).toMatchObject({ live: "sse", offset: "offset-admitted" });
     expect(session.getSnapshot().status).toBe("connecting");
     session.dispose();
   });
 
-  it("uses the configured SSE transport for initial and resumed streams", async () => {
+  it("uses SSE transport by default for initial and resumed streams", async () => {
     vi.useFakeTimers();
     const history = streamFrom(
       [
@@ -310,7 +310,6 @@ describe("Session", () => {
     const session = new Session({
       conversationId: "conversation-1",
       history: 100,
-      live: "sse" as LiveMode,
       client: client({ stream }),
     });
 

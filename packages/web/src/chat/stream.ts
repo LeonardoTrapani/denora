@@ -87,7 +87,7 @@ export function createConversationEventStream(
     const streamOptions = {
       url: url.toString(),
       offset: connectOffset,
-      live: options.live ?? true,
+      live: options.live ?? "sse",
       json: true,
       signal: abortController.signal,
       fetch,

@@ -80,7 +80,7 @@ export class Session {
   constructor(options: ChatSessionOptions = {}) {
     this.conversationId = options.conversationId;
     this.history = options.history ?? 100;
-    this.live = options.live ?? true;
+    this.live = options.live ?? "sse";
     this.client = options.client ?? defaultConversationClient;
     this.onConversationCreated = options.onConversationCreated;
 

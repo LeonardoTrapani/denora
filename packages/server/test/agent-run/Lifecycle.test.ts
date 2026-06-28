@@ -2,6 +2,7 @@ import { createAssistantMessageEventStream, type AssistantMessage } from "@earen
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import {
   agentStreamPath,
   makeInMemoryEventStreamStore,
@@ -79,6 +80,68 @@ describe("AgentRunLifecycle", () => {
         assert.notProperty(event, "runId");
         assert.notProperty(event, "messageId");
       }
+    }),
+  );
+
+  it.effect("appends attached agent streaming deltas without run-stream buffering", () =>
+    Effect.gen(function* () {
+      const store = makeInMemoryEventStreamStore();
+      const instanceId = `conversation_${crypto.randomUUID()}`;
+      const submissionId = `submission_${crypto.randomUUID()}`;
+      const runId = `run_${crypto.randomUUID()}`;
+      const streamPath = agentStreamPath("denora", instanceId);
+      let stream: ReturnType<typeof createAssistantMessageEventStream> | undefined;
+      const message: AssistantMessage = {
+        role: "assistant",
+        content: [{ type: "text", text: "hello" }],
+        api: "openai-completions",
+        provider: "cloudflare-workers-ai",
+        model: "@cf/meta/llama-3.1-8b-instruct-fast",
+        usage: emptyUsage,
+        stopReason: "stop",
+        timestamp: Date.now(),
+      };
+      const pi: PiRuntimeInterface = {
+        streamFn: (() => {
+          stream = createAssistantMessageEventStream();
+          return stream;
+        }) satisfies StreamFn,
+      };
+
+      yield* AgentRunLifecycle.createConversationSubmission(store, {
+        agentName: "denora",
+        conversationId: instanceId,
+        submissionId,
+        runId,
+        triggerMessageId: `message_${crypto.randomUUID()}`,
+      });
+
+      const fiber = yield* Effect.forkChild(
+        AgentRunLifecycle.executeConversationSubmissionAttempt(store, {
+          agentName: "denora",
+          conversationId: instanceId,
+          submissionId,
+          runId,
+          triggerMessageId: `message_${crypto.randomUUID()}`,
+          input: { prompt: "hello" },
+          pi,
+        }),
+      );
+
+      const activeStream = yield* waitForStream(() => stream);
+      activeStream.push({ type: "start", partial: { ...message, content: [] } });
+      activeStream.push({ type: "text_start", contentIndex: 0, partial: message });
+      activeStream.push({ type: "text_delta", contentIndex: 0, delta: "hello", partial: message });
+
+      const textDelta = yield* waitForStreamEvent(store, streamPath, "text_delta");
+      assert.strictEqual(textDelta.text, "hello");
+      assert.strictEqual(textDelta.instanceId, instanceId);
+      assert.notProperty(textDelta, "runId");
+
+      activeStream.push({ type: "text_end", contentIndex: 0, content: "hello", partial: message });
+      activeStream.push({ type: "done", reason: "stop", message });
+      activeStream.end();
+      yield* Fiber.join(fiber);
     }),
   );
 
@@ -251,6 +314,23 @@ const waitForStream = <A>(get: () => A | undefined) =>
       yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
     }
     throw new Error("Timed out waiting for stream.");
+  });
+
+const waitForStreamEvent = (
+  store: ReturnType<typeof makeInMemoryEventStreamStore>,
+  path: string,
+  type: string,
+) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const replay = yield* store.readEvents(path, { offset: "-1" });
+      const event = replay.events
+        .map((entry) => entry.data as Record<string, unknown>)
+        .find((candidate) => candidate.type === type);
+      if (event !== undefined) return event;
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
+    throw new Error(`Timed out waiting for ${type} in ${path}.`);
   });
 
 const emptyUsage = {

@@ -4,7 +4,12 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { PiAgentProvider } from "../../agent-loop/PiAgentProvider.ts";
 import { ConversationDomain } from "../../conversation/ConversationDomain.ts";
 import { DenoraApi } from "../Api.ts";
-import type { AiModelCatalogItem, AiModelsResponse, AiThinkingLevelItem } from "./Api.ts";
+import type {
+  AiModelCatalogItem,
+  AiModelProviderGroup,
+  AiModelsResponse,
+  AiThinkingLevelItem,
+} from "./Api.ts";
 
 export const layer = HttpApiBuilder.group(DenoraApi, "Ai", (handlers) =>
   handlers.handle("listAiModels", () => Effect.succeed(catalogResponse())),
@@ -12,20 +17,17 @@ export const layer = HttpApiBuilder.group(DenoraApi, "Ai", (handlers) =>
 
 const defaultThinkingLevel = "medium" as const;
 
-const catalogResponse = (): AiModelsResponse => ({
-  defaultModelId: PiAgentProvider.defaultModelSpecifier,
-  defaultThinkingLevel,
-  thinkingLevels: ConversationDomain.thinkingLevels.map(thinkingLevelItem),
-  providers: [
-    {
-      id: PiAgentProvider.defaultProviderId,
-      name: "OpenRouter",
-      models: PiAgentProvider.models.flatMap((model) =>
-        isCatalogApi(model.api) ? [catalogItem(model)] : [],
-      ),
-    },
-  ],
-});
+const catalogResponse = (): AiModelsResponse => {
+  const models = PiAgentProvider.models.flatMap((model) =>
+    isCatalogApi(model.api) ? [catalogItem(model)] : [],
+  );
+  return {
+    defaultModelId: PiAgentProvider.defaultModelSpecifier,
+    defaultThinkingLevel,
+    thinkingLevels: ConversationDomain.thinkingLevels.map(thinkingLevelItem),
+    providers: providerGroups(models),
+  };
+};
 
 const thinkingLevelItem = (id: ConversationDomain.ThinkingLevel): AiThinkingLevelItem => ({
   id,
@@ -72,11 +74,12 @@ const thinkingLevelDescription = (id: ConversationDomain.ThinkingLevel): string 
 
 const catalogItem = (model: Model<Api>): AiModelCatalogItem => {
   const api = catalogApi(model.api);
+  const displayProvider = displayProviderForModel(model);
   return {
     id: `${model.provider}/${model.id}`,
-    name: model.name,
-    displayProvider: { id: PiAgentProvider.defaultProviderId, name: "OpenRouter" },
-    family: "default",
+    name: modelNameForDisplay(model.name, displayProvider.name),
+    displayProvider,
+    family: displayProvider.id,
     default:
       model.provider === PiAgentProvider.defaultProviderId &&
       model.id === PiAgentProvider.defaultModelId,
@@ -94,6 +97,80 @@ const catalogItem = (model: Model<Api>): AiModelCatalogItem => {
     cost: model.cost,
     lifecycle: "stable",
   };
+};
+
+const providerGroups = (
+  models: ReadonlyArray<AiModelCatalogItem>,
+): ReadonlyArray<AiModelProviderGroup> => {
+  const groups = new Map<string, { id: string; name: string; models: Array<AiModelCatalogItem> }>();
+  for (const model of models) {
+    const group = groups.get(model.displayProvider.id);
+    if (group === undefined) {
+      groups.set(model.displayProvider.id, {
+        id: model.displayProvider.id,
+        name: model.displayProvider.name,
+        models: [model],
+      });
+    } else {
+      group.models.push(model);
+    }
+  }
+  return [...groups.values()];
+};
+
+const displayProviderForModel = (model: Model<Api>): AiModelCatalogItem["displayProvider"] => {
+  const nameProvider = providerNameFromModelName(model.name);
+  const idProvider = providerNameFromModelId(model.id);
+  const name = nameProvider ?? idProvider ?? providerNameFromModelId(model.provider) ?? "Unknown";
+  return { id: providerId(name), name };
+};
+
+const providerNameFromModelName = (name: string): string | undefined => {
+  const [provider] = name.split(":", 1);
+  const trimmed = provider?.trim();
+  return trimmed && trimmed !== name ? trimmed : undefined;
+};
+
+const providerNameFromModelId = (id: string): string | undefined => {
+  const [provider] = id.split("/", 1);
+  if (provider === undefined || provider.length === 0) return undefined;
+  return providerDisplayNames[provider] ?? titleCaseProvider(provider);
+};
+
+const modelNameForDisplay = (name: string, providerName: string): string => {
+  const prefix = `${providerName}:`;
+  return name.startsWith(prefix) ? name.slice(prefix.length).trim() : name;
+};
+
+const providerId = (name: string): string =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const titleCaseProvider = (id: string): string =>
+  id
+    .split(/[-_]/g)
+    .filter((part) => part.length > 0)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ");
+
+const providerDisplayNames: Readonly<Record<string, string>> = {
+  ai21: "AI21",
+  alibaba: "Alibaba",
+  anthropic: "Anthropic",
+  cohere: "Cohere",
+  deepseek: "DeepSeek",
+  google: "Google",
+  meta: "Meta",
+  microsoft: "Microsoft",
+  mistralai: "Mistral",
+  moonshotai: "Moonshot AI",
+  openai: "OpenAI",
+  openrouter: "OpenRouter",
+  perplexity: "Perplexity",
+  qwen: "Qwen",
+  xai: "xAI",
 };
 
 const thinkingLevelsForModel = (

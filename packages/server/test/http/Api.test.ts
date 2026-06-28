@@ -154,11 +154,14 @@ describe("Api http surface", () => {
           }>;
         };
         assert.strictEqual(body.defaultModelId, "openrouter/openai/gpt-5.5");
-        assert.deepStrictEqual(
+        assert.includeMembers(
           body.providers.map((provider) => provider.id),
-          ["openrouter"],
+          ["openai", "anthropic", "google"],
         );
         assert.isTrue(body.providers.every((provider) => provider.models.length > 0));
+        const openAi = body.providers.find((provider) => provider.id === "openai");
+        assert.isDefined(openAi);
+        assert.isTrue(openAi.models.some((model) => model.name === "GPT-5.5"));
       }).pipe(Effect.provide(appLayer())),
     );
   });

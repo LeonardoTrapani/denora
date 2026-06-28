@@ -9,6 +9,16 @@ import {
   AttachmentTitle,
 } from "@denora/ui/components/attachment";
 import { Bubble, BubbleContent } from "@denora/ui/components/bubble";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxGroup,
+  ComboboxItem,
+  ComboboxList,
+  ComboboxTrigger,
+  useComboboxAnchor,
+} from "@denora/ui/components/combobox";
 import { Marker, MarkerContent } from "@denora/ui/components/marker";
 import {
   InputGroup,
@@ -44,18 +54,21 @@ import {
   ToolSection,
   type ToolStatus,
 } from "@denora/ui/components/tool";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@denora/ui/components/tooltip";
 import {
   IconAlertTriangle,
   IconArrowUp,
   IconBrain,
   IconMicrophone,
   IconPhoto,
+  IconSearch,
   IconX,
 } from "@tabler/icons-react";
 import { useAtomSet } from "@effect/atom-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type {
   AiModelCatalogItem,
+  AiModelProviderGroup,
   AiModelsResponse,
   AiThinkingLevelItem,
 } from "@denora/server/http/Api";
@@ -105,6 +118,11 @@ export function View({ chat, title, displayName }: Props) {
     : (thinkingLevels.find((level) => level.default)?.id ?? thinkingLevels[0]?.id ?? "off");
   const effectiveThinkingLevel = canThink ? selectedThinkingLevel : "off";
   const canSend = (composerText.trim().length > 0 || images.length > 0) && !sendPending;
+  const displayFirstName = firstName(displayName);
+  const heroTitle =
+    displayFirstName === undefined
+      ? "What should we work on?"
+      : `${greeting()}, ${displayFirstName}`;
 
   useEffect(() => setModelId(defaultModelId), [defaultModelId]);
   useEffect(() => setThinkingLevel(defaultThinkingLevel), [defaultThinkingLevel]);
@@ -142,7 +160,7 @@ export function View({ chat, title, displayName }: Props) {
       images={images}
       model={model}
       modelId={modelId}
-      models={catalogModels(catalog)}
+      providers={catalogProviders(catalog)}
       sendPending={sendPending}
       thinkingLevel={effectiveThinkingLevel}
       thinkingLevels={thinkingLevels}
@@ -167,12 +185,10 @@ export function View({ chat, title, displayName }: Props) {
         {isEmptyChat ? (
           <div className="flex min-h-0 flex-1 items-center justify-center px-4 pb-24">
             <div className="w-full max-w-2xl space-y-8">
-              <div className="space-y-3 text-center">
-                <p className="text-sm font-medium text-muted-foreground">Denora</p>
+              <div className="text-center">
                 <h2 className="text-4xl font-medium tracking-tight text-balance sm:text-5xl">
-                  {greeting()}, {firstName(displayName) ?? "there"}
+                  {heroTitle}
                 </h2>
-                <p className="text-sm text-muted-foreground">What should we work on?</p>
               </div>
               <ErrorBanner error={error} />
               {composer}
@@ -229,7 +245,7 @@ function Composer({
   images,
   model,
   modelId,
-  models,
+  providers,
   sendPending,
   thinkingLevel,
   thinkingLevels,
@@ -245,7 +261,7 @@ function Composer({
   readonly images: ReadonlyArray<SelectedImage>;
   readonly model: AiModelCatalogItem | undefined;
   readonly modelId: string;
-  readonly models: ReadonlyArray<AiModelCatalogItem>;
+  readonly providers: ReadonlyArray<AiModelProviderGroup>;
   readonly sendPending: boolean;
   readonly thinkingLevel: string;
   readonly thinkingLevels: ReadonlyArray<AiThinkingLevelItem>;
@@ -297,7 +313,7 @@ function Composer({
         <InputGroupTextarea
           className="min-h-14 px-2 text-base"
           disabled={sendPending}
-          placeholder="Message Denora…"
+          placeholder="Message…"
           rows={variant === "hero" ? 2 : 1}
           value={composerText}
           onChange={(event) => onTextChange(event.currentTarget.value)}
@@ -330,7 +346,7 @@ function Composer({
           </InputGroupButton>
 
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            <ModelSelect models={models} value={modelId} onValueChange={onModelIdChange} />
+            <ModelSelect providers={providers} value={modelId} onValueChange={onModelIdChange} />
             <ThinkingSelect
               disabled={!canThink}
               levels={thinkingLevels}
@@ -356,37 +372,176 @@ function Composer({
 }
 
 function ModelSelect({
-  models,
+  providers,
   value,
   onValueChange,
 }: {
-  readonly models: ReadonlyArray<AiModelCatalogItem>;
+  readonly providers: ReadonlyArray<AiModelProviderGroup>;
   readonly value: string;
   readonly onValueChange: (value: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeProviderId, setActiveProviderId] = useState<string | undefined>();
+  const anchorRef = useComboboxAnchor();
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const models = useMemo(() => providers.flatMap((provider) => provider.models), [providers]);
+  const selectedModel = useMemo(() => models.find((model) => model.id === value), [models, value]);
+  const selectedProviderId = selectedModel?.displayProvider.id ?? providers[0]?.id;
+  const activeProvider =
+    providers.find((provider) => provider.id === (activeProviderId ?? selectedProviderId)) ??
+    providers[0];
+  const hasQuery = query.trim().length > 0;
+  const visibleModels = useMemo(
+    () =>
+      hasQuery
+        ? searchModels(models, query, value)
+        : sortModelsForPicker(activeProvider?.models ?? [], value),
+    [activeProvider, hasQuery, models, query, value],
+  );
+
+  useEffect(() => {
+    setActiveProviderId((current) =>
+      current !== undefined && providers.some((provider) => provider.id === current)
+        ? current
+        : selectedProviderId,
+    );
+  }, [providers, selectedProviderId]);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => searchInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+
   return (
-    <Select value={value} onValueChange={(next) => next !== null && onValueChange(next)}>
-      <SelectTrigger className="max-w-48 border-0 bg-muted/60" size="sm">
-        <SelectValue>{modelName(models, value)}</SelectValue>
-      </SelectTrigger>
-      <SelectContent align="start" alignItemWithTrigger={false} className="min-w-72">
-        <SelectGroup>
-          <SelectLabel>Model</SelectLabel>
-          {models.map((model) => (
-            <SelectItem key={model.id} value={model.id}>
-              <span className="flex flex-col items-start gap-0.5">
-                <span>{model.name}</span>
-                <span className="text-xs font-normal text-muted-foreground">
-                  {model.displayProvider.name}
-                  {model.capabilities.reasoning ? " · Thinking" : ""}
-                  {model.inputModalities.includes("image") ? " · Images" : ""}
-                </span>
-              </span>
-            </SelectItem>
-          ))}
-        </SelectGroup>
-      </SelectContent>
-    </Select>
+    <Combobox<AiModelCatalogItem>
+      value={selectedModel ?? null}
+      items={visibleModels}
+      inputValue={query}
+      open={open}
+      autoHighlight
+      filter={null}
+      isItemEqualToValue={(item, selected) => item.id === selected.id}
+      itemToStringLabel={(model) => model.name}
+      itemToStringValue={(model) => model.id}
+      onInputValueChange={(next) => setQuery(next)}
+      onOpenChange={(nextOpen) => {
+        setOpen((wasOpen) => {
+          if (nextOpen && !wasOpen) {
+            setQuery("");
+            setActiveProviderId(selectedProviderId);
+          }
+          return nextOpen;
+        });
+      }}
+      onValueChange={(next) => {
+        if (next === null) return;
+        setQuery("");
+        setActiveProviderId(next.displayProvider.id);
+        onValueChange(next.id);
+      }}
+    >
+      <div ref={anchorRef} className="inline-flex min-w-0">
+        <ComboboxTrigger
+          aria-label="Select model"
+          className="flex h-8 max-w-60 min-w-0 items-center gap-1.5 rounded-full bg-muted/60 px-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground data-pressed:bg-muted"
+          type="button"
+        >
+          <span className="truncate text-foreground/85">{selectedModel?.name ?? value}</span>
+        </ComboboxTrigger>
+      </div>
+      <ComboboxContent
+        anchor={anchorRef}
+        align="start"
+        collisionAvoidance={{ side: "flip", align: "shift", fallbackAxisSide: "none" }}
+        initialFocus={searchInputRef}
+        positionMethod="fixed"
+        className="w-[min(34rem,calc(100vw-2rem))] min-w-[min(34rem,calc(100vw-2rem))] overflow-hidden p-0"
+      >
+        <div className="border-b border-border/40 bg-muted/20 px-4 py-3">
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <IconSearch className="size-4 shrink-0" />
+            <input
+              aria-label="Search models"
+              className="h-8 flex-1 border-0 bg-transparent p-0 text-sm outline-none placeholder:text-muted-foreground"
+              placeholder="Search models…"
+              ref={searchInputRef}
+              value={query}
+              onChange={(event) => setQuery(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") event.stopPropagation();
+              }}
+              onMouseDown={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+            />
+          </div>
+        </div>
+        <div className="grid h-[min(25rem,calc(var(--available-height)-1rem))] grid-cols-[4.25rem_minmax(0,1fr)]">
+          <div className="no-scrollbar flex flex-col gap-1 overflow-y-auto border-r border-border/40 bg-muted/20 p-2">
+            {providers.map((provider) => (
+              <Tooltip key={provider.id}>
+                <TooltipTrigger
+                  render={
+                    <button
+                      aria-label={provider.name}
+                      className={providerRailClass(provider.id === activeProvider?.id && !hasQuery)}
+                      type="button"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        setQuery("");
+                        setActiveProviderId(provider.id);
+                      }}
+                    />
+                  }
+                >
+                  {providerInitials(provider.name)}
+                </TooltipTrigger>
+                <TooltipContent side="right">{provider.name}</TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
+          <div className="min-w-0 overflow-hidden bg-popover/80">
+            <ComboboxEmpty>No models found.</ComboboxEmpty>
+            <ComboboxList className="max-h-full p-2">
+              <ComboboxGroup>
+                {visibleModels.map((model) => (
+                  <ModelComboboxItem key={model.id} model={model} />
+                ))}
+              </ComboboxGroup>
+            </ComboboxList>
+          </div>
+        </div>
+      </ComboboxContent>
+    </Combobox>
+  );
+}
+
+function ModelComboboxItem({ model }: { readonly model: AiModelCatalogItem }) {
+  return (
+    <ComboboxItem value={model} className="items-start rounded-2xl px-3 py-3">
+      <span className="grid size-8 shrink-0 place-items-center rounded-xl bg-muted text-xs font-semibold text-muted-foreground">
+        {providerInitials(model.displayProvider.name)}
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-semibold text-foreground">{model.name}</span>
+          {model.default ? <ModelPill>Default</ModelPill> : null}
+          {model.lifecycle === "preview" ? <ModelPill>Preview</ModelPill> : null}
+        </span>
+        <span className="truncate text-xs font-normal text-muted-foreground">
+          {modelSummary(model)}
+        </span>
+      </span>
+    </ComboboxItem>
+  );
+}
+
+function ModelPill({ children }: { readonly children: string }) {
+  return (
+    <span className="rounded-full bg-foreground/10 px-1.5 py-0.5 text-[0.65rem] font-medium text-muted-foreground">
+      {children}
+    </span>
   );
 }
 
@@ -493,8 +648,14 @@ function readDataUrl(file: File): Promise<string> {
   });
 }
 
+function catalogProviders(
+  catalog: AiModelsResponse | undefined,
+): ReadonlyArray<AiModelProviderGroup> {
+  return catalog?.providers ?? fallbackCatalog.providers;
+}
+
 function catalogModels(catalog: AiModelsResponse | undefined): ReadonlyArray<AiModelCatalogItem> {
-  return catalog?.providers.flatMap((provider) => provider.models) ?? fallbackCatalogModels;
+  return catalogProviders(catalog).flatMap((provider) => provider.models);
 }
 
 function findModel(
@@ -504,8 +665,110 @@ function findModel(
   return catalogModels(catalog).find((candidate) => candidate.id === modelId);
 }
 
-function modelName(models: ReadonlyArray<AiModelCatalogItem>, modelId: string): string {
-  return models.find((model) => model.id === modelId)?.name ?? modelId;
+function searchModels(
+  models: ReadonlyArray<AiModelCatalogItem>,
+  query: string,
+  selectedModelId: string,
+): ReadonlyArray<AiModelCatalogItem> {
+  const normalizedQuery = normalizeSearch(query);
+  if (normalizedQuery.length === 0) return [];
+  return models
+    .filter((model) => modelMatchesNormalizedQuery(model, normalizedQuery))
+    .sort(
+      (left, right) =>
+        modelPickerRank(left, selectedModelId) - modelPickerRank(right, selectedModelId),
+    )
+    .slice(0, 50);
+}
+
+function sortModelsForPicker(
+  models: ReadonlyArray<AiModelCatalogItem>,
+  selectedModelId: string,
+): ReadonlyArray<AiModelCatalogItem> {
+  return [...models].sort(
+    (left, right) =>
+      modelPickerRank(left, selectedModelId) - modelPickerRank(right, selectedModelId),
+  );
+}
+
+function modelPickerRank(model: AiModelCatalogItem, selectedModelId: string): number {
+  if (model.id === selectedModelId) return -3;
+  if (model.default) return -2;
+  if (model.lifecycle === "stable") return 0;
+  if (model.lifecycle === "preview") return 1;
+  return 2;
+}
+
+function modelMatchesNormalizedQuery(model: AiModelCatalogItem, normalizedQuery: string): boolean {
+  const terms = normalizedQuery.split(" ").filter((term) => term.length > 0);
+  if (terms.length === 0) return true;
+
+  const haystack = normalizeSearch(modelComboboxLabel(model));
+  return terms.every((term) => haystack.includes(term));
+}
+
+function providerRailClass(active: boolean): string {
+  const base =
+    "grid size-10 shrink-0 place-items-center rounded-2xl text-xs font-semibold transition-colors";
+  return active
+    ? `${base} bg-primary text-primary-foreground shadow-sm`
+    : `${base} text-muted-foreground hover:bg-foreground/10 hover:text-foreground`;
+}
+
+function providerInitials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter((part) => part.length > 0)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
+function modelSummary(model: AiModelCatalogItem): string {
+  return [
+    model.contextWindow > 0 ? formatContextWindow(model.contextWindow) : undefined,
+    model.capabilities.reasoning ? "Thinking" : undefined,
+    model.inputModalities.includes("image") ? "Images" : undefined,
+    model.capabilities.tools ? "Tools" : undefined,
+  ]
+    .filter((part): part is string => part !== undefined)
+    .join(" · ");
+}
+
+function modelComboboxLabel(model: AiModelCatalogItem): string {
+  return [
+    model.displayProvider.name,
+    model.displayProvider.id,
+    model.name,
+    model.id,
+    model.family,
+    model.api,
+    model.lifecycle,
+    routingProviderName(model),
+    model.capabilities.reasoning ? "thinking reasoning" : "",
+    model.capabilities.tools ? "tools" : "",
+    model.inputModalities.join(" "),
+  ].join(" ");
+}
+
+function routingProviderName(model: AiModelCatalogItem): string {
+  const [provider] = model.id.split("/", 1);
+  if (provider === "openrouter") return "via OpenRouter";
+  if (provider === undefined || provider.length === 0) return "Direct";
+  return `via ${provider.slice(0, 1).toUpperCase()}${provider.slice(1)}`;
+}
+
+function formatContextWindow(tokens: number): string {
+  if (tokens >= 1_000_000) return `${Math.round(tokens / 1_000_000)}M context`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K context`;
+  return `${tokens} context`;
+}
+
+function normalizeSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function thinkingLevelName(levels: ReadonlyArray<AiThinkingLevelItem>, value: string): string {
@@ -531,7 +794,7 @@ function greeting(): string {
 
 function firstName(name: string | null | undefined): string | undefined {
   const trimmed = name?.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed || trimmed.includes("@")) return undefined;
   return trimmed.split(/\s+/)[0];
 }
 

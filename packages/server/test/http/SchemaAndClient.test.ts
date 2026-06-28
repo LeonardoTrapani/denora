@@ -252,7 +252,7 @@ const serverSrcDir = fileURLToPath(new URL("../../src/", import.meta.url));
 const clientSafeInternalFiles = [
   /^Client(?:Api)?\.ts$/,
   /^http\/Api\.ts$/,
-  /^http\/(?:account|agent-run|conversation|system)\/(?:Api|Errors|Schema)\.ts$/,
+  /^http\/(?:account|agent-run|ai|conversation|system)\/(?:Api|Errors|Schema)\.ts$/,
   /^auth\/(?:AuthorizationApi|User)\.ts$/,
   /^conversation\/ConversationDomain\.ts$/,
 ];

@@ -21,6 +21,8 @@
     "destroy:staging": "alchemy destroy --stage staging --env-file .env.staging",
     "destroy:prod": "alchemy destroy --stage prod --env-file .env.production",
     "test": "turbo run test-types && turbo run test",
+    "test:live-ai": "bun --filter @denora/server test:live-ai",
+    "test:live-ai:all": "bun --filter @denora/server test:live-ai:all",
     "lint": "oxlint . --ignore-pattern 'vendor/**' --no-error-on-unmatched-pattern",
     "lint:fix": "oxlint --fix . --ignore-pattern 'vendor/**' --no-error-on-unmatched-pattern",
     "fmt": "oxfmt . '!vendor/**'",

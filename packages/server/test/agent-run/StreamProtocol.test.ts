@@ -113,6 +113,7 @@ describe("StreamProtocol", () => {
         agentName: "default",
         eventIndex: 0,
         timestamp: "2026-01-01T00:00:00.000Z",
+        turnId: `conversation:${conversationId}:user`,
         message: { role: "user", content: [{ type: "text", text: "hello" }] },
       };
       yield* store.createStream(streamPath);
@@ -162,6 +163,7 @@ describe("StreamProtocol", () => {
         agentName: "default",
         eventIndex: 0,
         timestamp: "2026-01-01T00:00:00.000Z",
+        turnId: `conversation:${conversationId}:user`,
         message: { role: "user", content: [{ type: "text", text: "hello" }] },
       };
       const customEvent = {

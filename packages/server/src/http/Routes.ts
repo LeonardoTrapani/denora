@@ -6,6 +6,7 @@ import * as AccountHandlers from "./account/Handlers.ts";
 import { AgentRoutes } from "./agent/Routes.ts";
 import * as AgentRunHandlers from "./agent-run/Handlers.ts";
 import { AgentRunStreamRoutes } from "./agent-run/StreamRoutes.ts";
+import * as AiHandlers from "./ai/Handlers.ts";
 import { AuthRoutes } from "./auth/Routes.ts";
 import * as ConversationHandlers from "./conversation/Handlers.ts";
 import { ConversationStreamRoutes } from "./conversation/StreamRoutes.ts";
@@ -16,6 +17,7 @@ export const handlers = Layer.mergeAll(
   AccountHandlers.layer,
   ConversationHandlers.layer,
   AgentRunHandlers.layer,
+  AiHandlers.layer,
 );
 
 export const apiLayer = HttpApiBuilder.layer(Api.DenoraApi).pipe(Layer.provide(handlers));

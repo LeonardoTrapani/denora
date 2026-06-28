@@ -64,6 +64,57 @@ const finish = (finishReason = "stop") =>
   FakeAiGateway.json({ choices: [{ finish_reason: finishReason }] });
 
 describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
+  it("exposes Cloudflare AI Gateway catalog defaults and route model ids", () => {
+    assert.strictEqual(CloudflareAiGatewayModels.defaultModelId, SONNET_ID);
+    assert.strictEqual(CloudflareAiGatewayModels.defaultModel, anthropicModel);
+    assert.strictEqual(CloudflareAiGatewayModels.modelFor(SONNET_ID)?.id, SONNET_ID);
+    assert.isAtLeast(CloudflareAiGatewayModels.list().length, 60);
+    assert.isAtLeast(CloudflareAiGatewayModels.modelsByDisplayProvider("anthropic").length, 7);
+    assert.isAtLeast(CloudflareAiGatewayModels.modelsByDisplayProvider("openai").length, 15);
+    assert.isAtLeast(CloudflareAiGatewayModels.modelsByDisplayProvider("moonshotai").length, 3);
+    assert.isAtLeast(CloudflareAiGatewayModels.modelsByDisplayProvider("zai").length, 2);
+    assert.isAtLeast(CloudflareAiGatewayModels.modelsByFamily("llama").length, 10);
+
+    const ids = new Set<string>();
+    for (const [id, entry] of Object.entries(CloudflareAiGatewayModels.models)) {
+      assert.strictEqual(entry.model.id, id);
+      assert.isFalse(ids.has(id), `Duplicate model id ${id}`);
+      ids.add(id);
+      assert.isString(entry.catalog.displayProvider.id);
+      assert.isString(entry.catalog.displayProvider.name);
+      assert.strictEqual(entry.catalog.modelTask, "text-generation");
+      assert.deepEqual(entry.catalog.modalities.output, ["text"]);
+    }
+    assert.strictEqual(CloudflareAiGatewayModels.models[SONNET_ID].route.model, SONNET_ID);
+    assert.strictEqual(CloudflareAiGatewayModels.models[GPT_ID].route.model, GPT_ID);
+    assert.strictEqual(
+      CloudflareAiGatewayModels.models[MODEL_ID].route.model,
+      "@cf/moonshotai/kimi-k2.6",
+    );
+  });
+
+  it("exposes frontend-safe catalog providers grouped by display provider", () => {
+    const catalog = CloudflareAiGatewayModels.catalogResponse();
+    assert.strictEqual(catalog.defaultModelId, SONNET_ID);
+    assert.isDefined(CloudflareAiGatewayModels.find(catalog.defaultModelId));
+    assert.isAtLeast(catalog.providers.length, 8);
+    assert.deepEqual(
+      catalog.providers.slice(0, 5).map((provider) => provider.id),
+      ["anthropic", "openai", "moonshotai", "zai", "meta"],
+    );
+
+    const flattened = catalog.providers.flatMap((provider) => provider.models);
+    assert.lengthOf(flattened, CloudflareAiGatewayModels.list().length);
+    assert.isTrue(flattened.some((item) => item.default));
+    assert.isTrue(flattened.every((item) => item.outputModalities.includes("text")));
+    assert.isFalse(
+      flattened.some((item) =>
+        CloudflareAiGatewayModels.nonChatCatalogCategories.includes(item.family as never),
+      ),
+    );
+    assert.isUndefined((flattened[0] as unknown as Record<string, unknown>).route);
+  });
+
   it.effect("routes Kimi through the Cloudflare AI Gateway Workers AI provider", () =>
     Effect.gen(function* () {
       const fake = FakeAiGateway.make(FakeAiGateway.sse(finish(), FakeAiGateway.done()), {
@@ -90,6 +141,17 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
         },
       });
       expect(events.at(-1)).toMatchObject({ type: "done", reason: "stop" });
+    }),
+  );
+
+  it.effect("does not send unsupported Workers AI reasoning_effort", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(FakeAiGateway.sse(finish(), FakeAiGateway.done()));
+
+      yield* streamWithFake(fake, { options: { reasoning: "high" } });
+
+      const request = fake.gatewayCalls[0]?.request as { readonly query: Record<string, unknown> };
+      assert.notProperty(request.query, "reasoning_effort");
     }),
   );
 
@@ -195,6 +257,68 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
           content: [{ type: "text", text: "hello" }],
           usage: { input: 7, output: 2, cacheRead: 3, totalTokens: 12 },
         },
+      });
+    }),
+  );
+
+  it.effect("sends Anthropic extended thinking payload when reasoning is requested", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(
+        FakeAiGateway.sse(
+          anthropicEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+          }),
+          anthropicEvent("message_stop", { type: "message_stop" }),
+        ),
+      );
+
+      yield* streamWithFake(fake, {
+        model: anthropicModel,
+        options: { reasoning: "medium", maxTokens: 8_192, temperature: 0.2 },
+      });
+
+      const request = fake.gatewayCalls[0]?.request as { readonly query: Record<string, unknown> };
+      expect(request).toMatchObject({
+        provider: "anthropic",
+        endpoint: "v1/messages",
+        query: {
+          model: SONNET_ID,
+          max_tokens: 16_384,
+          stream: true,
+          thinking: { type: "enabled", budget_tokens: 8_192, display: "summarized" },
+        },
+      });
+      const query = request.query;
+      assert.notProperty(query, "reasoning");
+      assert.notProperty(query, "reasoning_effort");
+      assert.notProperty(query, "temperature");
+    }),
+  );
+
+  it.effect("sends Anthropic adaptive thinking payload for adaptive Claude models", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(
+        FakeAiGateway.sse(
+          anthropicEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+          }),
+          anthropicEvent("message_stop", { type: "message_stop" }),
+        ),
+      );
+      const adaptiveModel = CloudflareAiGatewayModels.models["claude-sonnet-4-6"].model;
+
+      yield* streamWithFake(fake, {
+        model: adaptiveModel,
+        options: { reasoning: "xhigh", maxTokens: 8_192 },
+      });
+
+      const request = fake.gatewayCalls[0]?.request as { readonly query: Record<string, unknown> };
+      expect(request.query).toMatchObject({
+        model: "claude-sonnet-4-6",
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "max" },
       });
     }),
   );
@@ -544,6 +668,88 @@ describe("PiAgentModel Cloudflare AI Gateway adapter", () => {
               thinking: "inspect inputs",
               thinkingSignature: "reasoning_content",
             },
+          ],
+        },
+      });
+    }),
+  );
+
+  it.effect("parses Anthropic thinking and signature deltas", () =>
+    Effect.gen(function* () {
+      const fake = FakeAiGateway.make(
+        FakeAiGateway.sse(
+          anthropicEvent("message_start", {
+            type: "message_start",
+            message: { id: "msg_thinking", model: SONNET_ID },
+          }),
+          anthropicEvent("content_block_start", {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "" },
+          }),
+          anthropicEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "inspect " },
+          }),
+          anthropicEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "inputs" },
+          }),
+          anthropicEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "sig_" },
+          }),
+          anthropicEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "123" },
+          }),
+          anthropicEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+          anthropicEvent("content_block_start", {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "text", text: "" },
+          }),
+          anthropicEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: 1,
+            delta: { type: "text_delta", text: "done" },
+          }),
+          anthropicEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+          anthropicEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+          }),
+          anthropicEvent("message_stop", { type: "message_stop" }),
+        ),
+      );
+
+      const events = yield* streamWithFake(fake, { model: anthropicModel });
+
+      expect(events).toEqual([
+        expect.objectContaining({ type: "start" }),
+        expect.objectContaining({ type: "thinking_start", contentIndex: 0 }),
+        expect.objectContaining({ type: "thinking_delta", contentIndex: 0, delta: "inspect " }),
+        expect.objectContaining({ type: "thinking_delta", contentIndex: 0, delta: "inputs" }),
+        expect.objectContaining({
+          type: "thinking_end",
+          contentIndex: 0,
+          content: "inspect inputs",
+        }),
+        expect.objectContaining({ type: "text_start", contentIndex: 1 }),
+        expect.objectContaining({ type: "text_delta", contentIndex: 1, delta: "done" }),
+        expect.objectContaining({ type: "text_end", contentIndex: 1, content: "done" }),
+        expect.objectContaining({ type: "done", reason: "stop" }),
+      ]);
+      expect(events.at(-1)).toMatchObject({
+        type: "done",
+        message: {
+          content: [
+            { type: "thinking", thinking: "inspect inputs", thinkingSignature: "sig_123" },
+            { type: "text", text: "done" },
           ],
         },
       });

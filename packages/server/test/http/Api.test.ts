@@ -129,6 +129,41 @@ describe("Api http surface", () => {
     );
   });
 
+  describe("AI models GET /ai/models", () => {
+    it.effect("requires auth", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const res = yield* client.get("/ai/models");
+        assert.strictEqual(res.status, 401);
+      }).pipe(Effect.provide(appLayer())),
+    );
+
+    it.effect("returns frontend-safe models grouped by display provider", () =>
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient;
+        const res = yield* client.get("/ai/models", {
+          headers: { cookie: "denora_session=valid" },
+        });
+        assert.strictEqual(res.status, 200);
+        const body = (yield* res.json) as {
+          readonly defaultModelId: string;
+          readonly providers: ReadonlyArray<{
+            readonly id: string;
+            readonly name: string;
+            readonly models: ReadonlyArray<Record<string, unknown>>;
+          }>;
+        };
+        assert.strictEqual(body.defaultModelId, "claude-sonnet-4-5");
+        assert.deepStrictEqual(
+          body.providers.slice(0, 5).map((provider) => provider.id),
+          ["anthropic", "openai", "moonshotai", "zai", "meta"],
+        );
+        assert.isTrue(body.providers.every((provider) => provider.models.length > 0));
+        assert.notProperty(body.providers[0]?.models[0] ?? {}, "route");
+      }).pipe(Effect.provide(appLayer())),
+    );
+  });
+
   describe("AgentRun", () => {
     it.effect("creates agent runs via the generated typed client and serves the stream route", () =>
       Effect.gen(function* () {

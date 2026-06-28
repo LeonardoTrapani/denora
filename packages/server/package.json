@@ -75,6 +75,8 @@
     "build": "tsc --noEmit",
     "check-types": "tsc --noEmit",
     "test": "vitest run",
+    "test:live-ai": "vitest run test/integration/CloudflareAiGatewayLive.test.ts",
+    "test:live-ai:all": "vitest run test/integration/CloudflareAiGatewayLive.test.ts",
     "test-types": "tsc --noEmit"
   },
   "dependencies": {

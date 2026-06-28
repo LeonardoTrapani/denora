@@ -613,15 +613,29 @@ const callAnthropic = Effect.fn("PiAgentModel.callAnthropic")(function* ({
   readonly context: PiContext;
   readonly options: SimpleStreamOptions | undefined;
 }): Effect.fn.Return<Response, ModelCallFailed> {
-  const model = runtimeModel.model;
+  const model = runtimeModel.model as Model<"anthropic-messages">;
+  const anthropicCompat = model.compat as { readonly supportsTemperature?: boolean } | undefined;
   const payload: Record<string, unknown> = {
     model: runtimeModel.route.model,
     messages: toAnthropicMessages(context),
     max_tokens: options?.maxTokens ?? model.maxTokens,
     stream: true,
   };
+  const thinkingApplied = applyAnthropicThinking(
+    payload,
+    model,
+    options?.reasoning,
+    options?.thinkingBudgets,
+    options?.maxTokens,
+  );
   if (context.systemPrompt) payload.system = context.systemPrompt;
-  if (options?.temperature !== undefined) payload.temperature = options.temperature;
+  if (
+    options?.temperature !== undefined &&
+    !thinkingApplied &&
+    anthropicCompat?.supportsTemperature !== false
+  ) {
+    payload.temperature = options.temperature;
+  }
   if (context.tools && context.tools.length > 0) payload.tools = context.tools.map(toAnthropicTool);
 
   const overridden = yield* Effect.tryPromise({
@@ -1169,6 +1183,14 @@ class WorkersAiStreamParser {
         delta: reasoning.text,
         partial: this.input.output,
       });
+    }
+    const reasoningSignature = stringField(delta, "reasoning_signature");
+    if (reasoningSignature !== undefined && reasoningSignature.length > 0) {
+      const block = this.ensureThinkingBlock("anthropic_signature");
+      block.thinkingSignature = appendThinkingSignature(
+        block.thinkingSignature,
+        reasoningSignature,
+      );
     }
 
     const content = nullableStringField(delta, "content");
@@ -1741,9 +1763,12 @@ const normalizeAnthropicStreamData = (data: string): string => {
       }
       if (blockType === "thinking") {
         const thinking = stringField(block, "thinking");
-        return thinking && thinking.length > 0
-          ? JSON.stringify({ choices: [{ delta: { reasoning_content: thinking } }] })
-          : "";
+        const signature = stringField(block, "signature");
+        const delta = {
+          ...(thinking && thinking.length > 0 ? { reasoning_content: thinking } : {}),
+          ...(signature && signature.length > 0 ? { reasoning_signature: signature } : {}),
+        };
+        return Object.keys(delta).length > 0 ? JSON.stringify({ choices: [{ delta }] }) : "";
       }
       return "";
     }
@@ -1759,6 +1784,11 @@ const normalizeAnthropicStreamData = (data: string): string => {
       if (deltaType === "thinking_delta") {
         return JSON.stringify({
           choices: [{ delta: { reasoning_content: stringField(delta, "thinking") ?? "" } }],
+        });
+      }
+      if (deltaType === "signature_delta") {
+        return JSON.stringify({
+          choices: [{ delta: { reasoning_signature: stringField(delta, "signature") ?? "" } }],
         });
       }
       if (deltaType === "input_json_delta") {
@@ -2072,8 +2102,47 @@ const applyReasoningEffort = (
   model: Model<Api>,
   level: SimpleStreamOptions["reasoning"] | undefined,
 ): void => {
-  if (!model.reasoning || level === undefined) return;
+  if (
+    !model.reasoning ||
+    level === undefined ||
+    (model.compat as OpenAICompletionsCompat | undefined)?.supportsReasoningEffort === false
+  ) {
+    return;
+  }
   payload.reasoning_effort = mapReasoningEffort(level);
+};
+
+const applyAnthropicThinking = (
+  payload: Record<string, unknown>,
+  model: Model<"anthropic-messages">,
+  level: SimpleStreamOptions["reasoning"] | undefined,
+  customBudgets: SimpleStreamOptions["thinkingBudgets"] | undefined,
+  requestedMaxTokens: number | undefined,
+): boolean => {
+  if (!model.reasoning || level === undefined) return false;
+  const mapped = model.thinkingLevelMap?.[level] ?? level;
+  if (mapped === null) return false;
+
+  if (model.compat?.forceAdaptiveThinking === true) {
+    payload.thinking = { type: "adaptive", display: "summarized" };
+    payload.output_config = { effort: mapAnthropicEffort(mapped) };
+    return true;
+  }
+
+  const adjusted = adjustAnthropicMaxTokensForThinking(
+    requestedMaxTokens,
+    model.maxTokens,
+    level,
+    customBudgets,
+  );
+  if (adjusted.thinkingBudget <= 0) return false;
+  payload.max_tokens = adjusted.maxTokens;
+  payload.thinking = {
+    type: "enabled",
+    budget_tokens: adjusted.thinkingBudget,
+    display: "summarized",
+  };
+  return true;
 };
 
 const applyOpenAiResponsesReasoning = (
@@ -2089,7 +2158,7 @@ const applyOpenAiResponsesReasoning = (
 };
 
 const mapReasoningEffort = (
-  level: NonNullable<SimpleStreamOptions["reasoning"]>,
+  level: Exclude<NonNullable<SimpleStreamOptions["reasoning"]>, "off">,
 ): WorkersAIReasoningEffort => {
   switch (level) {
     case "minimal":
@@ -2101,6 +2170,60 @@ const mapReasoningEffort = (
     case "xhigh":
       return "high";
   }
+};
+
+const mapAnthropicEffort = (level: string): "low" | "medium" | "high" | "xhigh" | "max" => {
+  switch (level) {
+    case "minimal":
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "xhigh":
+      return "xhigh";
+    case "max":
+      return "max";
+    case "high":
+    default:
+      return "high";
+  }
+};
+
+const adjustAnthropicMaxTokensForThinking = (
+  requestedMaxTokens: number | undefined,
+  modelMaxTokens: number,
+  level: NonNullable<SimpleStreamOptions["reasoning"]>,
+  customBudgets: SimpleStreamOptions["thinkingBudgets"] | undefined,
+): { readonly maxTokens: number; readonly thinkingBudget: number } => {
+  const budgets = {
+    minimal: 1_024,
+    low: 2_048,
+    medium: 8_192,
+    high: 16_384,
+    ...customBudgets,
+  };
+  const clampedLevel = level === "xhigh" ? "high" : level;
+  let thinkingBudget = budgets[clampedLevel] ?? 1_024;
+  const maxTokens =
+    requestedMaxTokens === undefined
+      ? modelMaxTokens
+      : Math.min(requestedMaxTokens + thinkingBudget, modelMaxTokens);
+  if (maxTokens <= thinkingBudget) thinkingBudget = Math.max(0, maxTokens - 1_024);
+  return { maxTokens, thinkingBudget };
+};
+
+const appendThinkingSignature = (existing: string | undefined, delta: string): string => {
+  if (
+    existing === undefined ||
+    existing.length === 0 ||
+    existing === "reasoning_content" ||
+    existing === "reasoning" ||
+    existing === "reasoning_text" ||
+    existing === "anthropic_signature"
+  ) {
+    return delta;
+  }
+  return existing + delta;
 };
 
 const mapFinishReason = (

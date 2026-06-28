@@ -12,6 +12,7 @@ import {
   SidebarMenuItem,
   SidebarMenuSkeleton,
   SidebarProvider,
+  SidebarRail,
   SidebarTrigger,
 } from "@denora/ui/components/sidebar";
 
@@ -34,7 +35,7 @@ export function FullPageSkeleton() {
 export function AppShellSkeleton() {
   return (
     <SidebarProvider>
-      <Sidebar collapsible="offcanvas">
+      <Sidebar collapsible="icon">
         <SidebarHeader>
           <SidebarMenu>
             <SidebarMenuItem>
@@ -55,7 +56,7 @@ export function AppShellSkeleton() {
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
-          <SidebarGroup>
+          <SidebarGroup className="group-data-[collapsible=icon]:hidden">
             <SidebarGroupLabel>Recent</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
@@ -75,6 +76,7 @@ export function AppShellSkeleton() {
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarFooter>
+        <SidebarRail />
       </Sidebar>
       <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
         <ConversationPanelSkeleton />
@@ -85,9 +87,9 @@ export function AppShellSkeleton() {
 
 function AccountSkeleton() {
   return (
-    <div className="flex items-center gap-2 p-2">
-      <Skeleton className="size-8 rounded-lg" />
-      <div className="grid flex-1 gap-1.5">
+    <div className="flex items-center gap-2 overflow-hidden p-2 group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:p-0">
+      <Skeleton className="size-8 shrink-0 rounded-lg" />
+      <div className="grid flex-1 gap-1.5 group-data-[collapsible=icon]:hidden">
         <Skeleton className="h-3.5 w-24" />
         <Skeleton className="h-3 w-32" />
       </div>

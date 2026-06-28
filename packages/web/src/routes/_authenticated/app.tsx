@@ -12,6 +12,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarRail,
 } from "@denora/ui/components/sidebar";
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import { IconDots, IconPencilPlus, IconSearch } from "@tabler/icons-react";
@@ -108,7 +109,7 @@ function AppLayout() {
 
   return (
     <SidebarProvider>
-      <Sidebar collapsible="offcanvas">
+      <Sidebar collapsible="icon">
         <SidebarHeader>
           <SidebarMenu>
             <SidebarMenuItem>
@@ -133,16 +134,17 @@ function AppLayout() {
                   <SidebarMenuButton
                     isActive={routeConversationId === undefined}
                     onClick={startNewConversation}
+                    tooltip="New chat"
                   >
                     <IconPencilPlus />
                     <span>New chat</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
                 <SidebarMenuItem>
-                  <SidebarMenuButton onClick={() => setCommandOpen(true)}>
+                  <SidebarMenuButton onClick={() => setCommandOpen(true)} tooltip="Search chats">
                     <IconSearch />
                     <span>Search chats</span>
-                    <Kbd className="ml-auto">⌘K</Kbd>
+                    <Kbd className="ml-auto group-data-[collapsible=icon]:hidden">⌘K</Kbd>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               </SidebarMenu>
@@ -150,7 +152,7 @@ function AppLayout() {
           </SidebarGroup>
 
           {recentConversations.length > 0 ? (
-            <SidebarGroup>
+            <SidebarGroup className="group-data-[collapsible=icon]:hidden">
               <SidebarGroupLabel>Recent</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
@@ -185,6 +187,7 @@ function AppLayout() {
             signingOut={signOutResult.waiting}
           />
         </SidebarFooter>
+        <SidebarRail />
       </Sidebar>
 
       <SidebarInset className="min-h-0 min-w-0 overflow-hidden">

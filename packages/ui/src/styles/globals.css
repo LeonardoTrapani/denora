@@ -6,6 +6,7 @@
 @custom-variant dark (&:is(.dark *));
 @source "../../../web/src/**/*.{ts,tsx}";
 @source "../**/*.{ts,tsx}";
+@source "../../node_modules/streamdown/dist/*.js";
 
 @theme inline {
   --font-heading: var(--font-sans);

@@ -5,17 +5,21 @@ import {
   AttachmentMedia,
   AttachmentTitle,
 } from "@denora/ui/components/attachment";
-import { Avatar, AvatarFallback } from "@denora/ui/components/avatar";
 import { Bubble, BubbleContent } from "@denora/ui/components/bubble";
-import { Button } from "@denora/ui/components/button";
-import { Marker, MarkerContent, MarkerIcon } from "@denora/ui/components/marker";
+import { Marker, MarkerContent } from "@denora/ui/components/marker";
 import {
-  Message,
-  MessageAvatar,
-  MessageContent,
-  MessageFooter,
-  MessageHeader,
-} from "@denora/ui/components/message";
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@denora/ui/components/empty";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupTextarea,
+} from "@denora/ui/components/input-group";
 import {
   MessageScroller,
   MessageScrollerButton,
@@ -24,10 +28,20 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@denora/ui/components/message-scroller";
+import { Reasoning, ReasoningContent, ReasoningTrigger } from "@denora/ui/components/reasoning";
+import { Response } from "@denora/ui/components/response";
 import { SidebarTrigger } from "@denora/ui/components/sidebar";
-import { Textarea } from "@denora/ui/components/textarea";
+import { Spinner } from "@denora/ui/components/spinner";
+import {
+  Tool,
+  ToolContent,
+  ToolHeader,
+  ToolSection,
+  type ToolStatus,
+} from "@denora/ui/components/tool";
+import { IconAlertTriangle, IconArrowUp, IconSparkles } from "@tabler/icons-react";
 import { useAtomSet } from "@effect/atom-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 
 import { loadConversationsAtom } from "./atoms.ts";
 import { LoadingStates } from "./LoadingStates.tsx";
@@ -44,13 +58,9 @@ export function View({ chat, title }: Props) {
   const [sendPending, setSendPending] = useState(false);
   const [sendError, setSendError] = useState<Error | undefined>(undefined);
   const refreshConversations = useAtomSet(loadConversationsAtom, { mode: "promise" });
-  const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const canSend = composerText.trim().length > 0 && !sendPending;
   const showHistorySkeleton = !chat.historyReady && chat.messages.length === 0;
-
-  useEffect(() => {
-    scrollAnchorRef.current?.scrollIntoView({ block: "end" });
-  }, [chat.messages, chat.status]);
+  const error = sendError ?? chat.error;
 
   const send = (event: FormEvent) => {
     event.preventDefault();
@@ -64,21 +74,19 @@ export function View({ chat, title }: Props) {
       .then(() => {
         void refreshConversations();
       })
-      .catch((error: unknown) => {
+      .catch((cause: unknown) => {
         setComposerText(message);
-        setSendError(toError(error));
+        setSendError(toError(cause));
       })
       .finally(() => setSendPending(false));
   };
 
   return (
     <div className="flex h-svh min-h-0 flex-col overflow-hidden">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
-        <div className="flex items-center gap-2">
-          <SidebarTrigger />
-          <h1 className="font-medium">{title ?? "Denora"}</h1>
-        </div>
-        <ChatStatusMarker status={chat.status} historyReady={chat.historyReady} />
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+        <SidebarTrigger />
+        <h1 className="truncate text-sm font-medium">{title ?? "New chat"}</h1>
+        <ChatStatus status={chat.status} historyReady={chat.historyReady} />
       </header>
 
       <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -91,7 +99,7 @@ export function View({ chat, title }: Props) {
             <MessageScrollerViewport>
               <MessageScrollerContent
                 aria-busy={chat.status === "streaming" || !chat.historyReady}
-                className="mx-auto w-full max-w-3xl gap-6 px-4 py-6"
+                className="mx-auto w-full max-w-3xl gap-8 px-4 py-6"
               >
                 {showHistorySkeleton ? (
                   <MessageScrollerItem messageId="loading-history">
@@ -112,37 +120,47 @@ export function View({ chat, title }: Props) {
                     </MessageScrollerItem>
                   ))
                 )}
-                {!chat.historyReady && chat.messages.length > 0 ? (
-                  <MessageScrollerItem messageId="syncing-history">
-                    <SyncingHistory />
-                  </MessageScrollerItem>
-                ) : null}
-                <div ref={scrollAnchorRef} className="h-px shrink-0" />
               </MessageScrollerContent>
             </MessageScrollerViewport>
             <MessageScrollerButton />
           </MessageScroller>
         </MessageScrollerProvider>
 
-        <div className="shrink-0 border-t bg-background p-4">
-          {chat.error ? <ErrorMarker message={chat.error.message} /> : null}
-          {sendError ? <ErrorMarker message={sendError.message} /> : null}
-          <form className="mx-auto flex w-full max-w-3xl items-end gap-2" onSubmit={send}>
-            <Textarea
-              disabled={sendPending}
-              placeholder="Message Denora..."
-              value={composerText}
-              onChange={(event) => setComposerText(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-            />
-            <Button disabled={!canSend} type="submit">
-              {sendPending ? "Sending" : "Send"}
-            </Button>
+        <div className="shrink-0 px-4 pb-4">
+          {error ? (
+            <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-2 text-sm text-destructive">
+              <IconAlertTriangle className="size-4 shrink-0" />
+              <span>{error.message}</span>
+            </div>
+          ) : null}
+          <form className="mx-auto w-full max-w-3xl" onSubmit={send}>
+            <InputGroup>
+              <InputGroupTextarea
+                disabled={sendPending}
+                placeholder="Message Denora…"
+                rows={1}
+                value={composerText}
+                onChange={(event) => setComposerText(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+              />
+              <InputGroupAddon align="block-end">
+                <InputGroupButton
+                  aria-label="Send message"
+                  className="ml-auto rounded-full"
+                  disabled={!canSend}
+                  size="icon-sm"
+                  type="submit"
+                  variant="default"
+                >
+                  {sendPending ? <Spinner /> : <IconArrowUp />}
+                </InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
           </form>
         </div>
       </section>
@@ -150,45 +168,34 @@ export function View({ chat, title }: Props) {
   );
 }
 
-function ChatStatusMarker({
+function ChatStatus({
   status,
   historyReady,
 }: {
   readonly status: ChatStatus;
   readonly historyReady: boolean;
 }) {
+  const busy = status === "streaming" || status === "submitted" || status === "connecting";
+  if (historyReady && !busy) return null;
   return (
-    <Marker role={status === "streaming" || status === "connecting" ? "status" : undefined}>
-      <MarkerIcon>
-        {status === "streaming" || status === "submitted" || status === "connecting" ? "●" : "○"}
-      </MarkerIcon>
-      <MarkerContent>{historyReady ? statusLabel(status) : "Syncing history"}</MarkerContent>
-    </Marker>
+    <span className="ml-auto flex items-center gap-1.5 text-xs text-muted-foreground">
+      <Spinner className="size-3.5" />
+      {historyReady ? statusLabel(status) : "Syncing history…"}
+    </span>
   );
 }
 
 function EmptyChat() {
   return (
-    <Marker variant="separator">
-      <MarkerContent>Start a conversation with your Denora agent.</MarkerContent>
-    </Marker>
-  );
-}
-
-function SyncingHistory() {
-  return (
-    <Marker variant="separator">
-      <MarkerContent>Syncing history...</MarkerContent>
-    </Marker>
-  );
-}
-
-function ErrorMarker({ message }: { readonly message: string }) {
-  return (
-    <Marker>
-      <MarkerIcon>!</MarkerIcon>
-      <MarkerContent>{message}</MarkerContent>
-    </Marker>
+    <Empty className="py-24">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <IconSparkles />
+        </EmptyMedia>
+        <EmptyTitle>Start a conversation</EmptyTitle>
+        <EmptyDescription>Ask your Denora agent anything to get going.</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
   );
 }
 
@@ -201,62 +208,68 @@ function ChatMessageView({ message }: { readonly message: ChatMessage }) {
     );
   }
 
-  const isUser = message.role === "user";
-  return (
-    <Message align={isUser ? "end" : "start"}>
-      {!isUser ? (
-        <MessageAvatar>
-          <Avatar>
-            <AvatarFallback>DN</AvatarFallback>
-          </Avatar>
-        </MessageAvatar>
-      ) : null}
-      <MessageContent>
-        <MessageHeader>{isUser ? "You" : "Denora"}</MessageHeader>
-        <Bubble variant={isUser ? "default" : "ghost"}>
-          <BubbleContent>
-            {message.parts.length === 0 && !isUser ? (
-              <LoadingStates.AssistantTyping />
-            ) : (
-              message.parts.map((part, index) => <MessagePart key={index} part={part} />)
-            )}
-          </BubbleContent>
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <Bubble align="end" variant="default">
+          <BubbleContent className="whitespace-pre-wrap">{plainMessageText(message)}</BubbleContent>
         </Bubble>
-        {message.metadata?.model ? (
-          <MessageFooter>
-            {message.metadata.model.provider}/{message.metadata.model.id}
-          </MessageFooter>
-        ) : null}
-      </MessageContent>
-    </Message>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3 text-sm leading-relaxed">
+      {message.parts.length === 0 ? (
+        <LoadingStates.AssistantTyping />
+      ) : (
+        message.parts.map((part, index) => <MessagePart key={index} part={part} />)
+      )}
+    </div>
   );
 }
 
 function MessagePart({ part }: { readonly part: ChatMessagePart }) {
   switch (part.type) {
     case "text":
-      return <p className="whitespace-pre-wrap">{part.text}</p>;
+      return <Response>{part.text}</Response>;
     case "reasoning":
       return (
-        <details open={part.state === "streaming"}>
-          <summary>Reasoning</summary>
-          <p className="whitespace-pre-wrap">{part.text}</p>
-        </details>
+        <Reasoning isStreaming={part.state === "streaming"}>
+          <ReasoningTrigger />
+          <ReasoningContent>
+            <Response>{part.text}</Response>
+          </ReasoningContent>
+        </Reasoning>
       );
-    case "dynamic-tool":
+    case "dynamic-tool": {
+      const status: ToolStatus =
+        part.state === "output-available"
+          ? "complete"
+          : part.state === "output-error"
+            ? "error"
+            : "running";
       return (
-        <Marker role={part.state === "input-available" ? "status" : undefined}>
-          <MarkerIcon>⚙</MarkerIcon>
-          <MarkerContent>
-            Tool: {part.toolName}
-            <pre className="whitespace-pre-wrap">{formatUnknown(part.input)}</pre>
+        <Tool defaultOpen={part.state === "output-error"}>
+          <ToolHeader name={part.toolName} status={status} />
+          <ToolContent>
+            <ToolSection title="Input">
+              <Response>{asCodeBlock(part.input)}</Response>
+            </ToolSection>
             {part.state === "output-available" ? (
-              <pre className="whitespace-pre-wrap">{formatUnknown(part.output)}</pre>
+              <ToolSection title="Output">
+                <Response>{asCodeBlock(part.output)}</Response>
+              </ToolSection>
             ) : null}
-            {part.state === "output-error" ? <span>{part.errorText}</span> : null}
-          </MarkerContent>
-        </Marker>
+            {part.state === "output-error" ? (
+              <ToolSection title="Error">
+                <p className="text-sm text-destructive">{part.errorText}</p>
+              </ToolSection>
+            ) : null}
+          </ToolContent>
+        </Tool>
       );
+    }
     case "file":
       return part.mediaType.startsWith("image/") && part.url.startsWith("data:") ? (
         <Attachment orientation="vertical">
@@ -304,6 +317,12 @@ function statusLabel(status: ChatStatus): string {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function asCodeBlock(value: unknown): string {
+  const text = typeof value === "string" ? value : formatUnknown(value);
+  const language = typeof value === "string" ? "" : "json";
+  return `\`\`\`${language}\n${text}\n\`\`\``;
 }
 
 function formatUnknown(value: unknown): string {

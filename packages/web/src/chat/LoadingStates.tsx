@@ -38,14 +38,25 @@ export function AppShellSkeleton() {
         <SidebarHeader>
           <SidebarMenu>
             <SidebarMenuItem>
-              <Skeleton className="h-8 w-24" />
+              <AccountSkeleton />
             </SidebarMenuItem>
           </SidebarMenu>
-          <Skeleton className="h-9 w-full" />
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
-            <SidebarGroupLabel>Conversations</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuSkeleton showIcon />
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuSkeleton showIcon />
+                </SidebarMenuItem>
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+          <SidebarGroup>
+            <SidebarGroupLabel>Recent</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
                 {Array.from({ length: 6 }, (_, index) => (
@@ -60,10 +71,7 @@ export function AppShellSkeleton() {
         <SidebarFooter>
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuSkeleton />
-            </SidebarMenuItem>
-            <SidebarMenuItem>
-              <SidebarMenuSkeleton />
+              <AccountSkeleton />
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarFooter>
@@ -75,19 +83,28 @@ export function AppShellSkeleton() {
   );
 }
 
+function AccountSkeleton() {
+  return (
+    <div className="flex items-center gap-2 p-2">
+      <Skeleton className="size-8 rounded-lg" />
+      <div className="grid flex-1 gap-1.5">
+        <Skeleton className="h-3.5 w-24" />
+        <Skeleton className="h-3 w-32" />
+      </div>
+    </div>
+  );
+}
+
 export function ConversationPanelSkeleton() {
   return (
     <div className="flex h-svh min-h-0 flex-col overflow-hidden">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
-        <div className="flex items-center gap-2">
-          <SidebarTrigger />
-          <Skeleton className="h-5 w-28" />
-        </div>
-        <Skeleton className="h-7 w-24" />
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+        <SidebarTrigger />
+        <Skeleton className="h-4 w-28" />
       </header>
 
       <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col justify-end gap-5 overflow-hidden p-4">
+        <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col justify-end gap-8 overflow-hidden px-4 py-6">
           <ConversationHistorySkeleton />
         </div>
         <ComposerSkeleton />
@@ -98,33 +115,21 @@ export function ConversationPanelSkeleton() {
 
 export function ConversationHistorySkeleton() {
   return (
-    <div aria-hidden="true" className="flex flex-col gap-5">
-      <AssistantMessageSkeleton lines={2} width="w-4/5" />
-      <UserMessageSkeleton width="w-2/3" />
-      <AssistantMessageSkeleton lines={3} width="w-5/6" />
-      <UserMessageSkeleton width="w-1/2" />
+    <div aria-hidden="true" className="flex flex-col gap-8">
+      <UserMessageSkeleton width="w-48" />
+      <AssistantMessageSkeleton lines={3} />
+      <UserMessageSkeleton width="w-32" />
+      <AssistantMessageSkeleton lines={2} />
     </div>
   );
 }
 
-function AssistantMessageSkeleton({
-  lines,
-  width,
-}: {
-  readonly lines: number;
-  readonly width: string;
-}) {
+function AssistantMessageSkeleton({ lines }: { readonly lines: number }) {
   return (
-    <div className="flex max-w-3xl items-start gap-3">
-      <Skeleton className="size-8 shrink-0 rounded-full" />
-      <div className="grid flex-1 gap-2">
-        <Skeleton className="h-3 w-16" />
-        <div className="grid gap-2 rounded-2xl bg-muted/40 p-3">
-          {Array.from({ length: lines }, (_, index) => (
-            <Skeleton className={`h-4 ${index === lines - 1 ? width : "w-full"}`} key={index} />
-          ))}
-        </div>
-      </div>
+    <div className="flex flex-col gap-2.5">
+      {Array.from({ length: lines }, (_, index) => (
+        <Skeleton className={`h-4 ${index === lines - 1 ? "w-2/3" : "w-full"}`} key={index} />
+      ))}
     </div>
   );
 }
@@ -132,12 +137,7 @@ function AssistantMessageSkeleton({
 function UserMessageSkeleton({ width }: { readonly width: string }) {
   return (
     <div className="flex justify-end">
-      <div className="grid max-w-2xl gap-2">
-        <Skeleton className="ml-auto h-3 w-10" />
-        <div className="rounded-2xl bg-muted/40 p-3">
-          <Skeleton className={`h-4 ${width}`} />
-        </div>
-      </div>
+      <Skeleton className={`h-9 rounded-3xl ${width}`} />
     </div>
   );
 }
@@ -154,10 +154,9 @@ export function AssistantTyping() {
 
 function ComposerSkeleton() {
   return (
-    <div className="shrink-0 border-t bg-background p-4">
-      <div className="mx-auto flex w-full max-w-3xl items-end gap-2">
-        <Skeleton className="h-16 flex-1" />
-        <Skeleton className="h-9 w-16" />
+    <div className="shrink-0 px-4 pb-4">
+      <div className="mx-auto w-full max-w-3xl">
+        <Skeleton className="h-20 w-full rounded-2xl" />
       </div>
     </div>
   );

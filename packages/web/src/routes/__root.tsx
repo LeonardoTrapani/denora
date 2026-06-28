@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import appCss from "@denora/ui/globals.css?url";
+import { ThemeProvider } from "@denora/ui/components/theme";
 import { TooltipProvider } from "@denora/ui/components/tooltip";
 import { RegistryProvider } from "@effect/atom-react";
 import { HeadContent, Outlet, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
@@ -31,16 +32,18 @@ export const Route = createRootRouteWithContext<AppRouterContext>()({
 function RootComponent() {
   return (
     <RegistryProvider>
-      <TooltipProvider>
-        <Outlet />
-      </TooltipProvider>
+      <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+        <TooltipProvider>
+          <Outlet />
+        </TooltipProvider>
+      </ThemeProvider>
     </RegistryProvider>
   );
 }
 
 function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>

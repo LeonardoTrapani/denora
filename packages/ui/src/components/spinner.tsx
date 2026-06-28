@@ -1,7 +1,7 @@
 import { cn } from "@denora/ui/lib/utils";
 import { IconLoader } from "@tabler/icons-react";
 
-function Spinner({ className, ...props }: React.ComponentProps<"svg">) {
+function Spinner({ className, ...props }: React.ComponentProps<typeof IconLoader>) {
   return (
     <IconLoader
       role="status"

@@ -8,7 +8,7 @@ import {
 import type { Api, AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { CloudflareAiGatewayModels } from "../agent-loop/CloudflareAiGatewayModels.ts";
+import { PiAgentProvider } from "../agent-loop/PiAgentProvider.ts";
 import { redactRunEventImages, type RunEvent, toTurnMessage } from "./RunEventContract.ts";
 
 export type { RunEvent } from "./RunEventContract.ts";
@@ -91,7 +91,7 @@ export const execute = Effect.fn("AgentRunSession.execute")(function* (
 
 // Pi-to-Denora event boundary: this class owns translating pi-agent-core
 // AgentEvents into Denora's public run stream events. Provider-stream parsing
-// is lower in PiAgentModel; durable persistence is higher in Lifecycle.
+// is lower in PiAgentProvider; durable persistence is higher in Lifecycle.
 class AgentRunSession {
   private readonly agentLoop: Agent;
   private readonly eventCallback: RunEventCallback;
@@ -359,7 +359,7 @@ const responseInfoFrom = (message: AssistantMessage): Record<string, unknown> =>
   ...(message.errorMessage === undefined ? {} : { error: { message: message.errorMessage } }),
 });
 
-const defaultModel = CloudflareAiGatewayModels.defaultModel;
+const defaultModel = PiAgentProvider.defaultModel;
 
 const systemPromptFrom = (input: unknown): string =>
   stringField(input, "systemPrompt") ?? "You are Denora, a secure personal agent.";

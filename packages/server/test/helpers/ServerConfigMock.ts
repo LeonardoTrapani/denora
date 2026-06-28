@@ -11,5 +11,11 @@ export const testAuth: ServerConfig.Auth = {
   webOrigins: ["http://localhost:1337", "https://app.denora.me"],
 };
 
-export const layer = (auth: ServerConfig.Auth = testAuth): Layer.Layer<ServerConfig.Service> =>
-  ServerConfig.layer({ auth });
+export const testModel: ServerConfig.Model = {
+  openRouterApiKey: Redacted.make("sk-or-test-openrouter-api-key"),
+};
+
+export const layer = (
+  auth: ServerConfig.Auth = testAuth,
+  model: ServerConfig.Model = testModel,
+): Layer.Layer<ServerConfig.Service> => ServerConfig.layer({ auth, model });

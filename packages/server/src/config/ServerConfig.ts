@@ -34,8 +34,13 @@ export interface Auth {
   readonly webOrigins: ReadonlyArray<string>;
 }
 
+export interface Model {
+  readonly openRouterApiKey: Redacted.Redacted<string>;
+}
+
 export interface Values {
   readonly auth: Auth;
+  readonly model: Model;
 }
 
 export class Service extends Context.Service<Service, Values>()("@denora/server/ServerConfig") {}
@@ -73,6 +78,8 @@ const cookieDomain = Config.string("DENORA_COOKIE_DOMAIN").pipe(
 
 const cookiePassword = Config.redacted("WORKOS_COOKIE_PASSWORD");
 
+const openRouterApiKey = Config.redacted("OPENROUTER_API_KEY");
+
 export const load: Config.Config<Values> = Config.all({
   auth: Config.all({
     apiKey,
@@ -81,6 +88,9 @@ export const load: Config.Config<Values> = Config.all({
     cookieDomain,
     cookiePassword,
     webOrigins,
+  }),
+  model: Config.all({
+    openRouterApiKey,
   }),
 });
 

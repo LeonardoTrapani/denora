@@ -3,7 +3,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
-import { PiAgentModel } from "./PiAgentModel.ts";
+import { PiAgentProvider } from "./PiAgentProvider.ts";
 
 export interface Interface {
   readonly streamFn: StreamFn;
@@ -12,16 +12,16 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@denora/server/PiRuntime") {}
 
-export const layer: Layer.Layer<Service, never, PiAgentModel.Service> = Layer.effect(
+export const layer: Layer.Layer<Service, never, PiAgentProvider.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const modelService = yield* PiAgentModel.Service;
-    const runtime = ManagedRuntime.make(Layer.succeed(PiAgentModel.Service, modelService));
+    const modelService = yield* PiAgentProvider.Service;
+    const runtime = ManagedRuntime.make(Layer.succeed(PiAgentProvider.Service, modelService));
 
     const streamFn: StreamFn = (model, context, options) =>
       runtime.runPromise(
         Effect.gen(function* () {
-          const service = yield* PiAgentModel.Service;
+          const service = yield* PiAgentProvider.Service;
           return yield* service.stream({ model, context, options });
         }),
       );

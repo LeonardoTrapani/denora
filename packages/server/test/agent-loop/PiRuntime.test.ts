@@ -2,11 +2,8 @@ import type { AssistantMessageEvent, Context as PiContext } from "@earendil-work
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { CloudflareAiGatewayModels } from "../../src/agent-loop/CloudflareAiGatewayModels.ts";
 import { PiRuntime } from "../../src/agent-loop/PiRuntime.ts";
-import { FakeAiGateway } from "../helpers/FakeAiGateway.ts";
-
-const testModel = CloudflareAiGatewayModels.models["workers-ai/@cf/moonshotai/kimi-k2.6"].model;
+import { FakeAiProvider } from "../helpers/FakeAiProvider.ts";
 
 const emptyContext = { messages: [] } satisfies PiContext;
 
@@ -21,19 +18,19 @@ const collectEvents = async (
 describe("PiRuntime", () => {
   it.effect("keeps extracted streamFn usable after layer provisioning returns", () =>
     Effect.gen(function* () {
-      const fake = FakeAiGateway.make(
-        FakeAiGateway.sse(
-          FakeAiGateway.json({ choices: [{ delta: { content: "stream ok" } }] }),
-          FakeAiGateway.json({ choices: [{ finish_reason: "stop" }] }),
-          FakeAiGateway.done(),
+      const fake = FakeAiProvider.make(
+        FakeAiProvider.sse(
+          FakeAiProvider.json({ choices: [{ delta: { content: "stream ok" } }] }),
+          FakeAiProvider.json({ choices: [{ finish_reason: "stop" }] }),
+          FakeAiProvider.done(),
         ),
       );
-      const layer = PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fake)));
+      const layer = PiRuntime.layer.pipe(Layer.provide(FakeAiProvider.layer(fake)));
 
       const pi = yield* PiRuntime.Service.pipe(Effect.provide(layer));
 
       const events = yield* Effect.promise(async () =>
-        collectEvents(await pi.streamFn(testModel, emptyContext)),
+        collectEvents(await pi.streamFn(fake.defaultModel, emptyContext)),
       );
 
       assert.deepStrictEqual(

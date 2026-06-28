@@ -3,8 +3,9 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import { PiAgentModel } from "../agent-loop/PiAgentModel.ts";
+import { PiAgentProvider } from "../agent-loop/PiAgentProvider.ts";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
+import { ServerConfig } from "../config/ServerConfig.ts";
 import { type EventStreamError, EventStorageFailed, EventStreamStore } from "./EventStreamStore.ts";
 import { AgentConversationSessionStore } from "./AgentConversationSessionStore.ts";
 import {
@@ -50,18 +51,13 @@ export class AgentConversationObject extends Cloudflare.DurableObjectNamespace<
   Shape
 >()("AgentConversationObject") {}
 
-export const AiGateway = Cloudflare.AiGateway("DenoraAiGateway", {
-  collectLogs: true,
-  authentication: true,
-});
-
 export const AgentConversationObjectLive = AgentConversationObject.make(
   Effect.succeed(
     Effect.gen(function* () {
-      const aiGateway = yield* Cloudflare.AiGateway.bind(AiGateway);
       const piLayer = PiRuntime.layer.pipe(
-        Layer.provide(PiAgentModel.layer()),
-        Layer.provide(PiAgentModel.aiGatewayLayerFromClient(aiGateway)),
+        Layer.provide(PiAgentProvider.defaultLayer),
+        Layer.provide(ServerConfig.defaultLayer),
+        Layer.orDie,
       );
 
       return yield* Effect.gen(function* () {
@@ -160,7 +156,7 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
           };
         }).pipe(Effect.provide(objectLayer));
       });
-    }).pipe(Effect.provide(Cloudflare.AiGatewayBindingLive)),
+    }),
   ),
 );
 

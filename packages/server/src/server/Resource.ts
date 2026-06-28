@@ -10,7 +10,6 @@ import * as Option from "effect/Option";
 import {
   AgentConversationObject,
   AgentConversationObjectLive,
-  AiGateway,
 } from "../agent-run/AgentConversationObject.ts";
 import { AgentRunPersistence } from "../agent-run/AgentRunPersistence.ts";
 import { AgentRuns } from "../agent-run/AgentRuns.ts";
@@ -144,7 +143,6 @@ export { AgentConversationObject };
 export default Resource.make(
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
-    yield* Cloudflare.AiGateway.bind(AiGateway);
     const hyperdrive = yield* Cloudflare.Hyperdrive.bind(AlchemyDb.DenoraHyperdrive);
     const db = yield* Drizzle.postgres(hyperdrive.connectionString);
     const conversationObjects = yield* AgentConversationObject;
@@ -165,13 +163,7 @@ export default Resource.make(
       ),
     };
   }).pipe(
-    Effect.provide(
-      Layer.mergeAll(
-        AgentConversationObjectLive,
-        Cloudflare.AiGatewayBindingLive,
-        Cloudflare.HyperdriveBindingLive,
-      ),
-    ),
+    Effect.provide(Layer.mergeAll(AgentConversationObjectLive, Cloudflare.HyperdriveBindingLive)),
   ),
 );
 

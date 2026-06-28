@@ -34,11 +34,11 @@
       "import": "./src/agent-run/RunEventContract.ts",
       "default": "./src/agent-run/RunEventContract.ts"
     },
-    "./agent-loop/PiAgentModel": {
-      "types": "./src/agent-loop/PiAgentModel.ts",
-      "bun": "./src/agent-loop/PiAgentModel.ts",
-      "import": "./src/agent-loop/PiAgentModel.ts",
-      "default": "./src/agent-loop/PiAgentModel.ts"
+    "./agent-loop/PiAgentProvider": {
+      "types": "./src/agent-loop/PiAgentProvider.ts",
+      "bun": "./src/agent-loop/PiAgentProvider.ts",
+      "import": "./src/agent-loop/PiAgentProvider.ts",
+      "default": "./src/agent-loop/PiAgentProvider.ts"
     },
     "./agent-loop/PiAgentRuntime": {
       "types": "./src/agent-loop/PiAgentRuntime.ts",
@@ -75,8 +75,6 @@
     "build": "tsc --noEmit",
     "check-types": "tsc --noEmit",
     "test": "vitest run",
-    "test:live-ai": "vitest run test/integration/CloudflareAiGatewayLive.test.ts",
-    "test:live-ai:all": "vitest run test/integration/CloudflareAiGatewayLive.test.ts",
     "test-types": "tsc --noEmit"
   },
   "dependencies": {

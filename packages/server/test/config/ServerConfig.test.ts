@@ -9,6 +9,7 @@ const baseEnv: Record<string, string> = {
   WORKOS_API_KEY: "sk_test_workos_api_key",
   WORKOS_CLIENT_ID: "client_test_workos_client_id",
   WORKOS_COOKIE_PASSWORD: "test-workos-cookie-password-value-please-change-0001",
+  OPENROUTER_API_KEY: "sk-or-test-openrouter-api-key",
 };
 
 const providerFor = (env: Record<string, string>): ConfigProvider.ConfigProvider =>
@@ -22,12 +23,13 @@ const load = (
 describe("ServerConfig.load", () => {
   it.effect("maps a full valid env into the values record", () =>
     Effect.gen(function* () {
-      const { auth } = yield* load(baseEnv);
+      const { auth, model } = yield* load(baseEnv);
       assert.strictEqual(Redacted.value(auth.apiKey), baseEnv.WORKOS_API_KEY);
       assert.strictEqual(auth.baseURL, ServerConfig.DefaultApiOrigin);
       assert.strictEqual(auth.clientId, baseEnv.WORKOS_CLIENT_ID);
       assert.strictEqual(auth.cookieDomain, undefined);
       assert.strictEqual(Redacted.value(auth.cookiePassword), baseEnv.WORKOS_COOKIE_PASSWORD);
+      assert.strictEqual(Redacted.value(model.openRouterApiKey), baseEnv.OPENROUTER_API_KEY);
     }),
   );
 
@@ -125,7 +127,12 @@ describe("ServerConfig.load", () => {
   });
 
   describe("missing required keys produce a ConfigError", () => {
-    const required = ["WORKOS_API_KEY", "WORKOS_CLIENT_ID", "WORKOS_COOKIE_PASSWORD"] as const;
+    const required = [
+      "WORKOS_API_KEY",
+      "WORKOS_CLIENT_ID",
+      "WORKOS_COOKIE_PASSWORD",
+      "OPENROUTER_API_KEY",
+    ] as const;
 
     it.effect.each(required)("missing %s fails", (key) =>
       Effect.gen(function* () {

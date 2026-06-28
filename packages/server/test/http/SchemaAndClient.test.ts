@@ -24,7 +24,7 @@ import {
 import { Routes } from "../../src/http/Routes.ts";
 import { Health } from "../../src/http/system/Schema.ts";
 import * as AuthMock from "../helpers/AuthMock.ts";
-import { FakeAiGateway } from "../helpers/FakeAiGateway.ts";
+import { FakeAiProvider } from "../helpers/FakeAiProvider.ts";
 import { makeDenoraUser } from "../helpers/fixtures.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
 import * as TestServer from "../helpers/TestServer.ts";
@@ -374,7 +374,7 @@ describe("client: makeDenoraUrlBuilder", () => {
   });
 });
 
-const piLayer = PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(FakeAiGateway.make())));
+const piLayer = PiRuntime.layer.pipe(Layer.provide(FakeAiProvider.layer(FakeAiProvider.make())));
 
 const appLayer = TestServer.layer(Routes.layer).pipe(
   Layer.provide([

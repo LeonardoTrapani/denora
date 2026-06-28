@@ -12,7 +12,7 @@ import { Conversations } from "../../src/conversation/Conversations.ts";
 import { Api } from "../../src/http/Api.ts";
 import { Routes } from "../../src/http/Routes.ts";
 import * as AuthMock from "../helpers/AuthMock.ts";
-import { FakeAiGateway } from "../helpers/FakeAiGateway.ts";
+import { FakeAiProvider } from "../helpers/FakeAiProvider.ts";
 import { makeDenoraUser } from "../helpers/fixtures.ts";
 import * as ServerConfigMock from "../helpers/ServerConfigMock.ts";
 import * as TestServer from "../helpers/TestServer.ts";
@@ -25,7 +25,7 @@ const validUser = makeDenoraUser();
 const IMAGE_BYTES = "aGVsbG8taW1hZ2UtYnl0ZXM=";
 
 const appLayer = (fake = fakeGateway()) => {
-  const piLayer = PiRuntime.layer.pipe(Layer.provide(FakeAiGateway.layer(fake)));
+  const piLayer = PiRuntime.layer.pipe(Layer.provide(FakeAiProvider.layer(fake)));
 
   return TestServer.layer(Routes.layer).pipe(
     Layer.provide([
@@ -42,11 +42,11 @@ const appLayer = (fake = fakeGateway()) => {
 };
 
 const fakeGateway = () =>
-  FakeAiGateway.make(
-    FakeAiGateway.sse(
-      FakeAiGateway.json({ choices: [{ delta: { content: "hello" } }] }),
-      FakeAiGateway.json({ choices: [{ finish_reason: "stop" }] }),
-      FakeAiGateway.done(),
+  FakeAiProvider.make(
+    FakeAiProvider.sse(
+      FakeAiProvider.json({ choices: [{ delta: { content: "hello" } }] }),
+      FakeAiProvider.json({ choices: [{ finish_reason: "stop" }] }),
+      FakeAiProvider.done(),
     ),
   );
 
@@ -153,13 +153,12 @@ describe("Api http surface", () => {
             readonly models: ReadonlyArray<Record<string, unknown>>;
           }>;
         };
-        assert.strictEqual(body.defaultModelId, "claude-sonnet-4-5");
+        assert.strictEqual(body.defaultModelId, "openrouter/openai/gpt-5.5");
         assert.deepStrictEqual(
-          body.providers.slice(0, 5).map((provider) => provider.id),
-          ["anthropic", "openai", "moonshotai", "zai", "meta"],
+          body.providers.map((provider) => provider.id),
+          ["openrouter"],
         );
         assert.isTrue(body.providers.every((provider) => provider.models.length > 0));
-        assert.notProperty(body.providers[0]?.models[0] ?? {}, "route");
       }).pipe(Effect.provide(appLayer())),
     );
   });
@@ -516,7 +515,7 @@ describe("Api http surface", () => {
           const replayJson = JSON.stringify(events);
           const userMessage = events.find((event) => event.type === "message_start");
 
-          const modelRequest = fake.calls[0]?.payload ?? fake.gatewayCalls[0]?.request;
+          const modelRequest = fake.calls[0]?.payload;
           assert.include(JSON.stringify(modelRequest), IMAGE_BYTES);
           assert.notInclude(replayJson, IMAGE_BYTES);
           assert.property(userMessage ?? {}, "message");

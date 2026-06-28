@@ -16,7 +16,7 @@ Agents should prioritize improving the overall design and quality of the system 
 - No app framework or package layout has been selected yet. Do not create apps or packages without asking when the stack is unclear.
 - Product context lives in `CONTEXT.md`. Read it before making product, UX, naming, or architecture decisions.
 
-- Vendored upstream repositories live under `vendor/` as squashed git subtrees. The active vendored references are `vendor/effect-smol`, `vendor/alchemy-effect`, and `vendor/flue`.
+- Vendored upstream repositories live under `vendor/` as squashed git subtrees. The active vendored references are `vendor/effect-smol`, `vendor/alchemy-effect`, `vendor/flue`, and `vendor/pi`.
 - Treat `vendor/*` as read-only reference material: inspect it for source, tests, module structure, and idioms; do not edit it unless explicitly asked; do not import from it in application code.
 - Every time you write Effect code, first inspect `vendor/effect-smol/LLMS.md`, then check `vendor/effect-smol/ai-docs` and relevant source/tests under `vendor/effect-smol/packages/*` for idiomatic Effect v4 patterns.
 

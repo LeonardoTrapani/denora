@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel as PiThinkingLevel } from "@earendil-works/pi-agent-core";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -65,6 +65,30 @@ const SubmittedRunInput = Schema.Struct({
   prompt: Schema.optionalKey(Schema.String),
   submittedMessage: Schema.optionalKey(Schema.Unknown),
 });
+
+export const thinkingLevels = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const satisfies ReadonlyArray<PiThinkingLevel>;
+
+export const ThinkingLevel = Schema.Literals(thinkingLevels);
+export type ThinkingLevel = typeof ThinkingLevel.Type;
+
+export const RunSettings = Schema.Struct({
+  modelId: Schema.optionalKey(Schema.String),
+  thinkingLevel: Schema.optionalKey(ThinkingLevel),
+});
+export type RunSettings = typeof RunSettings.Type;
+
+export const runSettingsFromSubmitted = (submitted: unknown): RunSettings =>
+  Option.match(Schema.decodeUnknownOption(RunSettings)(submitted), {
+    onNone: () => ({}),
+    onSome: (settings) => settings,
+  });
 const StreamEventIndex = Schema.Struct({ eventIndex: Schema.Number });
 const StreamEventTimestamp = Schema.Struct({ timestamp: Schema.String });
 

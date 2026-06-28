@@ -5,6 +5,7 @@ import type { PersistedConversationMessage } from "./reducer.ts";
 import {
   type ChatHistory,
   type ConversationClient,
+  type SendMessageOptions,
   type SendMessageResult,
   Session,
   emptyChatSnapshot,
@@ -20,7 +21,10 @@ export interface UseConversationChatOptions {
 }
 
 export interface UseConversationChatResult extends ChatSnapshot {
-  readonly sendMessage: (message: string) => Promise<SendMessageResult>;
+  readonly sendMessage: (
+    message: string,
+    options?: SendMessageOptions,
+  ) => Promise<SendMessageResult>;
 }
 
 export interface UseLayoutConversationChatOptions extends Omit<

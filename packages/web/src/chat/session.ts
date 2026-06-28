@@ -17,11 +17,23 @@ export interface SendMessageResult {
   readonly conversationId: string;
 }
 
+export interface SendMessageImage {
+  readonly data: string;
+  readonly mimeType: string;
+}
+
+export interface SendMessageOptions {
+  readonly images?: ReadonlyArray<SendMessageImage> | undefined;
+  readonly modelId?: string | undefined;
+  readonly thinkingLevel?: string | undefined;
+}
+
 export interface ConversationClient {
   readonly createConversation: () => Promise<{ readonly id: string }>;
   readonly submitMessage: (
     conversationId: string,
     message: string,
+    options?: SendMessageOptions | undefined,
   ) => Promise<{
     readonly conversationId: string;
     readonly submissionId: string;
@@ -110,15 +122,18 @@ export class Session {
 
   getSnapshot = (): ChatSnapshot => this.snapshot;
 
-  async sendMessage(message: string): Promise<SendMessageResult> {
+  async sendMessage(message: string, options: SendMessageOptions = {}): Promise<SendMessageResult> {
     const trimmed = message.trim();
-    if (trimmed.length === 0) {
+    const sendOptions = normalizeSendOptions(options);
+    const images = sendOptions?.images ?? [];
+    if (trimmed.length === 0 && images.length === 0) {
       if (this.conversationId === undefined) throw new Error("Cannot send an empty message.");
       return { conversationId: this.conversationId };
     }
 
     const localId = `local:${++this.localId}`;
-    this.dispatch({ type: "local_send_submitted", localId, message: trimmed });
+    const content = sendContent(trimmed, sendOptions ?? {});
+    this.dispatch({ type: "local_send_submitted", localId, content });
     this.wakeReconnect();
 
     let conversationId = this.conversationId;
@@ -132,7 +147,10 @@ export class Session {
         this.onConversationCreated?.(conversationId, this);
       }
 
-      const receipt = await this.client.submitMessage(conversationId, trimmed);
+      const receipt =
+        sendOptions === undefined
+          ? await this.client.submitMessage(conversationId, trimmed)
+          : await this.client.submitMessage(conversationId, trimmed, sendOptions);
       this.conversationId = receipt.conversationId;
       this.admittedOffset = receipt.offset;
       this.dispatch({
@@ -368,12 +386,12 @@ export const defaultConversationClient: ConversationClient = {
       ),
       { span: "chat.createConversation" },
     ),
-  submitMessage: (conversationId, message) =>
+  submitMessage: (conversationId, message, options) =>
     Api.runApi(
       Api.apiEffect((client: DenoraApiClient) =>
         client.submitConversationMessage({
           params: { conversationId },
-          payload: { message },
+          payload: { content: sendContent(message, options ?? {}) },
         }),
       ),
       { span: "chat.submitConversationMessage" },
@@ -401,6 +419,29 @@ function publicSnapshot(state: ChatState): ChatSnapshot {
     status: state.status,
     historyReady: state.historyReady,
     error: state.error,
+  };
+}
+
+function normalizeSendOptions(options: SendMessageOptions): SendMessageOptions | undefined {
+  const images = options.images?.filter(
+    (image) => image.data.length > 0 && image.mimeType.length > 0,
+  );
+  const normalized = {
+    ...(images === undefined || images.length === 0 ? {} : { images }),
+    ...(options.modelId === undefined ? {} : { modelId: options.modelId }),
+    ...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
+  };
+  return Object.keys(normalized).length === 0 ? undefined : normalized;
+}
+
+function sendContent(message: string, options: SendMessageOptions): unknown {
+  return {
+    text: message,
+    ...(options.images === undefined || options.images.length === 0
+      ? {}
+      : { images: options.images.map((image) => ({ type: "image", ...image })) }),
+    ...(options.modelId === undefined ? {} : { modelId: options.modelId }),
+    ...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
   };
 }
 

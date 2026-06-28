@@ -4,11 +4,14 @@ import {
   type AgentMessage,
   type AgentTool,
   type StreamFn,
+  type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, AssistantMessageEvent, Model } from "@earendil-works/pi-ai";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { PiAgentProvider } from "../agent-loop/PiAgentProvider.ts";
+import { ConversationDomain } from "../conversation/ConversationDomain.ts";
 import { redactRunEventImages, type RunEvent, toTurnMessage } from "./RunEventContract.ts";
 
 export type { RunEvent } from "./RunEventContract.ts";
@@ -361,14 +364,37 @@ const responseInfoFrom = (message: AssistantMessage): Record<string, unknown> =>
 
 const defaultModel = PiAgentProvider.defaultModel;
 
+const ModelReference = Schema.Struct({
+  provider: Schema.String,
+  id: Schema.String,
+});
+type ModelReference = typeof ModelReference.Type;
+
+const ModelSelection = Schema.Struct({
+  modelId: Schema.optionalKey(Schema.String),
+  model: Schema.optionalKey(Schema.Union([Schema.String, ModelReference])),
+});
+
 const systemPromptFrom = (input: unknown): string =>
   stringField(input, "systemPrompt") ?? "You are Denora, a secure personal agent.";
 
-const modelFrom = (input: unknown): Model<Api> => {
-  const model = recordField(input, "model");
-  if (model === undefined) return defaultModel;
-  return model as unknown as Model<Api>;
-};
+const modelFrom = (input: unknown): Model<Api> =>
+  Option.match(modelSpecifierFromInput(input), {
+    onNone: () => defaultModel,
+    onSome: (specifier) => modelBySpecifier(specifier) ?? defaultModel,
+  });
+
+const modelSpecifierFromInput = (input: unknown): Option.Option<string> =>
+  Option.flatMap(Schema.decodeUnknownOption(ModelSelection)(input), (selection) =>
+    Option.fromUndefinedOr(
+      selection.modelId ??
+        (typeof selection.model === "string"
+          ? selection.model
+          : selection.model === undefined
+            ? undefined
+            : modelSpecifier(selection.model)),
+    ),
+  );
 
 const messagesFrom = (input: unknown): AgentMessage[] => {
   const messages = arrayField(input, "messages");
@@ -381,24 +407,21 @@ const toolsFrom = (input: ExecuteInput): AgentTool<any>[] => {
   return tools === undefined ? [] : (tools as AgentTool<any>[]).slice();
 };
 
-const thinkingLevelFrom = (
-  input: unknown,
-): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" => {
-  const value = stringField(input, "thinkingLevel");
-  return value === "off" ||
-    value === "minimal" ||
-    value === "low" ||
-    value === "medium" ||
-    value === "high" ||
-    value === "xhigh"
-    ? value
-    : "medium";
-};
+const thinkingLevelFrom = (input: unknown): ThinkingLevel =>
+  Option.match(Schema.decodeUnknownOption(ConversationDomain.RunSettings)(input), {
+    onNone: () => "medium",
+    onSome: (settings) => settings.thinkingLevel ?? "medium",
+  });
 
 const promptFrom = (input: unknown): string => {
   if (typeof input === "string") return input;
   return stringField(input, "prompt") ?? "";
 };
+
+const modelBySpecifier = (specifier: string): Model<Api> | undefined =>
+  PiAgentProvider.models.find((model) => modelSpecifier(model) === specifier);
+
+const modelSpecifier = (model: ModelReference): string => `${model.provider}/${model.id}`;
 
 const stringField = (input: unknown, field: string): string | undefined => {
   const value = recordField(input, field);

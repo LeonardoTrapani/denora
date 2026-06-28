@@ -31,7 +31,7 @@ export type ChatReducerEvent =
       readonly type: "local_history_loaded";
       readonly messages: ReadonlyArray<PersistedConversationMessage>;
     }
-  | { readonly type: "local_send_submitted"; readonly localId: string; readonly message: string }
+  | { readonly type: "local_send_submitted"; readonly localId: string; readonly content: unknown }
   | {
       readonly type: "local_send_admitted";
       readonly localId: string;
@@ -82,7 +82,7 @@ function reduceChatEventOnce(state: ChatState, event: ChatReducerEvent): ChatSta
     case "local_send_submitted":
       return {
         ...state,
-        messages: [...state.messages, optimisticMessage(event.localId, event.message)],
+        messages: [...state.messages, optimisticMessage(event.localId, event.content)],
         status: "submitted",
         error: undefined,
         pendingSends: [...state.pendingSends, { localId: event.localId }],
@@ -520,15 +520,7 @@ function partsFromContent(
   const parts: ChatMessagePart[] = [];
   const previousFiles = previous?.parts.filter((part) => part.type === "file") ?? [];
   let previousFileIndex = 0;
-  const textObject = objectRecord(rawContent);
-  const content =
-    typeof rawContent === "string"
-      ? [{ type: "text", text: rawContent }]
-      : Array.isArray(rawContent)
-        ? rawContent
-        : typeof textObject?.text === "string"
-          ? [{ type: "text", text: textObject.text }]
-          : [];
+  const content = contentBlocks(rawContent);
 
   for (const block of content) {
     const record = objectRecord(block);
@@ -593,6 +585,32 @@ function fallbackText(content: unknown): string {
   }
 }
 
+function contentBlocks(rawContent: unknown): ReadonlyArray<unknown> {
+  if (typeof rawContent === "string") return [{ type: "text", text: rawContent }];
+  if (Array.isArray(rawContent)) return rawContent;
+
+  const record = objectRecord(rawContent);
+  if (record === undefined) return [];
+
+  const blocks: unknown[] = [];
+  if (typeof record.text === "string") blocks.push({ type: "text", text: record.text });
+  blocks.push(...imageBlocks(record.image), ...imageBlocks(record.images));
+  return blocks;
+}
+
+function imageBlocks(value: unknown): ReadonlyArray<unknown> {
+  if (Array.isArray(value)) return value.flatMap(imageBlocks);
+  const record = objectRecord(value);
+  if (
+    record?.type === "image" &&
+    typeof record.data === "string" &&
+    typeof record.mimeType === "string"
+  ) {
+    return [record];
+  }
+  return [];
+}
+
 function reasoningIndexes(message: LlmMessage): Record<number, number> {
   if (message.role !== "assistant") return {};
   const indexes: Record<number, number> = {};
@@ -613,11 +631,11 @@ function setReasoningPartIndex(
   return { ...indexes, [messageId]: { ...indexes[messageId], [contentIndex]: partIndex } };
 }
 
-function optimisticMessage(localId: string, message: string): ChatMessage {
+function optimisticMessage(localId: string, content: unknown): ChatMessage {
   return {
     id: localId,
     role: "user",
-    parts: [{ type: "text", text: message, state: "done" }],
+    parts: partsFromContent(content, true),
   };
 }
 

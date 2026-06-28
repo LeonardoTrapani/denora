@@ -188,7 +188,11 @@ function AppLayout() {
       </Sidebar>
 
       <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
-        <ConversationView.View chat={chat} title={activeConversation?.title} />
+        <ConversationView.View
+          chat={chat}
+          displayName={auth.user.name ?? auth.user.email}
+          title={activeConversation?.title}
+        />
         <Outlet />
       </SidebarInset>
 

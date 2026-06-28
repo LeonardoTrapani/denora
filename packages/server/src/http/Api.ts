@@ -7,7 +7,13 @@ import { SystemGroup } from "./system/Api.ts";
 
 export { AccountGroup } from "./account/Api.ts";
 export { AgentRunGroup } from "./agent-run/Api.ts";
-export { AiGroup, AiModelCatalogItem, AiModelProviderGroup, AiModelsResponse } from "./ai/Api.ts";
+export {
+  AiGroup,
+  AiModelCatalogItem,
+  AiModelProviderGroup,
+  AiModelsResponse,
+  AiThinkingLevelItem,
+} from "./ai/Api.ts";
 export {
   AbortConversationResponse,
   Conversation,

@@ -365,6 +365,7 @@ export const inMemoryLayer: Layer.Layer<Service, never, PiRuntime.Service> = Lay
             prompt: richMessage === undefined ? prompt : "",
             submittedMessage: content,
             messages: richMessage === undefined ? [] : [richMessage],
+            ...ConversationDomain.runSettingsFromSubmitted(content),
           };
           const userMessage: ConversationMessageRecord = {
             id: messageId,

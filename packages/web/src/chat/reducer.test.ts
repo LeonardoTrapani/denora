@@ -257,7 +257,7 @@ describe("reduceChatEvent()", () => {
     let state = reduceChatEvent(emptyChatState, {
       type: "local_send_submitted",
       localId: "local-1",
-      message: "same",
+      content: { text: "same" },
     });
     state = reduceChatEvent(state, {
       type: "local_send_admitted",
@@ -284,7 +284,7 @@ describe("reduceChatEvent()", () => {
     let state = reduceChatEvent(emptyChatState, {
       type: "local_send_submitted",
       localId: "local-1",
-      message: "hello",
+      content: { text: "hello" },
     });
     state = reduceChatEvent(state, {
       type: "local_send_admitted",

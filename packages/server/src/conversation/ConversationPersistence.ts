@@ -328,6 +328,7 @@ export const layer: Layer.Layer<Service, never, Db.Service> = Layer.effect(
           prompt: ConversationDomain.richUserMessage(content) === undefined ? prompt : "",
           submittedMessage: content,
           messages: [...priorMessages.flatMap(toAgentMessage), ...currentUserMessages(content)],
+          ...ConversationDomain.runSettingsFromSubmitted(content),
         };
 
         yield* persist(

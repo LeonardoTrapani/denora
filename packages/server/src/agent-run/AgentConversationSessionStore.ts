@@ -280,6 +280,7 @@ export const makeSqlite = Effect.fn("AgentConversationSessionStore.makeSqlite")(
       prompt: "",
       submittedMessage: content,
       messages: activePath.flatMap(toAgentMessage),
+      ...ConversationDomain.runSettingsFromSubmitted(content),
     };
 
     return {

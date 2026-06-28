@@ -2,12 +2,18 @@ import * as Schema from "effect/Schema";
 import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import { AuthorizationApi } from "../../auth/AuthorizationApi.ts";
+import { ConversationDomain } from "../../conversation/ConversationDomain.ts";
 
 export const DisplayProvider = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
 }).pipe(Schema.annotate({ identifier: "AiModelDisplayProvider" }));
 export type DisplayProvider = typeof DisplayProvider.Type;
+
+export const AiThinkingLevel = ConversationDomain.ThinkingLevel.pipe(
+  Schema.annotate({ identifier: "AiThinkingLevel" }),
+);
+export type AiThinkingLevel = typeof AiThinkingLevel.Type;
 
 export const AiModelCatalogItem = Schema.Struct({
   id: Schema.String,
@@ -18,6 +24,7 @@ export const AiModelCatalogItem = Schema.Struct({
   api: Schema.Literals(["anthropic-messages", "openai-responses", "openai-completions"]),
   capabilities: Schema.Struct({
     reasoning: Schema.Boolean,
+    thinkingLevels: Schema.Array(AiThinkingLevel),
     reasoningMode: Schema.optional(
       Schema.Literals(["anthropic-manual", "anthropic-adaptive", "openai", "openai-compatible"]),
     ),
@@ -44,8 +51,18 @@ export const AiModelProviderGroup = Schema.Struct({
 }).pipe(Schema.annotate({ identifier: "AiModelProviderGroup" }));
 export type AiModelProviderGroup = typeof AiModelProviderGroup.Type;
 
+export const AiThinkingLevelItem = Schema.Struct({
+  id: AiThinkingLevel,
+  name: Schema.String,
+  description: Schema.String,
+  default: Schema.Boolean,
+}).pipe(Schema.annotate({ identifier: "AiThinkingLevelItem" }));
+export type AiThinkingLevelItem = typeof AiThinkingLevelItem.Type;
+
 export const AiModelsResponse = Schema.Struct({
   defaultModelId: Schema.String,
+  defaultThinkingLevel: AiThinkingLevel,
+  thinkingLevels: Schema.Array(AiThinkingLevelItem),
   providers: Schema.Array(AiModelProviderGroup),
 }).pipe(Schema.annotate({ identifier: "AiModelsResponse" }));
 export type AiModelsResponse = typeof AiModelsResponse.Type;

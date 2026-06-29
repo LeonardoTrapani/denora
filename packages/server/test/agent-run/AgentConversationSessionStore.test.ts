@@ -1,3 +1,4 @@
+import { RuntimeContext } from "alchemy";
 import {
   createAssistantMessageEventStream,
   Type,
@@ -1242,7 +1243,7 @@ describe("AgentConversationSessionStore", () => {
               return terminalAppendOffset;
             }
             return yield* originalAppendEventOnce(path, key, event);
-          });
+          }).pipe(Effect.provide(RuntimeContext.phantom));
 
         yield* admitAndCreate(store, coordinator, input);
         yield* coordinator.reconcile({
@@ -3568,8 +3569,12 @@ const agentConversationHarnessLayer = Layer.effect(
   Layer.provide(SqliteStorage.layer),
 );
 
-const withHarness = <A, E>(effect: Effect.Effect<A, E, AgentConversationHarness>) =>
-  effect.pipe(Effect.provide(agentConversationHarnessLayer));
+const withHarness = <A, E>(
+  effect: Effect.Effect<A, E, AgentConversationHarness | RuntimeContext>,
+) =>
+  effect.pipe(
+    Effect.provide(Layer.mergeAll(agentConversationHarnessLayer, RuntimeContext.phantom)),
+  );
 
 const submissionInput = (
   options: {

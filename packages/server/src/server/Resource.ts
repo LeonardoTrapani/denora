@@ -135,15 +135,16 @@ const corsLayer = Layer.unwrap(
 
 export class Resource extends Cloudflare.Worker<Resource, {}, AgentConversationObject>()(
   "Server",
-  props,
 ) {}
 
 export { AgentConversationObject };
 
 export default Resource.make(
+  props,
   Effect.gen(function* () {
     const config = yield* ServerConfig.load;
-    const hyperdrive = yield* Cloudflare.Hyperdrive.bind(AlchemyDb.DenoraHyperdrive);
+    const hyperdriveConnection = yield* AlchemyDb.DenoraHyperdrive;
+    const hyperdrive = yield* Cloudflare.Hyperdrive.Connect(hyperdriveConnection);
     const db = yield* Drizzle.postgres(hyperdrive.connectionString);
     const conversationObjects = yield* AgentConversationObject;
 
@@ -163,7 +164,9 @@ export default Resource.make(
       ),
     };
   }).pipe(
-    Effect.provide(Layer.mergeAll(AgentConversationObjectLive, Cloudflare.HyperdriveBindingLive)),
+    Effect.provide(
+      Layer.mergeAll(AgentConversationObjectLive, Cloudflare.Hyperdrive.ConnectBinding),
+    ),
   ),
 );
 

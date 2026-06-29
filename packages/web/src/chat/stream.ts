@@ -81,9 +81,7 @@ export function createConversationEventStream(
     wake();
   };
   const connect = () => {
-    const fetch = Object.assign(options.fetch ?? fetchWithCredentials, {
-      preconnect: globalThis.fetch.preconnect,
-    }) satisfies typeof globalThis.fetch;
+    const fetch = options.fetch ?? fetchWithCredentials;
     const streamOptions = {
       url: url.toString(),
       offset: connectOffset,
@@ -253,13 +251,12 @@ const conversationEventsUrl = (conversationId: string, configuredBaseUrl?: strin
   return new URL(`/conversations/${encodeURIComponent(conversationId)}/events`, `${baseUrl}/`);
 };
 
-const fetchWithCredentials = Object.assign(
-  async (...[input, init]: Parameters<typeof globalThis.fetch>): Promise<Response> => {
-    const headers = await Auth.withAuthForwardingHeaders(init?.headers);
-    return fetch(input, { ...init, headers, credentials: "include" });
-  },
-  { preconnect: globalThis.fetch.preconnect },
-) satisfies typeof globalThis.fetch;
+const fetchWithCredentials = async (
+  ...[input, init]: Parameters<typeof globalThis.fetch>
+): Promise<Response> => {
+  const headers = await Auth.withAuthForwardingHeaders(init?.headers);
+  return fetch(input, { ...init, headers, credentials: "include" });
+};
 
 const linkAbortSignal = (
   signal: AbortSignal | undefined,

@@ -80,16 +80,16 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.79.10",
     "@earendil-works/pi-ai": "0.79.10",
-    "@effect/sql-pg": "^4.0.0-beta.83",
+    "@effect/sql-pg": "^4.0.0-beta.84",
     "@workos-inc/node": "^10.3.0",
-    "alchemy": "2.0.0-beta.57",
+    "alchemy": "2.0.0-beta.59",
     "drizzle-orm": "1.0.0-rc.1",
-    "effect": "^4.0.0-beta.83",
+    "effect": "^4.0.0-beta.84",
     "pg": "^8.13.0"
   },
   "devDependencies": {
-    "@effect/platform-node": "^4.0.0-beta.83",
-    "@effect/vitest": "4.0.0-beta.83",
+    "@effect/platform-node": "^4.0.0-beta.84",
+    "@effect/vitest": "4.0.0-beta.92",
     "@testcontainers/postgresql": "^12.0.2",
     "vitest": "^4.1.8"
   }

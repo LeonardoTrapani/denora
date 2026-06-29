@@ -1,0 +1,117 @@
+# dependencies (bun install)
+node_modules
+
+# Hand-managed fixture node_modules used by the @executor-js/config
+# loader tests (require.resolve walks up to find these).
+!packages/core/config/__test-fixtures__/node_modules/
+!packages/core/config/__test-fixtures__/node_modules/**
+
+# output
+out
+dist
+*.tgz
+
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+.turbo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
+
+# Cloudflare
+.wrangler/
+personal-notes/
+*.har.executor
+executor.har
+.executor/
+# Per-app dev runtime data dirs (local SQLite DB + generated secret.key) — never
+# commit. Glob covers .executor-dev (cloud/cloudflare dev) AND .executor-selfhost
+# (the self-host data dir) and any future .executor-<role> dir.
+.executor-*/
+# Belt-and-suspenders: never commit a generated session/at-rest key, wherever it lands.
+secret.key
+
+# desktop app build artifacts
+apps/desktop/resources/
+
+# cloud local dev database
+.pglite
+apps/cloud/.dev-db/
+apps/cloud/.e2e-db/
+
+# e2e suite: generated run artifacts + throwaway target state (the * also
+# covers ad-hoc variants like .e2e-stub-db-manual from debugging boots)
+e2e/runs/
+apps/cloud/.e2e-stub-db*/
+apps/host-selfhost/.e2e-data*/
+
+# playwright e2e artifacts
+test-results/
+playwright-report/
+.last-run.json
+# .claude is local agent state (worktrees, settings), EXCEPT checked-in skills
+.claude/*
+!.claude/skills/
+.nitro/
+.output/
+.tanstack/
+.env*
+!.env.example
+
+# local user config
+executor.jsonc
+
+# VS Code (per-workspace user settings)
+.vscode/mcp.json
+
+# reference repos (pulled via `bun run pull:references`)
+.reference
+.reference/
+.worktrees/
+
+.mcp.json
+.codex/*
+!.codex/environments/
+.codex/environments/*
+!.codex/environments/environment.toml
+
+# Warden local scan outputs
+.warden/
+.warden-runs/
+
+# Agent local notes
+MISTAKES.md
+DESIRES.md
+LEARNINGS.md
+
+# Agent scratch scripts (workspace-resolvable alternative to /tmp)
+scratch/
+.alchemy/
+
+# Pi coding agent
+.pi/
+
+# Throwaway UX prototype (not part of the app)
+ux-demo/
+

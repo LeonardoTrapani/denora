@@ -1,0 +1,40 @@
+{
+  "name": "@executor-js/marketing",
+  "version": "0.0.5",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run dev:proxy && bun run dev:vite",
+    "dev:proxy": "portless proxy start --multiplex --port 1355 || true",
+    "dev:vite": "portless --name executor-marketing astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "deploy": "astro build && npx wrangler deploy --config dist/server/wrangler.json",
+    "astro": "astro",
+    "typecheck": "tsgo --noEmit",
+    "typecheck:slow": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "^13.0.0",
+    "@astrojs/react": "^5.0.4",
+    "@executor-js/react": "workspace:*",
+    "@tailwindcss/vite": "^4.2.2",
+    "astro": "^6.1.3",
+    "clsx": "^2.1.1",
+    "motion": "^12.38.0",
+    "posthog-js": "^1.372.5",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-tweet": "^3.3.0",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.2"
+  },
+  "devDependencies": {
+    "@rhyssul/portless": "^0.13.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "wrangler": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

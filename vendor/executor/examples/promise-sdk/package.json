@@ -1,0 +1,21 @@
+{
+  "name": "@executor-js/example-promise-sdk",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "typecheck": "tsgo --noEmit",
+    "typecheck:slow": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@executor-js/plugin-graphql": "workspace:*",
+    "@executor-js/plugin-mcp": "workspace:*",
+    "@executor-js/plugin-openapi": "workspace:*",
+    "@executor-js/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "latest"
+  }
+}

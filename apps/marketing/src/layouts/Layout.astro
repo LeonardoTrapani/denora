@@ -1,0 +1,86 @@
+---
+import '../styles/global.css'
+
+interface Props {
+  title?: string
+  description?: string
+}
+
+const {
+  title = 'Executor — The gateway to connect your agent to everything',
+  description = 'One place every agent plugs into every tool you already use. Wire it up once, bring the whole team.'
+} = Astro.props
+
+const ogImage = new URL('/og-image.png', Astro.site ?? Astro.url).toString()
+const canonical = new URL(Astro.url.pathname, Astro.site ?? Astro.url).toString()
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="3800" />
+    <meta property="og:image:height" content="2360" />
+    <meta property="og:image:alt" content={title} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <title>{title}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  </head>
+  <body class="antialiased">
+    <slot />
+    <script>
+      // Gated PostHog init. Runs only when PUBLIC_POSTHOG_KEY is set in the
+      // deploy env, so it's a no-op in dev / unconfigured builds (and the SDK
+      // isn't even shipped, thanks to the dynamic import). Events are proxied
+      // first-party through src/middleware.ts to survive adblockers.
+      // autocapture and pageviews are off on purpose: we only send the explicit
+      // events the page fires (e.g. the "Set up with your agent" copy). Flip
+      // capture_pageview on if you want a denominator for conversion.
+      const phKey = import.meta.env.PUBLIC_POSTHOG_KEY;
+      if (phKey) {
+        // api_host rides the `/_astro` prefix that the cloud edge forwards to
+        // this worker on executor.sh; src/middleware.ts proxies it to PostHog.
+        const posthogReady = import("posthog-js").then(({ default: posthog }) => {
+          posthog.init(phKey, {
+            api_host: `${window.location.origin}/_astro/_ph`,
+            ui_host: import.meta.env.PUBLIC_POSTHOG_HOST ?? "https://us.posthog.com",
+            autocapture: false,
+            capture_pageview: false,
+            persistence: "localStorage",
+          });
+          return posthog;
+        });
+        // The copy handler (in index.astro) is a separate bundle, so it asks for
+        // a capture via a DOM event rather than reaching for a global. Attached
+        // synchronously so a click during PostHog's async load isn't missed; the
+        // capture waits on the init promise.
+        window.addEventListener("analytics:capture", (e) => {
+          const detail = (
+            e as CustomEvent<{
+              event: string;
+              properties?: Record<string, unknown>;
+            }>
+          ).detail;
+          void posthogReady.then((posthog) => posthog.capture(detail.event, detail.properties));
+        });
+      }
+    </script>
+  </body>
+</html>

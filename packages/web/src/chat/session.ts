@@ -139,8 +139,7 @@ export class Session {
     let conversationId = this.conversationId;
     try {
       if (conversationId === undefined) {
-        const conversation = await this.client.createConversation();
-        conversationId = conversation.id;
+        conversationId = makeConversationId();
         this.conversationId = conversationId;
         this.dormantFresh = false;
         this.dispatch({ type: "local_conversation_created", conversationId });
@@ -306,8 +305,14 @@ export class Session {
       if (!this.isCurrent(generation) || this.stream !== stream) return;
       this.reconnectOffset = delivered ? stream.offset : this.reconnectOffset;
       if (!delivered && isStatus(error, 404) && this.admittedOffset !== undefined) {
+        // Flue-style first prompts can return a pre-admission offset before the
+        // coordinator-created stream exists. Treat that initial 404 as a race,
+        // not a fatal missing conversation.
         this.reconnectOffset = this.admittedOffset;
-        await this.retry(toError(error), generation, "connect");
+        await this.retry(toError(error), generation, "connect", {
+          baseDelayMs: 50,
+          maxDelayMs: 1_000,
+        });
         return;
       }
       if (isFatal(error)) {
@@ -324,10 +329,16 @@ export class Session {
     error: Error,
     generation = this.generation,
     phase: "hydrate" | "connect" = "connect",
+    options: {
+      readonly baseDelayMs?: number | undefined;
+      readonly maxDelayMs?: number | undefined;
+    } = {},
   ): Promise<void> {
     if (!this.isCurrent(generation)) return;
     this.dispatch({ type: "local_connecting", error });
-    const delay = Math.min(1_000 * 2 ** this.reconnectAttempt++, 30_000);
+    const baseDelayMs = options.baseDelayMs ?? 1_000;
+    const maxDelayMs = options.maxDelayMs ?? 30_000;
+    const delay = Math.min(baseDelayMs * 2 ** this.reconnectAttempt++, maxDelayMs);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         this.reconnectWake = undefined;
@@ -420,6 +431,10 @@ function publicSnapshot(state: ChatState): ChatSnapshot {
     historyReady: state.historyReady,
     error: state.error,
   };
+}
+
+function makeConversationId(): string {
+  return `conversation_${crypto.randomUUID()}`;
 }
 
 function normalizeSendOptions(options: SendMessageOptions): SendMessageOptions | undefined {

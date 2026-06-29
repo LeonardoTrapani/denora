@@ -339,10 +339,11 @@ describe("Session", () => {
           admit = resolve;
         }),
     );
+    const createConversation = vi.fn().mockResolvedValue({ id: "conversation-new" });
     const onConversationCreated = vi.fn();
     const session = new Session({
       client: client({
-        createConversation: vi.fn().mockResolvedValue({ id: "conversation-new" }),
+        createConversation,
         submitMessage,
       }),
       onConversationCreated,
@@ -352,61 +353,62 @@ describe("Session", () => {
     const send = session.sendMessage("hello");
     await settle();
 
+    const createdConversationId = session.getSnapshot().conversationId;
+    expect(createdConversationId).toMatch(/^conversation_/);
     expect(session.getSnapshot()).toMatchObject({
-      conversationId: "conversation-new",
+      conversationId: createdConversationId,
       status: "submitted",
     });
-    expect(onConversationCreated).toHaveBeenCalledWith("conversation-new", session);
-    expect(submitMessage).toHaveBeenCalledWith("conversation-new", "hello");
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(onConversationCreated).toHaveBeenCalledWith(createdConversationId, session);
+    expect(submitMessage).toHaveBeenCalledWith(createdConversationId, "hello");
 
     admit({
-      conversationId: "conversation-new",
+      conversationId: createdConversationId ?? "missing-conversation-id",
       submissionId: "submission-new",
       offset: "offset-admitted",
     });
-    await expect(send).resolves.toEqual({ conversationId: "conversation-new" });
+    await expect(send).resolves.toEqual({ conversationId: createdConversationId });
     session.dispose();
   });
 
   it("aliases a new-conversation session before route reuse", async () => {
     const stream = vi.fn(() => pendingStream("offset-admitted"));
-    const createConversation = vi.fn().mockResolvedValue({ id: "conversation-new" });
-    const submitMessage = vi.fn().mockResolvedValue({
-      conversationId: "conversation-new",
+    const submitMessage = vi.fn(async (conversationId: string) => ({
+      conversationId,
       submissionId: "submission-new",
       offset: "offset-admitted",
-    });
+    }));
     const draft = retainConversationChatSession("__test-draft__", {
-      client: client({ createConversation, submitMessage, stream }),
+      client: client({ submitMessage, stream }),
     });
     draft.start();
 
     const result = await draft.sendMessage("hello");
-    const reused = retainConversationChatSession("conversation-new");
+    const reused = retainConversationChatSession(result.conversationId);
 
-    expect(result.conversationId).toBe("conversation-new");
+    expect(result.conversationId).toMatch(/^conversation_/);
     expect(reused).toBe(draft);
     expect(reused.getSnapshot().messages[0]?.parts).toEqual([
       { type: "text", text: "hello", state: "done" },
     ]);
 
-    releaseConversationChatSession("conversation-new", reused);
+    releaseConversationChatSession(result.conversationId, reused);
     releaseConversationChatSession("__test-draft__", draft);
   });
 
   it("detaches the draft alias as soon as the durable route retains it", async () => {
-    const createConversation = vi.fn().mockResolvedValue({ id: "conversation-new" });
-    const submitMessage = vi.fn().mockResolvedValue({
-      conversationId: "conversation-new",
+    const submitMessage = vi.fn(async (conversationId: string) => ({
+      conversationId,
       submissionId: "submission-new",
       offset: "offset-admitted",
-    });
+    }));
     const draft = retainConversationChatSession("__denora:draft-conversation__", {
-      client: client({ createConversation, submitMessage }),
+      client: client({ submitMessage }),
     });
     draft.start();
-    await draft.sendMessage("hello");
-    const durable = retainConversationChatSession("conversation-new");
+    const sent = await draft.sendMessage("hello");
+    const durable = retainConversationChatSession(sent.conversationId);
     const nextDraft = retainConversationChatSession("__denora:draft-conversation__", {
       client: client({}),
     });
@@ -415,24 +417,23 @@ describe("Session", () => {
     expect(nextDraft).not.toBe(draft);
     expect(nextDraft.getSnapshot().conversationId).toBeUndefined();
 
-    releaseConversationChatSession("conversation-new", durable);
+    releaseConversationChatSession(sent.conversationId, durable);
     releaseConversationChatSession("__denora:draft-conversation__", nextDraft);
   });
 
   it("drops the draft alias after a new conversation route retains the durable session", async () => {
     vi.useFakeTimers();
-    const createConversation = vi.fn().mockResolvedValue({ id: "conversation-new" });
-    const submitMessage = vi.fn().mockResolvedValue({
-      conversationId: "conversation-new",
+    const submitMessage = vi.fn(async (conversationId: string) => ({
+      conversationId,
       submissionId: "submission-new",
       offset: "offset-admitted",
-    });
+    }));
     const draft = retainConversationChatSession("__test-draft__", {
-      client: client({ createConversation, submitMessage }),
+      client: client({ submitMessage }),
     });
     draft.start();
-    await draft.sendMessage("hello");
-    const durable = retainConversationChatSession("conversation-new");
+    const sent = await draft.sendMessage("hello");
+    const durable = retainConversationChatSession(sent.conversationId);
 
     releaseConversationChatSession("__test-draft__", draft);
     await vi.advanceTimersByTimeAsync(251);
@@ -441,7 +442,7 @@ describe("Session", () => {
     expect(durable).toBe(draft);
     expect(nextDraft).not.toBe(draft);
 
-    releaseConversationChatSession("conversation-new", durable);
+    releaseConversationChatSession(sent.conversationId, durable);
     releaseConversationChatSession("__test-draft__", nextDraft);
   });
 });

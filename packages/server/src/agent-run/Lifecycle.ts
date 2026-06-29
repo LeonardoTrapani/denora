@@ -146,8 +146,11 @@ export const createConversationSubmission = Effect.fn(
   const streamPath = agentStreamPath(input.agentName, input.conversationId);
   const existing = yield* store.getStreamMeta(streamPath);
   const offset = existing?.nextOffset ?? "-1";
-  yield* store.createStream(streamPath);
 
+  // Flue-compatible attached-agent admission semantics: this returns the
+  // pre-submission replay cursor only. The stream is intentionally not created
+  // here, so a first GET may 404 until the coordinator claims the submission
+  // and creates the stream immediately before processing.
   return {
     runId: input.runId,
     conversationId: input.conversationId,
@@ -365,11 +368,12 @@ export const executeConversationSubmissionAttempt = Effect.fn(
   input: ExecuteConversationSubmissionAttemptInput,
 ): Effect.fn.Return<ExecuteRunAttemptResult, EventStreamError> {
   const streamPath = agentStreamPath(input.agentName, input.conversationId);
+  yield* store.createStream(streamPath);
   const meta = yield* store.getStreamMeta(streamPath);
   if (meta === null)
     return yield* new EventStorageFailed({
       operation: "execute agent conversation submission",
-      cause: new Error(`Agent conversation stream ${streamPath} does not exist.`),
+      cause: new Error(`Agent conversation stream ${streamPath} was not created.`),
     });
   if (meta.closed)
     return yield* new EventStorageFailed({

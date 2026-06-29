@@ -112,8 +112,8 @@ export const AgentConversationObjectLive = AgentConversationObject.make(
               }),
             submitMessage: (input: CreateConversationSubmissionInput) =>
               Effect.gen(function* () {
-                const admission = yield* coordinator.admitSubmission(input);
                 const created = yield* AgentRunLifecycle.createConversationSubmission(store, input);
+                const admission = yield* coordinator.admitSubmission(input);
                 if (created.created || admission.admitted)
                   yield* scheduleAgentRunReconcile(state, 0, "submission_admitted");
                 if (input.waitForResult) {

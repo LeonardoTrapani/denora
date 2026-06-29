@@ -1,4 +1,5 @@
 import type * as Cloudflare from "alchemy/Cloudflare";
+import { RuntimeContext } from "alchemy";
 import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -97,8 +98,11 @@ interface SegmentRow extends Record<string, Cloudflare.SqlStorageValue> {
 
 const storageFailure =
   (operation: string) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, StreamChunkStorageFailed, R> =>
-    effect.pipe(Effect.mapError((cause) => new StreamChunkStorageFailed({ operation, cause })));
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.mapError((cause) => new StreamChunkStorageFailed({ operation, cause })),
+      Effect.provide(RuntimeContext.phantom),
+    );
 
 export const makeSqliteStreamChunkStore = Effect.fn("StreamChunks.makeSqliteStreamChunkStore")(
   function* (

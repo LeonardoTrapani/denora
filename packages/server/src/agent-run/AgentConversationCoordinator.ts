@@ -1,4 +1,5 @@
 import type * as Cloudflare from "alchemy/Cloudflare";
+import { RuntimeContext } from "alchemy";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -2031,8 +2032,11 @@ const ensureColumn = (
 
 const storageFailure =
   (operation: string) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, EventStorageFailed, R> =>
-    effect.pipe(Effect.mapError((cause) => new EventStorageFailed({ operation, cause })));
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.mapError((cause) => new EventStorageFailed({ operation, cause })),
+      Effect.provide(RuntimeContext.phantom),
+    );
 
 const stringify = (value: unknown): Effect.Effect<string, EventSerializationFailed> =>
   Effect.try({

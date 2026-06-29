@@ -30,12 +30,12 @@
   },
   "dependencies": {
     "@denora/server": "workspace:*",
-    "@effect/platform-bun": "^4.0.0-beta.83",
-    "@effect/platform-node": "^4.0.0-beta.83",
-    "@effect/sql-pg": "^4.0.0-beta.83",
-    "alchemy": "2.0.0-beta.57",
+    "@effect/platform-bun": "^4.0.0-beta.84",
+    "@effect/platform-node": "^4.0.0-beta.84",
+    "@effect/sql-pg": "^4.0.0-beta.84",
+    "alchemy": "2.0.0-beta.59",
     "drizzle-orm": "1.0.0-rc.1",
-    "effect": "^4.0.0-beta.83",
+    "effect": "^4.0.0-beta.84",
     "pg": "^8.13.0"
   },
   "devDependencies": {

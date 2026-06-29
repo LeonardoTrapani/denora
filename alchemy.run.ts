@@ -234,7 +234,7 @@ export default Alchemy.Stack(
     const zone = yield* Option.match(deployment, {
       onNone: () => Effect.void,
       onSome: () =>
-        Cloudflare.Zone("denora-zone", { name: RootDomain }).pipe(AdoptPolicy.adopt(true)),
+        Cloudflare.Zone.Zone("denora-zone", { name: RootDomain }).pipe(AdoptPolicy.adopt(true)),
     });
 
     const { branch } = yield* AlchemyDb.DenoraDb;
@@ -281,7 +281,7 @@ export default Alchemy.Stack(
       }),
     });
 
-    const web = yield* Cloudflare.Vite("Web", webProps);
+    const web = yield* Cloudflare.Website.Vite("Web", webProps);
     const domains = Option.getOrUndefined(deployment);
 
     return {

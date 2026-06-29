@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { LlmUserMessage } from "./RunEventContract.ts";
 import type * as Cloudflare from "alchemy/Cloudflare";
+import { RuntimeContext } from "alchemy";
 import type { StreamChunks } from "./StreamChunks.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -989,8 +990,11 @@ const parseRole = (role: string): MessageRecord["role"] => {
 
 const storageFailure =
   (operation: string) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, EventStorageFailed, R> =>
-    effect.pipe(Effect.mapError((cause) => new EventStorageFailed({ operation, cause })));
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.mapError((cause) => new EventStorageFailed({ operation, cause })),
+      Effect.provide(RuntimeContext.phantom),
+    );
 
 const stringify = (value: unknown): Effect.Effect<string, EventStorageFailed> =>
   Effect.try({

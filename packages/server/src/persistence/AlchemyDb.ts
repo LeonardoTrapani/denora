@@ -28,7 +28,7 @@ export const DenoraDb = Effect.gen(function* () {
 export const DenoraHyperdrive = Effect.gen(function* () {
   const { branch } = yield* DenoraDb;
 
-  return yield* Cloudflare.Hyperdrive("denora-hyperdrive", {
+  return yield* Cloudflare.Hyperdrive.Connection("denora-hyperdrive", {
     origin: branch.origin,
   });
 });

@@ -81,6 +81,7 @@ import type { UseConversationChatResult } from "./useConversationChat.ts";
 
 export interface Props {
   readonly chat: UseConversationChatResult;
+  readonly expectedConversationId?: string | undefined;
   readonly title?: string | null | undefined;
   readonly displayName?: string | null | undefined;
 }
@@ -93,7 +94,7 @@ interface SelectedImage {
   readonly url: string;
 }
 
-export function View({ chat, title, displayName }: Props) {
+export function View({ chat, expectedConversationId, title, displayName }: Props) {
   const catalog = useAiCatalog();
   const defaultModelId = catalog?.defaultModelId ?? "openrouter/openai/gpt-5.5";
   const defaultThinkingLevel = catalog?.defaultThinkingLevel ?? "medium";
@@ -104,8 +105,12 @@ export function View({ chat, title, displayName }: Props) {
   const [sendPending, setSendPending] = useState(false);
   const [sendError, setSendError] = useState<Error | undefined>(undefined);
   const refreshConversations = useAtomSet(loadConversationsAtom, { mode: "promise" });
-  const showHistorySkeleton = !chat.historyReady && chat.messages.length === 0;
-  const isEmptyChat = chat.historyReady && chat.messages.length === 0;
+  const loadingExpectedConversation =
+    expectedConversationId !== undefined && chat.conversationId !== expectedConversationId;
+  const showHistorySkeleton =
+    loadingExpectedConversation || (!chat.historyReady && chat.messages.length === 0);
+  const isEmptyChat =
+    !loadingExpectedConversation && chat.historyReady && chat.messages.length === 0;
   const error = sendError ?? chat.error;
   const model = useMemo(() => findModel(catalog, modelId), [catalog, modelId]);
   const thinkingLevels = useMemo(
@@ -117,7 +122,10 @@ export function View({ chat, title, displayName }: Props) {
     ? thinkingLevel
     : (thinkingLevels.find((level) => level.default)?.id ?? thinkingLevels[0]?.id ?? "off");
   const effectiveThinkingLevel = canThink ? selectedThinkingLevel : "off";
-  const canSend = (composerText.trim().length > 0 || images.length > 0) && !sendPending;
+  const canSend =
+    (composerText.trim().length > 0 || images.length > 0) &&
+    !sendPending &&
+    !loadingExpectedConversation;
   const displayFirstName = firstName(displayName);
   const heroTitle =
     displayFirstName === undefined
@@ -130,7 +138,13 @@ export function View({ chat, title, displayName }: Props) {
   const send = (event: FormEvent) => {
     event.preventDefault();
     const message = composerText.trim();
-    if ((message.length === 0 && images.length === 0) || sendPending) return;
+    if (
+      (message.length === 0 && images.length === 0) ||
+      sendPending ||
+      loadingExpectedConversation
+    ) {
+      return;
+    }
     const submittedImages = images;
     setComposerText("");
     setImages([]);
@@ -161,7 +175,7 @@ export function View({ chat, title, displayName }: Props) {
       model={model}
       modelId={modelId}
       providers={catalogProviders(catalog)}
-      sendPending={sendPending}
+      sendPending={sendPending || loadingExpectedConversation}
       thinkingLevel={effectiveThinkingLevel}
       thinkingLevels={thinkingLevels}
       variant={isEmptyChat ? "hero" : "dock"}
@@ -178,7 +192,10 @@ export function View({ chat, title, displayName }: Props) {
       <header className="flex h-14 shrink-0 items-center gap-2 border-b border-border/40 bg-background/75 px-4 backdrop-blur-xl">
         <SidebarTrigger />
         <h1 className="truncate text-sm font-medium text-foreground/80">{title ?? "New chat"}</h1>
-        <ChatStatus status={chat.status} historyReady={chat.historyReady} />
+        <ChatStatus
+          status={chat.status}
+          historyReady={!loadingExpectedConversation && chat.historyReady}
+        />
       </header>
 
       <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -204,7 +221,11 @@ export function View({ chat, title, displayName }: Props) {
               <MessageScroller className="flex-1">
                 <MessageScrollerViewport>
                   <MessageScrollerContent
-                    aria-busy={chat.status === "streaming" || !chat.historyReady}
+                    aria-busy={
+                      chat.status === "streaming" ||
+                      !chat.historyReady ||
+                      loadingExpectedConversation
+                    }
                     className="mx-auto w-full max-w-3xl gap-8 px-4 py-6"
                   >
                     {showHistorySkeleton ? (

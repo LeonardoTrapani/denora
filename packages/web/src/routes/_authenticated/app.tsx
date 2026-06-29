@@ -16,7 +16,7 @@ import {
 } from "@denora/ui/components/sidebar";
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import { IconDots, IconPencilPlus, IconSearch } from "@tabler/icons-react";
-import { Link, Outlet, createFileRoute, useMatchRoute, useNavigate } from "@tanstack/react-router";
+import { Link, Outlet, createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 import * as Effect from "effect/Effect";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
@@ -55,10 +55,9 @@ function AppLayout() {
   const loaderConversations = Route.useLoaderData();
   const { auth } = Route.useRouteContext();
   const navigate = useNavigate();
-  const matchRoute = useMatchRoute();
-  const conversationMatch = matchRoute({ to: "/app/conversations/$conversationId" });
-  const routeConversationId =
-    conversationMatch === false ? undefined : conversationMatch.conversationId;
+  const routeConversationId = useRouterState({
+    select: (state) => conversationIdFromPathname(state.location.pathname),
+  });
   const [signOutResult, signOut] = useAtom(signOutAtom, { mode: "promise" });
   const refreshedConversations = useAtomValue(loadConversationsAtom);
   const conversations = AsyncResult.isSuccess(refreshedConversations)
@@ -77,7 +76,7 @@ function AppLayout() {
   );
   const chat = useLayoutConversationChat({
     routeConversationId,
-    history: 100,
+    history: "all",
     onConversationReady: handleConversationReady,
   });
   const activeConversationId = routeConversationId ?? chat.conversationId;
@@ -187,6 +186,7 @@ function AppLayout() {
         <ConversationView.View
           chat={chat}
           displayName={auth.user.name}
+          expectedConversationId={routeConversationId}
           title={activeConversation?.title}
         />
         <Outlet />
@@ -200,6 +200,20 @@ function AppLayout() {
       />
     </SidebarProvider>
   );
+}
+
+function conversationIdFromPathname(pathname: string): string | undefined {
+  const prefix = "/app/conversations/";
+  if (!pathname.startsWith(prefix)) return undefined;
+
+  const segment = pathname.slice(prefix.length).split("/", 1)[0];
+  if (segment === undefined || segment.length === 0) return undefined;
+
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 function ConversationItem({

@@ -33,16 +33,19 @@ const deployedStages = {
 
 type Deployment = (typeof deployedStages)[keyof typeof deployedStages];
 
-interface ObservabilityDeployment {
-  readonly logsDataset: unknown;
-  readonly logsDestinationName: string;
-  readonly logsEndpoint: unknown;
-  readonly metricsDataset: unknown;
-  readonly metricsEndpoint: unknown;
-  readonly token: unknown;
-  readonly tracesDataset: unknown;
-  readonly tracesDestinationName: string;
-  readonly tracesEndpoint: unknown;
+interface AxiomOtelDeployment {
+  readonly logsDataset: Output.Output<string>;
+  readonly logsEndpoint: Output.Output<string>;
+  readonly metricsDataset: Output.Output<string>;
+  readonly metricsEndpoint: Output.Output<string>;
+  readonly token: Output.Output<Redacted.Redacted<string>>;
+  readonly tracesDataset: Output.Output<string>;
+  readonly tracesEndpoint: Output.Output<string>;
+}
+
+interface ObservabilityDeployment extends AxiomOtelDeployment {
+  readonly logsDestinationName?: string | undefined;
+  readonly tracesDestinationName?: string | undefined;
 }
 
 const deploymentForStage = (stage: string) =>
@@ -122,14 +125,12 @@ const dashboardFor = (
   });
 };
 
-const observabilityForStage = (stage: string) =>
+const axiomOtelForStage = (stage: string) =>
   Effect.gen(function* () {
     const prefix = `denora-${stage}`;
     const logsName = ObservabilityDatasets.logs;
     const metricsName = ObservabilityDatasets.metrics;
     const tracesName = ObservabilityDatasets.traces;
-    const logsDestinationName = `${prefix}-cloudflare-logs-to-axiom`;
-    const tracesDestinationName = `${prefix}-cloudflare-traces-to-axiom`;
     const logs = yield* Axiom.Dataset("AxiomLogs", {
       name: logsName,
       kind: "otel:logs:v1",
@@ -162,26 +163,50 @@ const observabilityForStage = (stage: string) =>
         })),
       ),
     });
-    const axiomAuthorizationHeader = ingestToken.token.pipe(
-      Output.map((token) => `Bearer ${Redacted.value(token)}`),
+
+    yield* dashboardFor(stage, {
+      logs: logsName,
+      metrics: metricsName,
+      traces: tracesName,
+    });
+
+    return {
+      logsDataset: logs.name,
+      logsEndpoint: logs.otelLogsEndpoint,
+      metricsDataset: metrics.name,
+      metricsEndpoint: metrics.otelMetricsEndpoint,
+      token: ingestToken.token,
+      tracesDataset: traces.name,
+      tracesEndpoint: traces.otelTracesEndpoint,
+    } satisfies AxiomOtelDeployment;
+  });
+
+const cloudflareObservabilityForStage = (stage: string, axiom: AxiomOtelDeployment) =>
+  Effect.gen(function* () {
+    const prefix = `denora-${stage}`;
+    const logsDestinationName = `${prefix}-cloudflare-logs-to-axiom`;
+    const tracesDestinationName = `${prefix}-cloudflare-traces-to-axiom`;
+    const axiomAuthorizationHeader = Output.map(
+      axiom.token,
+      (token) => `Bearer ${Redacted.value(token)}`,
     );
 
     yield* Cloudflare.ObservabilityDestination("CloudflareTracesToAxiom", {
       name: tracesDestinationName,
-      url: traces.otelTracesEndpoint,
+      url: axiom.tracesEndpoint,
       headers: {
         authorization: axiomAuthorizationHeader,
-        "x-axiom-dataset": traces.name,
+        "x-axiom-dataset": axiom.tracesDataset,
       },
       logpushDataset: "opentelemetry-traces",
       skipPreflightCheck: true,
     });
     yield* Cloudflare.ObservabilityDestination("CloudflareLogsToAxiom", {
       name: logsDestinationName,
-      url: logs.otelLogsEndpoint,
+      url: axiom.logsEndpoint,
       headers: {
         authorization: axiomAuthorizationHeader,
-        "x-axiom-dataset": logs.name,
+        "x-axiom-dataset": axiom.logsDataset,
       },
       logpushDataset: "opentelemetry-logs",
       skipPreflightCheck: true,
@@ -192,30 +217,19 @@ const observabilityForStage = (stage: string) =>
     // docs also say metrics export is not yet supported.
     // yield* Cloudflare.ObservabilityDestination("CloudflareMetricsToAxiom", {
     //   name: `${prefix}-cloudflare-metrics-to-axiom`,
-    //   url: metrics.otelMetricsEndpoint,
+    //   url: axiom.metricsEndpoint,
     //   headers: {
     //     authorization: axiomAuthorizationHeader,
-    //     "x-axiom-dataset": metrics.name,
+    //     "x-axiom-dataset": axiom.metricsDataset,
     //   },
     //   logpushDataset: "opentelemetry-metrics",
     //   skipPreflightCheck: true,
     // });
-    yield* dashboardFor(stage, {
-      logs: logsName,
-      metrics: metricsName,
-      traces: tracesName,
-    });
 
     return {
-      logsDataset: logs.name,
+      ...axiom,
       logsDestinationName,
-      logsEndpoint: logs.otelLogsEndpoint,
-      metricsDataset: metrics.name,
-      metricsEndpoint: metrics.otelMetricsEndpoint,
-      token: ingestToken.token,
-      tracesDataset: traces.name,
       tracesDestinationName,
-      tracesEndpoint: traces.otelTracesEndpoint,
     } satisfies ObservabilityDeployment;
   });
 
@@ -239,14 +253,14 @@ export default Alchemy.Stack(
 
     const { branch } = yield* AlchemyDb.DenoraDb;
     const hyperdrive = yield* AlchemyDb.DenoraHyperdrive;
-    const observability = yield* Option.match(deployment, {
-      onNone: () => Effect.void,
-      onSome: () => observabilityForStage(stage),
-    });
+    const axiomOtel = yield* axiomOtelForStage(stage);
+    const observability = Option.isSome(deployment)
+      ? yield* cloudflareObservabilityForStage(stage, axiomOtel)
+      : axiomOtel;
 
     const deploymentConfig = Option.match(deployment, {
-      onNone: () => ({}),
-      onSome: ({ apiDomain, webDomain }) => ({ apiDomain, observability, webDomain }),
+      onNone: () => ({ observability, stage }),
+      onSome: ({ apiDomain, webDomain }) => ({ apiDomain, observability, stage, webDomain }),
     });
     const server = yield* ServerResource.Resource.pipe(
       Effect.provide(ServerResourceLive),

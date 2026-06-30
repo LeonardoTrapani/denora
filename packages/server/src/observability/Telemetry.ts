@@ -12,12 +12,16 @@ import * as OtlpTracer from "effect/unstable/observability/OtlpTracer";
 const optionalString = (name: string) => Config.option(Config.string(name));
 
 const load = Config.all({
+  gitBranch: optionalString("DENORA_GIT_BRANCH"),
+  gitSha: optionalString("DENORA_GIT_SHA"),
   logsDataset: optionalString("AXIOM_OTEL_LOGS_DATASET"),
   logsEndpoint: optionalString("AXIOM_OTEL_LOGS_ENDPOINT"),
   metricsDataset: optionalString("AXIOM_OTEL_METRICS_DATASET"),
   metricsEndpoint: optionalString("AXIOM_OTEL_METRICS_ENDPOINT"),
+  serviceInstanceId: optionalString("DENORA_SERVICE_INSTANCE_ID"),
   serviceVersion: Config.string("DENORA_SERVICE_VERSION").pipe(Config.withDefault("0.0.0")),
   stage: Config.string("ALCHEMY_STAGE").pipe(Config.withDefault("local")),
+  telemetrySource: optionalString("DENORA_TELEMETRY_SOURCE"),
   token: Config.option(Config.redacted("AXIOM_INGEST_TOKEN")),
   tracesDataset: optionalString("AXIOM_OTEL_TRACES_DATASET"),
   tracesEndpoint: optionalString("AXIOM_OTEL_TRACES_ENDPOINT"),
@@ -27,6 +31,18 @@ const headers = (token: Redacted.Redacted<string>, dataset: string) => ({
   authorization: `Bearer ${Redacted.value(token)}`,
   "x-axiom-dataset": dataset,
 });
+
+const defaultTelemetrySource = (stage: string): string =>
+  stage === "local" ? "local-dev" : "cloudflare-worker";
+
+const addAttribute = (
+  attributes: Record<string, string>,
+  key: string,
+  value: Option.Option<string>,
+): void => {
+  const resolved = Option.getOrUndefined(value);
+  if (resolved !== undefined && resolved.length > 0) attributes[key] = resolved;
+};
 
 export const layer: Layer.Layer<never, never, never> = Layer.unwrap(
   Effect.gen(function* () {
@@ -51,14 +67,23 @@ export const layer: Layer.Layer<never, never, never> = Layer.unwrap(
       return Layer.empty;
     }
 
+    const attributes: Record<string, string> = {
+      "alchemy.stage": config.stage,
+      "cloud.provider": "cloudflare",
+      "deployment.environment": config.stage,
+      "denora.telemetry.source": Option.getOrElse(config.telemetrySource, () =>
+        defaultTelemetrySource(config.stage),
+      ),
+    };
+
+    addAttribute(attributes, "denora.git.branch", config.gitBranch);
+    addAttribute(attributes, "denora.git.sha", config.gitSha);
+    addAttribute(attributes, "service.instance.id", config.serviceInstanceId);
+
     const resource = {
       serviceName: "denora-server",
       serviceVersion: config.serviceVersion,
-      attributes: {
-        "alchemy.stage": config.stage,
-        "cloud.provider": "cloudflare",
-        "deployment.environment": config.stage,
-      },
+      attributes,
     };
 
     return Layer.mergeAll(

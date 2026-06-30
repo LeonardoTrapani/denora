@@ -1,5 +1,6 @@
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Drizzle from "alchemy/Drizzle";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Etag from "effect/unstable/http/Etag";
@@ -23,21 +24,25 @@ import { Telemetry } from "../observability/Telemetry.ts";
 import { AlchemyDb } from "../persistence/AlchemyDb.ts";
 import { Db } from "../persistence/Db.ts";
 
-export interface ObservabilityConfig {
+export interface AxiomOtelConfig {
   readonly logsDataset: unknown;
-  readonly logsDestinationName: string;
   readonly logsEndpoint: unknown;
   readonly metricsDataset: unknown;
   readonly metricsEndpoint: unknown;
   readonly token: unknown;
   readonly tracesDataset: unknown;
-  readonly tracesDestinationName: string;
   readonly tracesEndpoint: unknown;
+}
+
+export interface ObservabilityConfig extends AxiomOtelConfig {
+  readonly logsDestinationName?: string | undefined;
+  readonly tracesDestinationName?: string | undefined;
 }
 
 export interface DeploymentConfig {
   readonly apiDomain?: string | undefined;
   readonly observability?: ObservabilityConfig | undefined;
+  readonly stage?: string | undefined;
   readonly webDomain?: string | undefined;
 }
 
@@ -50,10 +55,42 @@ export const Deployment = Context.Reference<DeploymentConfig>(
 
 const origin = (domain: string) => `https://${domain}`;
 
+const optionalString = (name: string) => Config.option(Config.string(name));
+
+const telemetryEnv = Config.all({
+  gitBranch: optionalString("DENORA_GIT_BRANCH"),
+  gitSha: optionalString("DENORA_GIT_SHA"),
+  serviceInstanceId: optionalString("DENORA_SERVICE_INSTANCE_ID"),
+  serviceVersion: optionalString("DENORA_SERVICE_VERSION"),
+  telemetrySource: optionalString("DENORA_TELEMETRY_SOURCE"),
+});
+
+const bindOptionalEnv = (
+  env: Record<string, unknown>,
+  name: string,
+  value: Option.Option<string>,
+): void => {
+  const resolved = Option.getOrUndefined(value);
+  if (resolved !== undefined && resolved.length > 0) env[name] = resolved;
+};
+
+const bindAxiomEnv = (env: Record<string, unknown>, observability: AxiomOtelConfig): void => {
+  env.AXIOM_INGEST_TOKEN = observability.token;
+  env.AXIOM_OTEL_LOGS_DATASET = observability.logsDataset;
+  env.AXIOM_OTEL_LOGS_ENDPOINT = observability.logsEndpoint;
+  env.AXIOM_OTEL_METRICS_DATASET = observability.metricsDataset;
+  env.AXIOM_OTEL_METRICS_ENDPOINT = observability.metricsEndpoint;
+  env.AXIOM_OTEL_TRACES_DATASET = observability.tracesDataset;
+  env.AXIOM_OTEL_TRACES_ENDPOINT = observability.tracesEndpoint;
+};
+
 const props = Effect.gen(function* () {
   const deployment = yield* Deployment;
   const observability = deployment.observability;
-  const env: Record<string, unknown> = {};
+  const stage = deployment.stage ?? "local";
+  const env: Record<string, unknown> = {
+    ALCHEMY_STAGE: stage,
+  };
 
   if (deployment.apiDomain !== undefined) {
     env.WORKOS_REDIRECT_BASE_URL = origin(deployment.apiDomain);
@@ -64,15 +101,22 @@ const props = Effect.gen(function* () {
     env.DENORA_WEB_ORIGINS = origin(deployment.webDomain);
   }
 
+  const telemetry = yield* telemetryEnv;
+
+  env.DENORA_TELEMETRY_SOURCE = Option.getOrElse(telemetry.telemetrySource, () =>
+    stage === "local" ? "local-dev" : "cloudflare-worker",
+  );
+  bindOptionalEnv(env, "DENORA_GIT_BRANCH", telemetry.gitBranch);
+  bindOptionalEnv(env, "DENORA_GIT_SHA", telemetry.gitSha);
+  bindOptionalEnv(env, "DENORA_SERVICE_INSTANCE_ID", telemetry.serviceInstanceId);
+  bindOptionalEnv(env, "DENORA_SERVICE_VERSION", telemetry.serviceVersion);
+
   if (observability !== undefined) {
-    env.AXIOM_INGEST_TOKEN = observability.token;
-    env.AXIOM_OTEL_LOGS_DATASET = observability.logsDataset;
-    env.AXIOM_OTEL_LOGS_ENDPOINT = observability.logsEndpoint;
-    env.AXIOM_OTEL_METRICS_DATASET = observability.metricsDataset;
-    env.AXIOM_OTEL_METRICS_ENDPOINT = observability.metricsEndpoint;
-    env.AXIOM_OTEL_TRACES_DATASET = observability.tracesDataset;
-    env.AXIOM_OTEL_TRACES_ENDPOINT = observability.tracesEndpoint;
+    bindAxiomEnv(env, observability);
   }
+
+  const cloudflareLogsDestination = observability?.logsDestinationName;
+  const cloudflareTracesDestination = observability?.tracesDestinationName;
 
   const baseProps = {
     main: import.meta.filename,
@@ -84,24 +128,24 @@ const props = Effect.gen(function* () {
       strictPort: true,
     },
     env,
-    logpush: observability !== undefined,
+    logpush: cloudflareLogsDestination !== undefined || cloudflareTracesDestination !== undefined,
     observability: {
       enabled: true,
       headSamplingRate: 1,
       logs: {
         enabled: true,
-        ...(observability === undefined
+        ...(cloudflareLogsDestination === undefined
           ? {}
-          : { destinations: [observability.logsDestinationName] }),
+          : { destinations: [cloudflareLogsDestination] }),
         invocationLogs: true,
         headSamplingRate: 1,
         persist: true,
       },
       traces: {
         enabled: true,
-        ...(observability === undefined
+        ...(cloudflareTracesDestination === undefined
           ? {}
-          : { destinations: [observability.tracesDestinationName] }),
+          : { destinations: [cloudflareTracesDestination] }),
         headSamplingRate: 1,
         persist: true,
       },

@@ -1,4 +1,7 @@
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as HttpMiddleware from "effect/unstable/http/HttpMiddleware";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { Authorization } from "../auth/Authorization.ts";
 import { Api } from "./Api.ts";
@@ -29,6 +32,13 @@ const protectedLayer = Layer.mergeAll(
   AgentRoutes.routes,
 ).pipe(Layer.provide(Authorization.layer));
 
-export const layer = Layer.mergeAll(protectedLayer, AuthRoutes.routes);
+const observabilityLayer = HttpRouter.use((router) =>
+  Effect.gen(function* () {
+    yield* router.addGlobalMiddleware(HttpMiddleware.tracer);
+    yield* router.addGlobalMiddleware(HttpMiddleware.logger);
+  }),
+);
+
+export const layer = Layer.mergeAll(protectedLayer, AuthRoutes.routes, observabilityLayer);
 
 export * as Routes from "./Routes.ts";

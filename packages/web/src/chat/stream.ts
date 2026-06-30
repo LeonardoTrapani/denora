@@ -81,7 +81,7 @@ export function createConversationEventStream(
     wake();
   };
   const connect = () => {
-    const fetch = options.fetch ?? fetchWithCredentials;
+    const fetch = withFetchPreconnect(options.fetch ?? fetchWithCredentials);
     const streamOptions = {
       url: url.toString(),
       offset: connectOffset,
@@ -251,12 +251,22 @@ const conversationEventsUrl = (conversationId: string, configuredBaseUrl?: strin
   return new URL(`/conversations/${encodeURIComponent(conversationId)}/events`, `${baseUrl}/`);
 };
 
-const fetchWithCredentials = async (
-  ...[input, init]: Parameters<typeof globalThis.fetch>
-): Promise<Response> => {
+const fetchWithCredentials: StreamFetch = async (...[input, init]) => {
   const headers = await Auth.withAuthForwardingHeaders(init?.headers);
   return fetch(input, { ...init, headers, credentials: "include" });
 };
+
+const withFetchPreconnect = (client: StreamFetch): typeof globalThis.fetch =>
+  Object.assign((...args: Parameters<typeof globalThis.fetch>) => client(...args), {
+    preconnect: (...args: Parameters<typeof globalThis.fetch.preconnect>) => {
+      const preconnect = (
+        globalThis.fetch as typeof globalThis.fetch & {
+          readonly preconnect?: typeof globalThis.fetch.preconnect;
+        }
+      ).preconnect;
+      preconnect?.(...args);
+    },
+  });
 
 const linkAbortSignal = (
   signal: AbortSignal | undefined,

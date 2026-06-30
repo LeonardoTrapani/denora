@@ -14,6 +14,7 @@ import {
 import { AgentRunPersistence } from "../agent-run/AgentRunPersistence.ts";
 import { AgentRuns } from "../agent-run/AgentRuns.ts";
 import { AuthLive } from "../auth/Live.ts";
+import { CloudflareDynamicWorkerSandbox } from "../code-sandbox/CloudflareDynamicWorkerSandbox.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
 import { ConversationPersistence } from "../conversation/ConversationPersistence.ts";
 import { Conversations } from "../conversation/Conversations.ts";
@@ -147,6 +148,12 @@ export default Resource.make(
     const hyperdrive = yield* Cloudflare.Hyperdrive.Connect(hyperdriveConnection);
     const db = yield* Drizzle.postgres(hyperdrive.connectionString);
     const conversationObjects = yield* AgentConversationObject;
+    const codeWorkerLoader = yield* Cloudflare.WorkerLoader("CODE_WORKER_LOADER");
+    const codeSandboxDispatcherFactory = yield* Effect.promise(() =>
+      import("../code-sandbox/CloudflareRpcToolDispatcher.ts")
+        .then((module) => module.CloudflareRpcToolDispatcher.dispatcherFactory)
+        .catch(() => undefined),
+    );
 
     return {
       fetch: Routes.layer.pipe(
@@ -155,6 +162,14 @@ export default Resource.make(
         Layer.provide(AgentRunPersistence.layer),
         Layer.provide(ConversationPersistence.layer),
         Layer.provide(Db.layer(db)),
+        Layer.provide(
+          CloudflareDynamicWorkerSandbox.layer({
+            loader: codeWorkerLoader,
+            ...(codeSandboxDispatcherFactory === undefined
+              ? {}
+              : { dispatcherFactory: codeSandboxDispatcherFactory }),
+          }),
+        ),
         Layer.provide(AuthLive.layerFromConfig),
         Layer.provide([HttpPlatform.layer, Etag.layer]),
         Layer.provide(corsLayer),

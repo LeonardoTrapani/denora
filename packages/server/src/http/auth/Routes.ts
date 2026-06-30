@@ -16,24 +16,10 @@ export const routes = HttpRouter.use((router) =>
 
     yield* router.add("*", `${authBasePath}/*`, (request) =>
       Effect.gen(function* () {
-        const startedAt = Date.now();
-        const requestPath = requestPathname(request);
-        yield* Effect.logInfo("auth request started", {
-          method: request.method,
-          path: requestPath,
-        });
-
         const webRequest = yield* HttpServerRequest.toWeb(request);
         const webResponse = yield* auth.handle(webRequest);
         yield* Effect.annotateCurrentSpan({
           "http.response.status_code": webResponse.status,
-        });
-
-        yield* Effect.logInfo("auth request finished", {
-          durationMs: Date.now() - startedAt,
-          method: request.method,
-          status: webResponse.status,
-          path: requestPath,
         });
 
         return HttpServerResponse.fromWeb(webResponse);

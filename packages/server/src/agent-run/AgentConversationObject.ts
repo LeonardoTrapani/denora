@@ -2,11 +2,13 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import { RuntimeContext } from "alchemy";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as HttpMiddleware from "effect/unstable/http/HttpMiddleware";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { PiAgentProvider } from "../agent-loop/PiAgentProvider.ts";
 import { PiRuntime } from "../agent-loop/PiRuntime.ts";
 import { ServerConfig } from "../config/ServerConfig.ts";
+import { Telemetry } from "../observability/Telemetry.ts";
 import { type EventStreamError, EventStorageFailed, EventStreamStore } from "./EventStreamStore.ts";
 import { AgentConversationSessionStore } from "./AgentConversationSessionStore.ts";
 import {
@@ -67,7 +69,7 @@ export const AgentConversationObjectLive = AgentConversationObject.make<never>(
       Layer.provide(SqlStorage.layer(state.storage.sql)),
       Layer.orDie,
     );
-    const objectLayer = Layer.merge(piLayer, persistenceLayer);
+    const objectLayer = Layer.mergeAll(piLayer, persistenceLayer, Telemetry.layer);
 
     return yield* Effect.succeed(
       Effect.gen(function* () {
@@ -76,8 +78,17 @@ export const AgentConversationObjectLive = AgentConversationObject.make<never>(
         const coordinator = yield* AgentConversationCoordinator.Service;
 
         return {
-          createRun: (input: CreateRunInput) =>
-            AgentRunLifecycle.startRun(store, {
+          createRun: Effect.fn("AgentConversationObject.createRun")(function* (
+            input: CreateRunInput,
+          ) {
+            yield* Effect.annotateCurrentSpan({ "denora.agent_run.id": input.runId });
+            if (input.conversationId !== undefined) {
+              yield* Effect.annotateCurrentSpan({
+                "denora.conversation.id": input.conversationId,
+              });
+            }
+
+            return yield* AgentRunLifecycle.startRun(store, {
               ...input,
               scheduleExecution: (runId) =>
                 AgentRunLifecycle.executeRun(store, { ...input, runId, pi }).pipe(
@@ -87,19 +98,26 @@ export const AgentConversationObjectLive = AgentConversationObject.make<never>(
                   Effect.forkDetach({ startImmediately: true }),
                   Effect.asVoid,
                 ),
-            }),
-          abortConversation: (input?: { readonly reason?: string | undefined }) =>
-            Effect.gen(function* () {
+            });
+          }),
+          abortConversation: Effect.fn("AgentConversationObject.abortConversation")(
+            function* (input?: { readonly reason?: string | undefined }) {
               const result = yield* coordinator.abortConversation(input);
               if (result.needsWake)
                 yield* scheduleAgentRunReconcile(state, result.wakeDelayMs, "abort_conversation");
               return result;
-            }),
-          setConversationLifecycle: (input: {
-            readonly conversationId: string;
-            readonly status: ConversationLifecycleState;
-          }) =>
-            Effect.gen(function* () {
+            },
+          ),
+          setConversationLifecycle: Effect.fn("AgentConversationObject.setConversationLifecycle")(
+            function* (input: {
+              readonly conversationId: string;
+              readonly status: ConversationLifecycleState;
+            }) {
+              yield* Effect.annotateCurrentSpan({
+                "denora.conversation.id": input.conversationId,
+                "denora.conversation.status": input.status,
+              });
+
               const result = yield* coordinator.setConversationLifecycle(input);
               if (result.needsWake)
                 yield* scheduleAgentRunReconcile(
@@ -108,34 +126,42 @@ export const AgentConversationObjectLive = AgentConversationObject.make<never>(
                   "conversation_lifecycle",
                 );
               return result;
-            }),
-          submitMessage: (input: CreateConversationSubmissionInput) =>
-            Effect.gen(function* () {
-              const created = yield* AgentRunLifecycle.createConversationSubmission(store, input);
-              const admission = yield* coordinator.admitSubmission(input);
-              if (created.created || admission.admitted)
-                yield* scheduleAgentRunReconcile(state, 0, "submission_admitted");
-              if (input.waitForResult) {
-                const result = yield* waitForSubmissionResult(
-                  input.submissionId,
-                  coordinator,
-                  pi,
-                  (delayMs) => scheduleAgentRunReconcile(state, delayMs, "wait_for_result"),
-                );
-                return { ...created, result };
-              }
-              return created;
-            }),
-          alarm: () =>
-            Effect.gen(function* () {
-              const fired = yield* Cloudflare.processScheduledEvents.pipe(
-                Effect.provideService(Cloudflare.DurableObjectState, state),
-                Effect.provide(RuntimeContext.phantom),
+            },
+          ),
+          submitMessage: Effect.fn("AgentConversationObject.submitMessage")(function* (
+            input: CreateConversationSubmissionInput,
+          ) {
+            yield* Effect.annotateCurrentSpan({
+              "denora.agent.name": input.agentName,
+              "denora.agent_run.id": input.runId,
+              "denora.conversation.id": input.conversationId,
+              "denora.submission.id": input.submissionId,
+            });
+
+            const created = yield* AgentRunLifecycle.createConversationSubmission(store, input);
+            const admission = yield* coordinator.admitSubmission(input);
+            if (created.created || admission.admitted)
+              yield* scheduleAgentRunReconcile(state, 0, "submission_admitted");
+            if (input.waitForResult) {
+              const result = yield* waitForSubmissionResult(
+                input.submissionId,
+                coordinator,
+                pi,
+                (delayMs) => scheduleAgentRunReconcile(state, delayMs, "wait_for_result"),
               );
-              if (fired.some((event) => event.id === AGENT_RUN_RECONCILE_EVENT_ID)) {
-                yield* reconcileAgentConversation(state, coordinator, pi);
-              }
-            }),
+              return { ...created, result };
+            }
+            return created;
+          }),
+          alarm: Effect.fn("AgentConversationObject.alarm")(function* () {
+            const fired = yield* Cloudflare.processScheduledEvents.pipe(
+              Effect.provideService(Cloudflare.DurableObjectState, state),
+              Effect.provide(RuntimeContext.phantom),
+            );
+            if (fired.some((event) => event.id === AGENT_RUN_RECONCILE_EVENT_ID)) {
+              yield* reconcileAgentConversation(state, coordinator, pi);
+            }
+          }),
           fetch: Effect.gen(function* () {
             const request = yield* HttpServerRequest.HttpServerRequest;
             const webRequest = yield* HttpServerRequest.toWeb(request);
@@ -152,7 +178,7 @@ export const AgentConversationObjectLive = AgentConversationObject.make<never>(
               ),
             );
             return HttpServerResponse.fromWeb(response);
-          }),
+          }).pipe(HttpMiddleware.tracer, HttpMiddleware.logger),
         };
       }).pipe(Effect.provide(objectLayer)),
     );

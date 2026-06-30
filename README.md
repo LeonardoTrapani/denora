@@ -58,3 +58,15 @@ bun run deploy:prod
 ```
 
 Runtime server secrets such as `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, and `WORKOS_COOKIE_PASSWORD` stay in the stage env file as deploy-time inputs. Alchemy reads them through `effect/Config` during Worker init and binds them to Cloudflare as encrypted Worker secrets.
+
+## Local Observability
+
+Alchemy provisions the shared Axiom datasets and an ingest token for every stage, including `local`, then binds the OTLP token/endpoints into the server Worker. Local logs, traces, and metrics go to the shared Denora Axiom datasets with precise tags: `deployment.environment=local`, `alchemy.stage=local`, and `denora.telemetry.source=local-dev`.
+
+Example Axiom query:
+
+```apl
+['denora-logs']
+| where ['deployment.environment'] == "local"
+| where ['denora.telemetry.source'] == "local-dev"
+```
